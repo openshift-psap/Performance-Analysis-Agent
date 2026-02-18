@@ -1,0 +1,24 @@
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+
+WORKDIR /app
+
+
+USER root
+COPY psap-mcp-server/pyproject.toml /app/pyproject.toml
+RUN pip install uv
+RUN uv venv
+RUN source /app/.venv/bin/activate
+RUN uv pip install -r pyproject.toml
+
+# Copy consolidated dashboard CSV as local fallback when S3 is unavailable
+COPY consolidated_dashboard.csv /app/data/consolidated_dashboard.csv
+
+USER default
+
+COPY psap-mcp-server/psap_mcp_server /app/psap_mcp_server
+
+ENV PYTHONPATH=/app
+
+
+CMD ["/app/.venv/bin/python", "-m", "psap_mcp_server.src.main"]

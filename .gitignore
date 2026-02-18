@@ -1,0 +1,12 @@
+# Environment files with credentials — NEVER commit
+.env
+langfuse-keys.txt
+consolidated_dashboard.csv
+
+# macOS
+.DS_Store
+
+# Local-only folders
+performance-dashboard/
+openshift-manifests-haumesh/
+docs/

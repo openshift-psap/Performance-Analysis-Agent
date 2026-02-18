@@ -1,0 +1,153 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["psap_agent"]
+
+[project]
+name = "psap-agent"
+version = "0.1.0"
+description = "PSAP AI Performance Agent for RHAIIS benchmarking analysis"
+readme = "README.md"
+keywords = ["mcp", "psap", "agent", "rhaiis", "performance"]
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi==0.128.5",
+    "uvicorn==0.40.0",
+    "sse-starlette==3.2.0",
+    "python-multipart==0.0.22",
+
+    # LangChain ecosystem (1.x for Gemini 3 support)
+    "langchain==1.2.9",
+    "langchain-community==0.4.1",
+    "langchain-core==1.2.9",
+    "langchain-google-genai==4.2.0",
+    "langchain-groq==1.1.2",
+    "langchain-mcp-adapters==0.2.1",
+
+    # LangGraph ecosystem
+    "langgraph==1.0.8",
+    "langgraph-checkpoint-postgres==3.0.4",
+
+    # Google AI
+    "google-genai==1.62.0",
+
+    # MCP
+    "mcp==1.26.0",
+    "fastmcp==2.14.5",
+
+    # Database
+    "psycopg[binary,pool]==3.3.2",
+    "motor==3.7.1",
+    "pymongo==4.16.0",
+
+    # Observability
+    "langfuse==3.13.0",
+    "structlog==25.5.0",
+
+    # Data processing
+    "pandas==2.3.3",
+    "numpy==2.4.2",
+
+    # Pydantic
+    "pydantic==2.12.5",
+    "pydantic-settings==2.12.0",
+
+    # Auth
+    "authlib==1.6.7",
+    "pyjwt==2.11.0",
+
+    # Utilities
+    "python-dotenv==1.2.1",
+    "httpx==0.28.1",
+    "requests==2.32.5",
+
+    # Cloud integrations
+    "boto3==1.42.44",
+    "snowflake-connector-python==4.2.0",
+
+    # Streamlit (for examples)
+    "streamlit==1.54.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "pytest-asyncio==1.0.0",
+    "pytest-cov==6.2.1",
+    "ruff==0.12.2",
+    "mypy==1.16.1",
+    "pre-commit==4.2.0",
+    "httpx==0.28.1"
+]
+
+[project.scripts]
+psap-agent = "psap_agent.src.main:main"
+
+[project.urls]
+Homepage = "https://github.com/redhat-data-and-ai/psap-agent"
+Repository = "https://github.com/redhat-data-and-ai/psap-agent"
+Issues = "https://github.com/redhat-data-and-ai/psap-agent/issues"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+lint.select = ["E", "W", "F", "I", "F401"]
+lint.ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+]
+markers = ["asyncio"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

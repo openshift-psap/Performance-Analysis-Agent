@@ -1,0 +1,141 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: psap-mcp-server
+  namespace: psap-ai-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: psap-mcp-server
+  template:
+    metadata:
+      labels:
+        app: psap-mcp-server
+    spec:
+      containers:
+      - name: mcp-server
+        image: quay.io/<your-username>/psap-mcp-server:latest  # UPDATE to your registry
+        ports:
+        - containerPort: 5001
+          name: http
+        env:
+        - name: MCP_PORT
+          value: "5001"
+        - name: MCP_HOST
+          value: "0.0.0.0"
+        - name: ENABLE_AUTH
+          value: "false"
+        - name: POSTGRES_HOST
+          value: "psap-postgres"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_PASSWORD
+        - name: GRAFANA_URL
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: GRAFANA_URL
+              optional: true
+        - name: GRAFANA_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: GRAFANA_API_TOKEN
+              optional: true
+        - name: GRAFANA_DATASOURCE_UID
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: GRAFANA_DATASOURCE_UID
+              optional: true
+        # S3 Configuration for performance data
+        - name: S3_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: S3_BUCKET
+              optional: true
+        - name: S3_KEY
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: S3_KEY
+              optional: true
+        - name: S3_REGION
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: S3_REGION
+              optional: true
+        - name: S3_CACHE_TTL_SECONDS
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: S3_CACHE_TTL_SECONDS
+              optional: true
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: AWS_ACCESS_KEY_ID
+              optional: true
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: AWS_SECRET_ACCESS_KEY
+              optional: true
+        # PyTorch profile S3 prefix (model/version/trace_*.json)
+        - name: PROFILE_S3_PREFIX
+          value: "profiles/rhaiis"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5001
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5001
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: psap-mcp-server
+  namespace: psap-ai-agent
+spec:
+  selector:
+    app: psap-mcp-server
+  ports:
+  - port: 5001
+    targetPort: 5001
+    protocol: TCP
+  type: ClusterIP
+

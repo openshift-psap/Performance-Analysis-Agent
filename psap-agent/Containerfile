@@ -1,0 +1,21 @@
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+
+WORKDIR /app
+
+
+USER root
+COPY pyproject.toml /app/pyproject.toml
+RUN pip install uv
+RUN uv venv
+RUN source /app/.venv/bin/activate
+RUN uv pip install -r pyproject.toml
+USER default
+
+
+COPY psap_agent /app/psap_agent
+
+
+ENV PYTHONPATH=/app
+
+CMD ["/app/.venv/bin/python", "-m", "psap_agent.src.main"]

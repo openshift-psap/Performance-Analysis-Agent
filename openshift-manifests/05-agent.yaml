@@ -1,0 +1,102 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: psap-agent
+  namespace: psap-ai-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: psap-agent
+  template:
+    metadata:
+      labels:
+        app: psap-agent
+    spec:
+      containers:
+      - name: agent
+        image: quay.io/<your-username>/psap-agent:latest  # UPDATE to your registry
+        ports:
+        - containerPort: 5002
+          name: http
+        env:
+        - name: AGENT_PORT
+          value: "5002"
+        - name: POSTGRES_HOST
+          value: "psap-postgres"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: POSTGRES_PASSWORD
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: GOOGLE_API_KEY
+        - name: MCP_SERVER_URL
+          value: "http://psap-mcp-server:5001/mcp/"
+        - name: ENABLE_PROMPT_CACHING
+          value: "true"
+        - name: CACHE_TTL_HOURS
+          value: "4"
+        - name: LANGFUSE_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: langfuse-api-keys
+              key: LANGFUSE_PUBLIC_KEY
+        - name: LANGFUSE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: langfuse-api-keys
+              key: LANGFUSE_SECRET_KEY
+        - name: LANGFUSE_HOST
+          value: "http://langfuse:3000"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5002
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5002
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: psap-agent
+  namespace: psap-ai-agent
+spec:
+  selector:
+    app: psap-agent
+  ports:
+  - port: 5002
+    targetPort: 5002
+    protocol: TCP
+  type: ClusterIP
+

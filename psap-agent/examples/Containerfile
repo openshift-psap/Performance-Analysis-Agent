@@ -1,0 +1,52 @@
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+WORKDIR /app
+
+USER root
+
+
+# Copy requirements file
+COPY requirements-streamlit.txt /app/requirements-streamlit.txt
+
+# Install Python packages
+RUN pip install --no-cache-dir -r requirements-streamlit.txt
+
+
+COPY streamlit_app.py /app/streamlit_app.py
+
+# Copy assets (Red Hat logo, etc.)
+COPY assets/ /app/assets/
+
+
+# Create .streamlit directory for configuration
+# Set group permissions for OpenShift (arbitrary UIDs)
+RUN mkdir -p /app/.streamlit && \
+    chgrp -R 0 /app && \
+    chmod -R g=u /app
+
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+
+USER 1001
+
+
+ENV PYTHONUNBUFFERED=1 \
+    STREAMLIT_CONFIG_PATH=/app/.streamlit \
+    STREAMLIT_SERVER_ENABLE_STATIC_SERVING=false \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
+    STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200
+
+EXPOSE 8501
+
+# Streamlit configuration with production-ready flags
+CMD ["streamlit", "run", "streamlit_app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--server.enableCORS=false", \
+     "--server.enableXsrfProtection=false", \
+     "--server.runOnSave=false", \
+     "--browser.gatherUsageStats=false"]
+

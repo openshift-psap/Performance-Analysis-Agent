@@ -1,0 +1,57 @@
+services:
+  pgvector:
+    image: ankane/pgvector
+    container_name: template-agent-pgvector
+    environment:
+      POSTGRES_DB: pgvector
+      POSTGRES_USER: pgvector
+      POSTGRES_PASSWORD: pgvector
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgvector -d pgvector"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - template-network
+
+  template-agent:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: template-agent
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    environment:
+      - AGENT_PORT=8081
+      - POSTGRES_HOST=pgvector
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=pgvector
+      - POSTGRES_USER=pgvector
+      - POSTGRES_PASSWORD=pgvector
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "-k", "http://0.0.0.0:8081/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - template-network
+
+volumes:
+  pgvector_data:
+    driver: local
+
+networks:
+  template-network:
+    driver: bridge
