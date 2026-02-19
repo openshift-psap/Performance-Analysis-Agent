@@ -65,6 +65,36 @@ CATEGORY_GROUPS: Dict[str, Optional[List[str]]] = {
     "all": None,
 }
 
+# Functional pipeline grouping: maps high-level execution pipelines to kernel
+# name patterns.  Used by analyze_performance_insights to produce a
+# category-level breakdown comparable to what a human expert would write.
+FUNCTIONAL_PIPELINES: Dict[str, Dict[str, Any]] = {
+    "moe_execution": {
+        "patterns": ["moe", "expert", "scatter", "gather", "fused_moe", "deep_gemm", "outplace_fused"],
+        "description": "MoE routing + expert GEMM execution pipeline",
+    },
+    "attention": {
+        "patterns": ["attention", "flash", "mla", "paged", "kv_cache", "reshape_and_cache"],
+        "description": "Attention mechanism (MLA / MHA / GQA / Flash / Paged)",
+    },
+    "communication": {
+        "patterns": ["nccl", "allreduce", "allgather", "multimem", "c10d", "all_reduce"],
+        "description": "Inter-GPU collective communication",
+    },
+    "quantization": {
+        "patterns": ["quant", "fp8", "int8", "dequant", "scale", "per_token_group"],
+        "description": "Quantization / dequantization / scaling operations",
+    },
+    "normalization_activation": {
+        "patterns": ["layernorm", "rmsnorm", "rms_norm", "silu", "gelu", "activation", "act_and_mul"],
+        "description": "Normalization (RMSNorm/LayerNorm) and activation functions",
+    },
+    "gemm_linear": {
+        "patterns": ["gemm", "matmul", "aten::mm", "aten::bmm", "aten::linear", "cublas", "cutlass"],
+        "description": "Standalone matrix multiplication / linear layers (not MoE)",
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Profile index cache  (discovery results: model -> version -> rank -> entry)
 # ---------------------------------------------------------------------------
@@ -922,6 +952,14 @@ async def compare_pytorch_profiles(
             if total1 > 0 or total2 > 0:
                 diff_abs = total2 - total1
                 diff_pct = ((total2 - total1) / total1 * 100) if total1 > 0 else (100.0 if total2 > 0 else 0.0)
+
+                count1 = s1.get("count", 0)
+                count2 = s2.get("count", 0)
+                avg1 = s1.get("avg_dur", 0)
+                avg2 = s2.get("avg_dur", 0)
+                count_change_pct = ((count2 - count1) / count1 * 100) if count1 > 0 else (100.0 if count2 > 0 else 0.0)
+                avg_change_pct = ((avg2 - avg1) / avg1 * 100) if avg1 > 0 else (100.0 if avg2 > 0 else 0.0)
+
                 diffs.append(
                     {
                         "name": kernel,
@@ -930,10 +968,14 @@ async def compare_pytorch_profiles(
                         "total2_us": total2,
                         "total1_human": _format_duration(total1),
                         "total2_human": _format_duration(total2),
-                        "count1": s1.get("count", 0),
-                        "count2": s2.get("count", 0),
-                        "avg1_us": s1.get("avg_dur", 0),
-                        "avg2_us": s2.get("avg_dur", 0),
+                        "count1": count1,
+                        "count2": count2,
+                        "count_change_pct": round(count_change_pct, 2),
+                        "avg1_us": avg1,
+                        "avg2_us": avg2,
+                        "avg1_human": _format_duration(avg1),
+                        "avg2_human": _format_duration(avg2),
+                        "avg_change_pct": round(avg_change_pct, 2),
                         "diff_abs_us": diff_abs,
                         "diff_abs_human": _format_duration(abs(diff_abs)),
                         "diff_pct": round(diff_pct, 2),
@@ -956,6 +998,56 @@ async def compare_pytorch_profiles(
 
         regression_impact = sum(d["diff_abs_us"] for d in regressions)
         improvement_impact = sum(abs(d["diff_abs_us"]) for d in improvements)
+
+        # Pipeline breakdown (reuse FUNCTIONAL_PIPELINES from module level)
+        def _pipeline_summary(s1: Dict, s2: Dict) -> List[Dict]:
+            kernel_names = {n for n, d in s1.items() if d.get("cat") == "kernel"} | \
+                           {n for n, d in s2.items() if d.get("cat") == "kernel"}
+            assigned: Dict[str, str] = {}
+            for name in kernel_names:
+                nl = name.lower()
+                for pipe_name, pipe_cfg in FUNCTIONAL_PIPELINES.items():
+                    if any(pat in nl for pat in pipe_cfg["patterns"]):
+                        assigned[name] = pipe_name
+                        break
+            buckets: Dict[str, Dict[str, float]] = {}
+            for pipe_name in list(FUNCTIONAL_PIPELINES.keys()) + ["other"]:
+                buckets[pipe_name] = {"v1": 0.0, "v2": 0.0, "v1_calls": 0, "v2_calls": 0}
+            for name in kernel_names:
+                pipe = assigned.get(name, "other")
+                buckets[pipe]["v1"] += s1.get(name, {}).get("total_dur", 0)
+                buckets[pipe]["v2"] += s2.get(name, {}).get("total_dur", 0)
+                buckets[pipe]["v1_calls"] += s1.get(name, {}).get("count", 0)
+                buckets[pipe]["v2_calls"] += s2.get(name, {}).get("count", 0)
+            result = []
+            for pn, b in sorted(buckets.items(), key=lambda x: max(x[1]["v1"], x[1]["v2"]), reverse=True):
+                if b["v1"] == 0 and b["v2"] == 0:
+                    continue
+                desc = FUNCTIONAL_PIPELINES.get(pn, {}).get("description", "Other kernels")
+                ch = ((b["v2"] - b["v1"]) / b["v1"] * 100) if b["v1"] > 0 else 0.0
+                result.append({
+                    "pipeline": pn,
+                    "description": desc,
+                    "v1_time_ms": round(b["v1"] / 1e3, 1),
+                    "v2_time_ms": round(b["v2"] / 1e3, 1),
+                    "change_pct": round(ch, 1),
+                    "delta_ms": round((b["v2"] - b["v1"]) / 1e3, 1),
+                })
+            return result
+
+        pipeline_breakdown = _pipeline_summary(filtered1, filtered2)
+
+        # Event count summary (total events by category)
+        def _event_counts(s: Dict) -> Dict[str, int]:
+            counts: Dict[str, int] = defaultdict(int)
+            for d in s.values():
+                cat = d.get("cat", "other") or "other"
+                counts[cat] += d.get("count", 0)
+            counts["total"] = sum(counts.values())
+            return dict(counts)
+
+        event_counts_v1 = _event_counts(stats1)
+        event_counts_v2 = _event_counts(stats2)
 
         return {
             "status": "success",
@@ -993,6 +1085,11 @@ async def compare_pytorch_profiles(
                 f"{'slower' if total_diff > 0 else 'faster'} than {mv1}. "
                 f"Found {len(regressions)} regressions and {len(improvements)} improvements."
             ),
+            "pipeline_breakdown": pipeline_breakdown,
+            "event_counts": {
+                "v1": event_counts_v1,
+                "v2": event_counts_v2,
+            },
             "profile_info": {
                 "model": model_info["model_id"],
                 "gpus": model_info["gpus"],
@@ -1002,6 +1099,8 @@ async def compare_pytorch_profiles(
                 "Use map_kernel_to_vllm_code to find source files for top regressions",
                 f"Use compare_vllm_versions('{mv1}', '{mv2}') to see release notes between versions",
                 "Use get_vllm_pull_request to investigate specific PRs mentioned in release notes",
+                f"Use fetch_vllm_source to read actual implementation of changed kernels",
+                f"Use get_vllm_code_diff('{mv1}', '{mv2}', '<file_path>') to see exact code changes",
             ],
         }
 
@@ -1161,6 +1260,80 @@ async def analyze_performance_insights(
         moe_analysis = analyze_domain(["moe", "expert", "fused_moe"])
         attention_analysis = analyze_domain(["attention", "flash", "mla"])
 
+        # 5b. Functional Pipeline Breakdown
+        # Assigns every kernel (with cat=="kernel") to at most one pipeline
+        # based on the first matching pattern set, then summarises per-pipeline.
+        def _build_pipeline_breakdown(
+            s1: Dict[str, Dict], s2: Dict[str, Dict]
+        ) -> List[Dict[str, Any]]:
+            all_kernel_names = set()
+            for n, d in s1.items():
+                if d.get("cat") == "kernel":
+                    all_kernel_names.add(n)
+            for n, d in s2.items():
+                if d.get("cat") == "kernel":
+                    all_kernel_names.add(n)
+
+            assigned: Dict[str, str] = {}  # kernel_name -> pipeline_name
+            for name in all_kernel_names:
+                name_lower = name.lower()
+                for pipe_name, pipe_cfg in FUNCTIONAL_PIPELINES.items():
+                    if any(pat in name_lower for pat in pipe_cfg["patterns"]):
+                        assigned[name] = pipe_name
+                        break
+
+            pipeline_stats: Dict[str, Dict[str, float]] = {}
+            for pipe_name in FUNCTIONAL_PIPELINES:
+                pipeline_stats[pipe_name] = {
+                    "v1_us": 0.0, "v2_us": 0.0,
+                    "v1_calls": 0, "v2_calls": 0,
+                    "v1_kernels": 0, "v2_kernels": 0,
+                }
+            pipeline_stats["other"] = {
+                "v1_us": 0.0, "v2_us": 0.0,
+                "v1_calls": 0, "v2_calls": 0,
+                "v1_kernels": 0, "v2_kernels": 0,
+            }
+
+            for name in all_kernel_names:
+                pipe = assigned.get(name, "other")
+                d1 = s1.get(name, {})
+                d2 = s2.get(name, {})
+                pipeline_stats[pipe]["v1_us"] += d1.get("total_dur", 0)
+                pipeline_stats[pipe]["v2_us"] += d2.get("total_dur", 0)
+                pipeline_stats[pipe]["v1_calls"] += d1.get("count", 0)
+                pipeline_stats[pipe]["v2_calls"] += d2.get("count", 0)
+                if d1.get("total_dur", 0) > 0:
+                    pipeline_stats[pipe]["v1_kernels"] += 1
+                if d2.get("total_dur", 0) > 0:
+                    pipeline_stats[pipe]["v2_kernels"] += 1
+
+            result = []
+            for pipe_name, ps in sorted(
+                pipeline_stats.items(),
+                key=lambda x: max(x[1]["v1_us"], x[1]["v2_us"]),
+                reverse=True,
+            ):
+                if ps["v1_us"] == 0 and ps["v2_us"] == 0:
+                    continue
+                desc = FUNCTIONAL_PIPELINES.get(pipe_name, {}).get("description", "Other kernels")
+                change_pct = _pct(ps["v1_us"] or 1, ps["v2_us"])
+                result.append({
+                    "pipeline": pipe_name,
+                    "description": desc,
+                    "v1_time_ms": round(ps["v1_us"] / 1e3, 1),
+                    "v2_time_ms": round(ps["v2_us"] / 1e3, 1),
+                    "change_pct": round(change_pct, 1),
+                    "v1_calls": int(ps["v1_calls"]),
+                    "v2_calls": int(ps["v2_calls"]),
+                    "v1_unique_kernels": int(ps["v1_kernels"]),
+                    "v2_unique_kernels": int(ps["v2_kernels"]),
+                    "delta_ms": round((ps["v2_us"] - ps["v1_us"]) / 1e3, 1),
+                })
+            return result
+
+        pipeline_breakdown = _build_pipeline_breakdown(stats1, stats2)
+
         # 6. Expert Conclusions
         conclusions: List[Dict] = []
         recommendations: List[str] = []
@@ -1284,6 +1457,7 @@ async def analyze_performance_insights(
                 "moe_kernels": moe_analysis,
                 "attention_kernels": attention_analysis,
             },
+            "pipeline_breakdown": pipeline_breakdown,
             "new_kernels_significant": [
                 {"name": n[:60], "time_s": round(d.get("total_dur", 0) / 1e6, 2)}
                 for n, d in sorted(only_v2.items(), key=lambda x: x[1].get("total_dur", 0), reverse=True)[:5]

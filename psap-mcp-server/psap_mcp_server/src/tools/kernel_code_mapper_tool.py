@@ -3,8 +3,13 @@
 This tool helps correlate kernel-level performance data from PyTorch profiler
 with the actual vLLM source code that implements those operations. Useful for
 understanding which code paths are responsible for performance characteristics.
+
+Also provides dynamic source code fetching and cross-version diff capabilities
+via the GitHub Contents and Compare APIs, enabling the agent to read actual
+vLLM implementation code and see exactly what changed between releases.
 """
 
+import base64
 import re
 from typing import Any, Dict, List, Optional
 
@@ -528,3 +533,281 @@ async def correlate_kernel_with_changes(
             "status": "error",
             "message": f"Failed to correlate kernel: {str(e)}",
         }
+
+
+# Max file size to return to the agent (avoid blowing up LLM context)
+_MAX_SOURCE_BYTES = 50_000
+
+
+async def fetch_vllm_source(
+    file_path: str,
+    version: str = "v0.13.0",
+) -> Dict[str, Any]:
+    """Fetch actual vLLM source code from GitHub at a specific version tag.
+    
+    Retrieves the full file content from the vLLM repository at the given
+    version. Use this to read the actual implementation of kernels, layers,
+    or configuration files that are relevant to performance analysis.
+    
+    No pre-cloning is needed -- files are fetched on demand via the GitHub
+    Contents API.
+    
+    TOOL_NAME=fetch_vllm_source
+    DISPLAY_NAME=Fetch vLLM Source Code
+    USECASE=Read actual vLLM source code at a specific version. Use after map_kernel_to_vllm_code identifies relevant files, to understand the implementation details behind a kernel or optimization.
+    INSTRUCTIONS=1. Provide the file path relative to the vLLM repo root (e.g., "vllm/model_executor/layers/fused_moe/fused_moe.py"), 2. Specify the vLLM version tag (e.g., "v0.13.0" or "v0.11.2"), 3. Compare files across versions to understand code changes
+    INPUT_DESCRIPTION=file_path (str): Path relative to vLLM repo root; version (str): Git tag (default: v0.13.0)
+    OUTPUT_DESCRIPTION=Dictionary with file content, metadata, and GitHub URL
+    EXAMPLES=fetch_vllm_source("vllm/model_executor/layers/fused_moe/fused_moe.py", "v0.13.0"), fetch_vllm_source("vllm/attention/backends/flash_attn.py", "v0.11.2")
+    PREREQUISITES=Internet access to GitHub API. Optional: GITHUB_TOKEN for higher rate limits
+    RELATED_TOOLS=map_kernel_to_vllm_code, get_vllm_code_diff, correlate_kernel_with_changes
+    
+    Args:
+        file_path: Path relative to the vLLM repo root.
+        version: Git tag or ref to fetch from (default: "v0.13.0").
+    
+    Returns:
+        Dictionary containing:
+        - status: "success" or "error"
+        - file_path: The requested path
+        - version: The version fetched
+        - content: The file content (truncated if very large)
+        - size_bytes: Original file size
+        - truncated: Whether content was truncated
+        - github_url: Direct link to view the file on GitHub
+    """
+    try:
+        version = _normalize_version(version)
+        # Strip leading slash if present
+        file_path = file_path.lstrip("/")
+
+        url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/contents/{file_path}"
+        params = {"ref": version}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = _get_github_headers()
+            response = await client.get(url, headers=headers, params=params)
+
+            if response.status_code == 404:
+                return {
+                    "status": "error",
+                    "message": f"File '{file_path}' not found at version {version}.",
+                    "suggestion": f"Check the path exists: https://github.com/{VLLM_REPO}/tree/{version}/{file_path}",
+                }
+            if response.status_code == 403:
+                return {
+                    "status": "error",
+                    "message": "GitHub API rate limit exceeded. Set GITHUB_TOKEN for higher limits.",
+                }
+            if response.status_code != 200:
+                return {
+                    "status": "error",
+                    "message": f"GitHub API error: HTTP {response.status_code}",
+                    "details": response.text[:500],
+                }
+
+            data = response.json()
+
+            # Handle directory listings
+            if isinstance(data, list):
+                entries = [
+                    {"name": e.get("name"), "type": e.get("type"), "path": e.get("path")}
+                    for e in data
+                ]
+                return {
+                    "status": "success",
+                    "file_path": file_path,
+                    "version": version,
+                    "type": "directory",
+                    "entries": entries,
+                    "message": f"'{file_path}' is a directory with {len(entries)} entries at {version}",
+                    "github_url": f"https://github.com/{VLLM_REPO}/tree/{version}/{file_path}",
+                }
+
+            # Decode file content
+            encoding = data.get("encoding", "")
+            raw_content = data.get("content", "")
+            size_bytes = data.get("size", 0)
+
+            if encoding == "base64":
+                content = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+            else:
+                content = raw_content
+
+            truncated = False
+            if len(content) > _MAX_SOURCE_BYTES:
+                content = content[:_MAX_SOURCE_BYTES]
+                truncated = True
+
+            return {
+                "status": "success",
+                "file_path": file_path,
+                "version": version,
+                "type": "file",
+                "content": content,
+                "size_bytes": size_bytes,
+                "line_count": content.count("\n") + 1,
+                "truncated": truncated,
+                "github_url": f"https://github.com/{VLLM_REPO}/blob/{version}/{file_path}",
+                "message": f"Fetched {file_path} at {version} ({size_bytes:,} bytes, {content.count(chr(10))+1} lines)"
+                + (" [truncated]" if truncated else ""),
+            }
+
+    except httpx.TimeoutException:
+        return {"status": "error", "message": "GitHub API request timed out"}
+    except Exception as e:
+        logger.error(f"Error fetching vLLM source: {e}")
+        return {"status": "error", "message": f"Failed to fetch source: {str(e)}"}
+
+
+async def get_vllm_code_diff(
+    version1: str,
+    version2: str,
+    file_path: Optional[str] = None,
+    max_files: int = 10,
+) -> Dict[str, Any]:
+    """Fetch actual code diff between two vLLM versions, optionally for a specific file.
+    
+    Uses the GitHub Compare API to retrieve patch content showing exactly what
+    lines changed between two releases. This is the key tool for explaining
+    the mechanism behind performance changes -- it lets you see the actual
+    code modifications.
+    
+    TOOL_NAME=get_vllm_code_diff
+    DISPLAY_NAME=Get vLLM Code Diff
+    USECASE=See exactly what code changed between two vLLM versions. Use after identifying performance-relevant source files with map_kernel_to_vllm_code to understand the mechanism behind kernel timing changes.
+    INSTRUCTIONS=1. Provide two version tags, 2. Optionally scope to a specific file path, 3. Without file_path returns top changed performance-relevant files with patches
+    INPUT_DESCRIPTION=version1 (str): Baseline version tag; version2 (str): Comparison version tag; file_path (str, optional): Specific file to diff; max_files (int): Max files to return patches for (default 10)
+    OUTPUT_DESCRIPTION=Dictionary with patch content for changed files, stats, and GitHub compare URL
+    EXAMPLES=get_vllm_code_diff("v0.11.2", "v0.13.0", "vllm/model_executor/layers/fused_moe/fused_moe.py"), get_vllm_code_diff("v0.11.2", "v0.13.0")
+    PREREQUISITES=Internet access to GitHub API. Optional: GITHUB_TOKEN for higher rate limits
+    RELATED_TOOLS=fetch_vllm_source, map_kernel_to_vllm_code, compare_vllm_versions, correlate_kernel_with_changes
+    
+    Args:
+        version1: Baseline version (e.g., "v0.11.2").
+        version2: Comparison version (e.g., "v0.13.0").
+        file_path: If provided, only return the diff for this file.
+        max_files: Maximum number of file patches to return (default: 10).
+    
+    Returns:
+        Dictionary containing:
+        - status: "success" or "error"
+        - version_range: The two versions compared
+        - files: List of changed files with patch content
+        - stats: Overall diff statistics
+        - github_compare_url: Link to the full comparison on GitHub
+    """
+    try:
+        version1 = _normalize_version(version1)
+        version2 = _normalize_version(version2)
+
+        url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/compare/{version1}...{version2}"
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            headers = _get_github_headers()
+            response = await client.get(url, headers=headers)
+
+            if response.status_code == 404:
+                return {
+                    "status": "error",
+                    "message": f"Could not compare {version1}...{version2}. Check that both tags exist.",
+                }
+            if response.status_code == 403:
+                return {
+                    "status": "error",
+                    "message": "GitHub API rate limit exceeded. Set GITHUB_TOKEN for higher limits.",
+                }
+            if response.status_code != 200:
+                return {
+                    "status": "error",
+                    "message": f"GitHub API error: HTTP {response.status_code}",
+                    "details": response.text[:500],
+                }
+
+            data = response.json()
+
+            total_commits = len(data.get("commits", []))
+            all_files = data.get("files", [])
+
+            # Performance-related path keywords for prioritisation
+            perf_keywords = [
+                "attention", "moe", "fused_moe", "quantization", "fp8",
+                "kernel", "csrc", "distributed", "scheduler", "cache",
+                "activation", "layernorm", "linear", "sampler", "deep_gemm",
+            ]
+
+            if file_path:
+                file_path = file_path.lstrip("/")
+                matched = [f for f in all_files if f.get("filename") == file_path]
+                if not matched:
+                    available = [f.get("filename") for f in all_files if any(kw in f.get("filename", "").lower() for kw in perf_keywords)][:20]
+                    return {
+                        "status": "error",
+                        "message": f"File '{file_path}' was not changed between {version1} and {version2}.",
+                        "suggestion": "The file may not have been modified, or the path may be wrong.",
+                        "performance_related_changed_files": available,
+                    }
+                target_files = matched
+            else:
+                # Prioritise performance-relevant files
+                def _perf_score(f: dict) -> int:
+                    name = f.get("filename", "").lower()
+                    return sum(1 for kw in perf_keywords if kw in name)
+
+                scored = [(f, _perf_score(f)) for f in all_files]
+                scored.sort(key=lambda x: (-x[1], -x[0].get("changes", 0)))
+                target_files = [f for f, _ in scored[:max_files]]
+
+            files_result: List[Dict[str, Any]] = []
+            total_patch_size = 0
+            patch_budget = _MAX_SOURCE_BYTES
+
+            for f in target_files:
+                patch = f.get("patch", "")
+                # Truncate individual patches that are too large
+                if total_patch_size + len(patch) > patch_budget:
+                    remaining = max(0, patch_budget - total_patch_size)
+                    patch = patch[:remaining] + "\n... [patch truncated]"
+                    truncated = True
+                else:
+                    truncated = False
+
+                total_patch_size += len(patch)
+
+                files_result.append({
+                    "filename": f.get("filename"),
+                    "status": f.get("status"),  # added, removed, modified, renamed
+                    "additions": f.get("additions", 0),
+                    "deletions": f.get("deletions", 0),
+                    "changes": f.get("changes", 0),
+                    "patch": patch,
+                    "patch_truncated": truncated,
+                })
+
+                if total_patch_size >= patch_budget:
+                    break
+
+            return {
+                "status": "success",
+                "version_range": {"from": version1, "to": version2},
+                "total_commits": total_commits,
+                "total_files_changed": len(all_files),
+                "files_returned": len(files_result),
+                "files": files_result,
+                "stats": {
+                    "total_additions": sum(f.get("additions", 0) for f in all_files),
+                    "total_deletions": sum(f.get("deletions", 0) for f in all_files),
+                },
+                "github_compare_url": f"https://github.com/{VLLM_REPO}/compare/{version1}...{version2}",
+                "message": (
+                    f"Diff {version1}...{version2}: {len(all_files)} files changed, "
+                    f"returning {len(files_result)} "
+                    + (f"(filtered to '{file_path}')" if file_path else "(top performance-relevant)")
+                ),
+            }
+
+    except httpx.TimeoutException:
+        return {"status": "error", "message": "GitHub API request timed out (comparison may be very large)"}
+    except Exception as e:
+        logger.error(f"Error fetching vLLM code diff: {e}")
+        return {"status": "error", "message": f"Failed to fetch diff: {str(e)}"}

@@ -763,6 +763,7 @@ async def get_vllm_pull_request(
     pr_number: int,
     include_files: bool = True,
     include_comments: bool = False,
+    include_patches: bool = False,
 ) -> Dict[str, Any]:
     """Get details about a specific vLLM pull request to understand what changed.
     
@@ -773,17 +774,21 @@ async def get_vllm_pull_request(
     TOOL_NAME=get_vllm_pull_request
     DISPLAY_NAME=Get vLLM Pull Request Details
     USECASE=Fetch detailed information about a specific vLLM pull request to understand what code changes were made. Useful when release notes reference a PR number (e.g., #12345) and you need to understand the impact.
-    INSTRUCTIONS=1. Provide the PR number (e.g., 12345 from "#12345" in release notes), 2. Optionally include files changed for detailed analysis, 3. Use to understand specific changes that might affect performance
-    INPUT_DESCRIPTION=pr_number (int): The pull request number (e.g., 12345); include_files (bool): Include list of files changed (default: True); include_comments (bool): Include PR comments (default: False)
-    OUTPUT_DESCRIPTION=Dictionary with PR title, description, author, labels, files changed analysis, and performance-related categorization
-    EXAMPLES=get_vllm_pull_request(12345), get_vllm_pull_request(pr_number=28439, include_files=True)
+    INSTRUCTIONS=1. Provide the PR number (e.g., 12345 from "#12345" in release notes), 2. Optionally include files changed for detailed analysis, 3. Set include_patches=True to get actual diff content for performance-related files
+    INPUT_DESCRIPTION=pr_number (int): The pull request number (e.g., 12345); include_files (bool): Include list of files changed (default: True); include_comments (bool): Include PR comments (default: False); include_patches (bool): Include actual diff/patch content for performance-related files (default: False)
+    OUTPUT_DESCRIPTION=Dictionary with PR title, description, author, labels, files changed analysis, patch content, and performance-related categorization
+    EXAMPLES=get_vllm_pull_request(12345), get_vllm_pull_request(pr_number=28439, include_patches=True)
     PREREQUISITES=Internet access to GitHub API. Optional: GITHUB_TOKEN for higher rate limits
-    RELATED_TOOLS=get_vllm_release_notes, compare_vllm_versions
+    RELATED_TOOLS=get_vllm_release_notes, compare_vllm_versions, fetch_vllm_source, get_vllm_code_diff
     
     Args:
         pr_number: The pull request number (integer, not the full URL)
         include_files: Whether to fetch and analyze files changed (default: True)
         include_comments: Whether to include PR comments/discussion (default: False)
+        include_patches: Whether to include actual patch/diff content for
+            performance-related files (default: False). When True, the response
+            includes a ``patches`` list with the diff content for files matching
+            performance indicators (attention, kernel, moe, quantization, etc.).
     
     Returns:
         Dictionary containing:
@@ -797,6 +802,7 @@ async def get_vllm_pull_request(
         - created_at: When PR was created
         - merged_at: When PR was merged (if merged)
         - files_analysis: Analysis of files changed (if include_files=True)
+        - patches: List of diffs for performance-related files (if include_patches=True)
         - performance_relevance: Assessment of performance impact potential
         - html_url: Link to the PR on GitHub
     """
@@ -876,22 +882,60 @@ async def get_vllm_pull_request(
             }
             
             # Fetch files changed if requested
-            if include_files:
+            if include_files or include_patches:
                 files_url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/pulls/{pr_number}/files"
                 files_response = await client.get(files_url, headers=headers, params={"per_page": 100})
                 
                 if files_response.status_code == 200:
                     files_data = files_response.json()
-                    result["files_analysis"] = _analyze_files_changed(files_data)
-                    result["files_count"] = len(files_data)
-                    
-                    # Update performance relevance based on files
-                    key_files = result["files_analysis"].get("key_files", [])
-                    if key_files:
-                        perf_relevance["likely_performance_impact"] = True
-                        perf_relevance["performance_related_files"] = len(key_files)
+
+                    if include_files:
+                        result["files_analysis"] = _analyze_files_changed(files_data)
+                        result["files_count"] = len(files_data)
+                        
+                        # Update performance relevance based on files
+                        key_files = result["files_analysis"].get("key_files", [])
+                        if key_files:
+                            perf_relevance["likely_performance_impact"] = True
+                            perf_relevance["performance_related_files"] = len(key_files)
+
+                    if include_patches:
+                        _perf_kws = [
+                            "attention", "kernel", "cuda", "rocm", "quantization",
+                            "scheduler", "memory", "cache", "speculative",
+                            "distributed", "parallel", "csrc", "moe", "fused_moe",
+                            "deep_gemm", "activation", "layernorm",
+                        ]
+                        patches = []
+                        total_patch_size = 0
+                        max_patch_budget = 50_000
+                        for f in files_data:
+                            fname = f.get("filename", "")
+                            patch = f.get("patch", "")
+                            if not patch:
+                                continue
+                            fname_lower = fname.lower()
+                            if not any(kw in fname_lower for kw in _perf_kws):
+                                continue
+                            if total_patch_size + len(patch) > max_patch_budget:
+                                remaining = max(0, max_patch_budget - total_patch_size)
+                                patch = patch[:remaining] + "\n... [patch truncated]"
+                            total_patch_size += len(patch)
+                            patches.append({
+                                "filename": fname,
+                                "additions": f.get("additions", 0),
+                                "deletions": f.get("deletions", 0),
+                                "patch": patch,
+                            })
+                            if total_patch_size >= max_patch_budget:
+                                break
+                        result["patches"] = patches
+                        result["patches_count"] = len(patches)
                 else:
-                    result["files_analysis"] = {"error": "Could not fetch files"}
+                    if include_files:
+                        result["files_analysis"] = {"error": "Could not fetch files"}
+                    if include_patches:
+                        result["patches"] = []
             
             # Fetch comments if requested
             if include_comments:

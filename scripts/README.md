@@ -100,6 +100,44 @@ After uploading, verify the files are in S3:
 aws s3 ls s3://psap-dashboard-data/profiles/rhaiis/deepseek-r1/vLLM-0.11.2/
 ```
 
+## Troubleshooting: Incomplete Multipart Uploads
+
+If an upload fails or is cancelled mid-transfer, S3 may leave behind incomplete multipart upload fragments. These are invisible in the S3 console but still consume storage. AWS will show a banner:
+
+> *"Clean up incomplete multipart uploads — you might be storing multipart uploads that can't be viewed on the console."*
+
+**List incomplete uploads:**
+
+```bash
+aws s3api list-multipart-uploads --bucket psap-dashboard-data
+```
+
+**Abort a specific incomplete upload:**
+
+```bash
+aws s3api abort-multipart-upload \
+  --bucket psap-dashboard-data \
+  --key "profiles/rhaiis/<model>/<version>/<filename>.json" \
+  --upload-id "<UploadId from list command>"
+```
+
+**Abort all incomplete uploads at once:**
+
+```bash
+aws s3api list-multipart-uploads --bucket psap-dashboard-data \
+  --query 'Uploads[].{Key: Key, UploadId: UploadId}' --output json \
+  | python3 -c "
+import json, subprocess, sys
+for u in json.load(sys.stdin):
+    print(f\"Aborting: {u['Key']} ({u['UploadId'][:20]}...)\")
+    subprocess.run(['aws', 's3api', 'abort-multipart-upload',
+                    '--bucket', 'psap-dashboard-data',
+                    '--key', u['Key'], '--upload-id', u['UploadId']])
+"
+```
+
+
+
 ## What Happens After Upload
 
 - The MCP server will **automatically discover** the new profiles on the next request (no restart needed).

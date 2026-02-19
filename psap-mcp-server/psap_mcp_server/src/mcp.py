@@ -57,6 +57,8 @@ from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     map_kernel_to_vllm_code,
     get_kernel_categories,
     correlate_kernel_with_changes,
+    fetch_vllm_source,
+    get_vllm_code_diff,
 )
 from psap_mcp_server.utils.pylogger import (
     force_reconfigure_all_loggers,
@@ -117,6 +119,8 @@ class TemplateMCPServer:
         - map_kernel_to_vllm_code: Map kernel names to vLLM source code locations
         - get_kernel_categories: Get information about kernel categories
         - correlate_kernel_with_changes: Correlate kernel performance with code changes
+        - fetch_vllm_source: Fetch actual vLLM source code from GitHub at a specific version
+        - get_vllm_code_diff: Fetch code diff between two vLLM versions for specific files
         """
         # Register performance analysis tools
         self.mcp.tool()(query_performance_metrics)
@@ -145,3 +149,6 @@ class TemplateMCPServer:
         self.mcp.tool()(map_kernel_to_vllm_code)
         self.mcp.tool()(get_kernel_categories)
         self.mcp.tool()(correlate_kernel_with_changes)
+        # Register vLLM source code access tools
+        self.mcp.tool()(fetch_vllm_source)
+        self.mcp.tool()(get_vllm_code_diff)

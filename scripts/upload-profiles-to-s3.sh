@@ -137,25 +137,69 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 echo ""
 
-# ---------- Upload ----------
-TOTAL=0
+# ---------- Upload with retries ----------
+MAX_RETRIES=3
+SUCCEEDED=0
+FAILED=0
+FAILED_FILES=()
 
-for filename in "${UPLOAD_FILES[@]}"; do
-    json_file="${LOCAL_FOLDER}/${filename}"
-    s3_key="${PREFIX}/${MODEL_NAME}/${VERSION}/${filename}"
+upload_and_verify() {
+    local json_file="$1"
+    local s3_key="$2"
 
-    log_info "$filename -> s3://$BUCKET/$s3_key"
-    if ! aws s3 cp "$json_file" "s3://$BUCKET/$s3_key"; then
-        log_err "Failed to upload $filename"
-        exit 1
+    aws s3 cp --no-progress "$json_file" "s3://$BUCKET/$s3_key" >/dev/null 2>&1 || return 1
+    aws s3api head-object --bucket "$BUCKET" --key "$s3_key" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+PENDING_FILES=("${UPLOAD_FILES[@]}")
+
+for attempt in $(seq 1 $MAX_RETRIES); do
+    STILL_FAILING=()
+
+    if [ "$attempt" -gt 1 ]; then
+        echo ""
+        log_info "Retry attempt $attempt/$MAX_RETRIES for ${#PENDING_FILES[@]} file(s)..."
+        sleep 2
     fi
-    TOTAL=$((TOTAL + 1))
+
+    for filename in "${PENDING_FILES[@]}"; do
+        json_file="${LOCAL_FOLDER}/${filename}"
+        s3_key="${PREFIX}/${MODEL_NAME}/${VERSION}/${filename}"
+
+        [ "$attempt" -eq 1 ] && log_info "$filename -> s3://$BUCKET/$s3_key"
+
+        if upload_and_verify "$json_file" "$s3_key"; then
+            log_ok "$filename"
+            SUCCEEDED=$((SUCCEEDED + 1))
+        else
+            if [ "$attempt" -eq "$MAX_RETRIES" ]; then
+                log_err "$filename (failed after $MAX_RETRIES attempts)"
+                FAILED=$((FAILED + 1))
+                FAILED_FILES+=("$filename")
+            else
+                log_err "$filename (will retry)"
+                STILL_FAILING+=("$filename")
+            fi
+        fi
+    done
+
+    PENDING_FILES=("${STILL_FAILING[@]}")
+    [ ${#PENDING_FILES[@]} -eq 0 ] && break
 done
 
 # ---------- Summary ----------
 echo ""
 echo "========================================"
-log_ok "Uploaded $TOTAL file(s) to s3://$BUCKET/$PREFIX/$MODEL_NAME/$VERSION/"
+if [ $SUCCEEDED -gt 0 ]; then
+    log_ok "Uploaded $SUCCEEDED / ${#UPLOAD_FILES[@]} file(s) to s3://$BUCKET/$PREFIX/$MODEL_NAME/$VERSION/"
+fi
+if [ $FAILED -gt 0 ]; then
+    log_err "Failed $FAILED file(s) after $MAX_RETRIES attempts:"
+    for f in "${FAILED_FILES[@]}"; do
+        echo "        - $f"
+    done
+fi
 if [ ${#SKIP_FILES[@]} -gt 0 ]; then
     log_skip "Skipped ${#SKIP_FILES[@]} file(s) (no 'rank' in filename)"
 fi
@@ -167,3 +211,7 @@ echo ""
 echo "The MCP server will discover these profiles automatically."
 echo "No restart is needed -- profiles are discovered on each request"
 echo "(cached for 5 minutes)."
+
+if [ $FAILED -gt 0 ]; then
+    exit 1
+fi
