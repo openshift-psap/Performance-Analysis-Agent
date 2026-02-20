@@ -28,7 +28,7 @@ class TestAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["service"] == "template-mcp-server"
+        assert data["service"] == "psap-mcp-server"
         assert "transport_protocol" in data
         assert data["version"] == "0.1.0"
 

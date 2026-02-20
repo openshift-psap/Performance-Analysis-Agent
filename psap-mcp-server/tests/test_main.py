@@ -236,7 +236,7 @@ class TestMain:
             pass  # Expected behavior
 
         # Assert
-        mock_logger.info.assert_called_with("Template MCP server shutting down")
+        mock_logger.info.assert_called_with("PSAP MCP server shutting down")
         # The actual implementation might exit with 1 instead of 0
         mock_sys.exit.assert_called_with(1)
 

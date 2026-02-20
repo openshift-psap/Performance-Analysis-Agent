@@ -1,1 +1,1 @@
-"""Tools package for template MCP server."""
+"""Tools package for PSAP MCP server."""

@@ -85,4 +85,4 @@ local:
 	@echo "Starting MCP server locally on port 5001..."
 	@echo "Health check available at: http://localhost:5001/health"
 	@echo "Press Ctrl+C to stop the server"
-	@. .venv/bin/activate && python -m template_mcp_server.src.main
+	@. .venv/bin/activate && python -m psap_mcp_server.src.main

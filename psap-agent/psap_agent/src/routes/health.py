@@ -1,7 +1,7 @@
-"""Health check route for the template agent API.
+"""Health check route for the PSAP agent API.
 
 This module provides health check endpoints to monitor the status
-and availability of the template agent service.
+and availability of the PSAP agent service.
 """
 
 from fastapi import APIRouter
@@ -12,7 +12,7 @@ router = APIRouter()
 
 @router.get("/health")
 async def health_check() -> JSONResponse:
-    """Perform a health check on the template agent service.
+    """Perform a health check on the PSAP agent service.
 
     This endpoint is used to verify that the service is running and
     responding to requests. It returns a simple JSON response indicating
@@ -21,4 +21,4 @@ async def health_check() -> JSONResponse:
     Returns:
         A JSONResponse containing the service status and name.
     """
-    return JSONResponse(content={"status": "healthy", "service": "Template Agent"})
+    return JSONResponse(content={"status": "healthy", "service": "PSAP Agent"})

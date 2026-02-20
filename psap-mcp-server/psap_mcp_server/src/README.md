@@ -34,4 +34,3 @@ src/
 - See `tools/README.md` for tool development guidelines
 - See `assets/README.md` for asset management
 - Check `.cursor/mcp-rules.md` for detailed patterns
-- Review `.cursor/template-transform-rules.md` for customization

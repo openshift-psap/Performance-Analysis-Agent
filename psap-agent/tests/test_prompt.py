@@ -20,7 +20,7 @@ class TestPrompt:
         prompt = get_system_prompt()
         assert isinstance(prompt, str)
         assert len(prompt) > 0
-        assert "Template Agent" in prompt
+        assert "PSAP Agent" in prompt
         assert "Today's date is" in prompt
 
     @patch("psap_agent.src.core.prompt.get_current_date")

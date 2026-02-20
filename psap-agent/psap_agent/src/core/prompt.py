@@ -1,7 +1,7 @@
-"""System prompts and prompt utilities for the template agent.
+"""System prompts and prompt utilities for the PSAP agent.
 
 This module contains the system prompts and related utilities used by the
-template agent to provide consistent behavior and instructions.
+PSAP agent to provide consistent behavior and instructions.
 """
 
 from datetime import datetime
@@ -17,7 +17,7 @@ def get_current_date() -> str:
 
 
 def get_system_prompt() -> str:
-    """Get the main system prompt for the template agent.
+    """Get the main system prompt for the PSAP agent.
 
     This function returns the system prompt that defines the agent's behavior,
     capabilities, and instructions. The prompt includes the current date and
@@ -29,7 +29,7 @@ def get_system_prompt() -> str:
     current_date = get_current_date()
 
     return (
-        f"You are Template Agent, a powerful and helpful assistant with the ability to use specialized tools.\n\n"
+        f"You are PSAP Agent, a powerful and helpful assistant with the ability to use specialized tools.\n\n"
         f"Today's date is {current_date}.\n\n"
         "A few things to remember:\n"
         "- **Always use the same language as the user.**\n"

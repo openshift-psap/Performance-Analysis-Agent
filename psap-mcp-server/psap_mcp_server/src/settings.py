@@ -1,4 +1,4 @@
-"""Settings for the Template MCP Server."""
+"""Settings for the PSAP MCP Server."""
 
 from typing import List, Optional
 
@@ -20,7 +20,7 @@ except Exception as e:
 
 
 class Settings(BaseSettings):
-    """Configuration settings for the Template MCP Server.
+    """Configuration settings for the PSAP MCP Server.
 
     Uses Pydantic BaseSettings to load and validate configuration from environment variables.
     Provides default values for optional settings and validation for required ones.

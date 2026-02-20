@@ -1,4 +1,4 @@
-"""Agent Manager for the template agent system.
+"""Agent Manager for the PSAP agent system.
 
 This module provides the AgentManager class that orchestrates agent operations,
 handles streaming responses, and manages the conversion between LangGraph events

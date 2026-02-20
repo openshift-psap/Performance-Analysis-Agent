@@ -1,4 +1,4 @@
-"""History route for the template agent API.
+"""History route for the PSAP agent API.
 
 This module provides endpoints for retrieving chat history from the database,
 allowing users to view previous conversations and continue ongoing threads.

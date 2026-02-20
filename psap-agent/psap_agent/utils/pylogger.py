@@ -1,4 +1,4 @@
-"""Structured logger utility for the Template MCP server."""
+"""Structured logger utility for the PSAP agent."""
 
 import logging
 import sys

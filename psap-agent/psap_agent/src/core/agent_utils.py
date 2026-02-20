@@ -1,7 +1,7 @@
 """Utility functions for handling agent messages and conversions.
 
 This module provides utility functions for converting between different message
-formats, handling message content, and managing tool calls in the template agent.
+formats, handling message content, and managing tool calls in the PSAP agent.
 """
 
 from typing import Any, Dict, List, Union
@@ -51,7 +51,7 @@ def langchain_to_chat_message(message: BaseMessage) -> ChatMessage:
     """Create a ChatMessage from a LangChain message.
 
     This function converts LangChain message objects to the internal ChatMessage
-    format used by the template agent. It handles different message types and
+    format used by the PSAP agent. It handles different message types and
     preserves relevant metadata.
 
     Args:

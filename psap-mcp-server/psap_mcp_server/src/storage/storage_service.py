@@ -1,4 +1,4 @@
-"""PostgreSQL storage service for the Template MCP Server."""
+"""PostgreSQL storage service for the PSAP MCP Server."""
 
 import json
 from datetime import datetime, timezone

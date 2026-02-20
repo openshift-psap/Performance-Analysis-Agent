@@ -1,8 +1,8 @@
-"""FastAPI server implementation for the template agent.
+"""FastAPI server implementation for the PSAP agent.
 
 This module provides the main FastAPI application setup, including
 middleware configuration, route registration, and application lifecycle
-management for the template agent service.
+management for the PSAP agent service.
 """
 
 from collections.abc import AsyncGenerator
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Configure application lifespan with database initialization.
 
     This context manager handles the application startup and shutdown
-    lifecycle. It initializes the template agent with database connections
+    lifecycle. It initializes the PSAP agent with database connections
     and ensures proper cleanup on shutdown.
 
     Args:
@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             database connections during startup.
     """
     try:
-        # Initialize the template agent with database connections
+        # Initialize the PSAP agent with database connections
         async with get_psap_agent():
             yield
     except Exception as e:

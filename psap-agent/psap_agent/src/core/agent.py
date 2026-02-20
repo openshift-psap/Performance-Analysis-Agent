@@ -1,6 +1,6 @@
-"""Agent implementation for the template agent system.
+"""Agent implementation for the PSAP agent system.
 
-This module provides the core agent functionality for the template agent,
+This module provides the core agent functionality for the PSAP agent,
 including initialization, configuration, and agent creation utilities.
 """
 
@@ -26,9 +26,9 @@ logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
 async def get_psap_agent(
     sso_token: Optional[str] = None, enable_checkpointing: bool = True
 ):
-    """Get a fully initialized template agent.
+    """Get a fully initialized PSAP agent.
 
-    This function creates and configures a template agent with the necessary
+    This function creates and configures a PSAP agent with the necessary
     tools, model, and database connections. It uses an async context manager
     to ensure proper resource cleanup.
 
@@ -39,7 +39,7 @@ async def get_psap_agent(
             Set to False for streaming-only operations that shouldn't save to DB.
 
     Yields:
-        The initialized template agent instance.
+        The initialized PSAP agent instance.
 
     Raises:
         Exception: If there are issues with database connections or agent setup.
@@ -49,7 +49,7 @@ async def get_psap_agent(
     try:
         client = MultiServerMCPClient(
             {
-                "template-mcp-server": {
+                "psap-mcp-server": {
                     "url": settings.MCP_SERVER_URL,
                     "transport": "streamable_http",
                     "headers": {"Authorization": f"Bearer {sso_token}"}
@@ -124,7 +124,7 @@ async def get_psap_agent(
             tools=tools,
             # No checkpointer or store - streaming only, no persistence
         )
-        logger.info("Template agent initialized successfully without checkpointing")
+        logger.info("PSAP agent initialized successfully without checkpointing")
         yield agent_redhat
     elif settings.USE_INMEMORY_SAVER:
         # Use single global checkpoint for local development
@@ -139,7 +139,7 @@ async def get_psap_agent(
             store=checkpoint,
         )
         logger.info(
-            "Template agent initialized successfully with single global checkpoint"
+            "PSAP agent initialized successfully with single global checkpoint"
         )
         yield agent_redhat
     else:
@@ -162,6 +162,6 @@ async def get_psap_agent(
             )
 
             logger.info(
-                "Template agent initialized successfully with PostgreSQL checkpoint"
+                "PSAP agent initialized successfully with PostgreSQL checkpoint"
             )
             yield agent_redhat

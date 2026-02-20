@@ -1,8 +1,8 @@
-"""Schema definitions for the template agent.
+"""Schema definitions for the PSAP agent.
 
 This module contains Pydantic models and TypedDict definitions for
 request/response validation, data serialization, and API documentation
-for the template agent service.
+for the PSAP agent service.
 """
 
 from typing import Any, Literal, NotRequired
@@ -15,7 +15,7 @@ class UserInput(BaseModel):
     """Basic user input model for agent interactions.
 
     This model represents the core user input structure used across
-    different endpoints in the template agent API.
+    different endpoints in the PSAP agent API.
     """
 
     message: str = Field(

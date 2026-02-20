@@ -1,1 +1,1 @@
-"""Core module for template agent functionality."""
+"""Core module for PSAP agent functionality."""

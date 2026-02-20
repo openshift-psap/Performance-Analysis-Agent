@@ -106,7 +106,7 @@ def stream_agent_response(
     stream_tokens: bool = True,
     api_url: str = "http://localhost:8081",
 ) -> tuple[str, List[Dict[str, Any]]]:
-    """Stream response from the Template Agent using the simplified API.
+    """Stream response from the PSAP Agent using the simplified API.
 
     Args:
         message: User's input message
@@ -114,7 +114,7 @@ def stream_agent_response(
         session_id: Session identifier
         user_id: User identifier
         stream_tokens: Whether to stream individual tokens
-        api_url: Base URL of the Template Agent API
+        api_url: Base URL of the PSAP Agent API
 
     Returns:
         Tuple of (final_response, all_messages)
@@ -200,7 +200,7 @@ def send_feedback(
         score: 1.0 for thumbs up, 0.0 for thumbs down
         user_query: The user's original question
         assistant_response: The agent's response
-        api_url: Base URL of the Template Agent API
+        api_url: Base URL of the PSAP Agent API
         
     Returns:
         True if feedback was successfully sent, False otherwise

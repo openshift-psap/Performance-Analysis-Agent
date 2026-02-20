@@ -1,4 +1,4 @@
-"""Feedback route for the template agent API.
+"""Feedback route for the PSAP agent API.
 
 This module provides endpoints for recording user feedback on agent responses
 using Langfuse for analytics and monitoring purposes.

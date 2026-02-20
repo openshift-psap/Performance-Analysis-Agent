@@ -64,9 +64,19 @@ self.mcp.tool()(your_tool_function)
 
 ## 📋 **Current Tools**
 
-- `multiply_tool.py` - Basic arithmetic operations
-- `code_review_tool.py` - Generate code review prompts (converted from prompt)
-- `redhat_logo_tool.py` - Asset retrieval (converted from resource)
+- `query_performance_tool.py` - Query AI model performance metrics (throughput, latency, TTFT, ITL)
+- `compare_performance_tool.py` - Compare configurations and versions with geometric means
+- `cost_efficiency_tool.py` - Calculate cost per million tokens analysis
+- `regression_analysis_tool.py` - Version-to-version performance change analysis
+- `dataset_metadata_tool.py` - Discover available models, accelerators, profiles, and versions
+- `discover_configurations_tool.py` - Find what was actually tested with specific filters
+- `grafana_metrics_tool.py` - Query GPU and vLLM metrics from Grafana
+- `compare_grafana_metrics_tool.py` - Compare Grafana metrics between two benchmark runs
+- `generate_dashboard_url_tool.py` - Generate dashboard URLs with pre-applied filters
+- `generate_grafana_url_tool.py` - Generate Grafana dashboard URLs for specific runs
+- `vllm_release_notes_tool.py` - Fetch vLLM release notes, compare versions, inspect PRs
+- `pytorch_profile_tool.py` - Analyze and compare PyTorch profiler traces across versions
+- `kernel_code_mapper_tool.py` - Map kernel names to vLLM source, fetch code and diffs from GitHub
 
 ## ✅ **Best Practices**
 

@@ -1,6 +1,6 @@
-"""Template MCP Server implementation.
+"""PSAP MCP Server implementation.
 
-This module contains the main Template MCP Server class that provides
+This module contains the main PSAP MCP Server class that provides
 tools for MCP clients. It uses FastMCP to register and manage MCP capabilities.
 """
 
@@ -68,28 +68,28 @@ from psap_mcp_server.utils.pylogger import (
 logger = get_python_logger()
 
 
-class TemplateMCPServer:
-    """Main Template MCP Server implementation following tools-first architecture.
+class PSAPMCPServer:
+    """Main PSAP MCP Server implementation following tools-first architecture.
 
     This server provides only tools, not resources or prompts, adhering to
     the tools-first architectural pattern for MCP servers.
     """
 
     def __init__(self):
-        """Initialize the MCP server with template tools following tools-first architecture."""
+        """Initialize the MCP server with PSAP tools following tools-first architecture."""
         try:
             # Initialize FastMCP server
-            self.mcp = FastMCP("template")
+            self.mcp = FastMCP("psap")
 
             # Force reconfigure all loggers after FastMCP initialization to ensure structured logging
             force_reconfigure_all_loggers(settings.PYTHON_LOG_LEVEL)
 
             self._register_mcp_tools()
 
-            logger.info("Template MCP Server initialized successfully")
+            logger.info("PSAP MCP Server initialized successfully")
 
         except Exception as e:
-            logger.error(f"Failed to initialize Template MCP Server: {e}")
+            logger.error(f"Failed to initialize PSAP MCP Server: {e}")
             raise
 
     def _register_mcp_tools(self) -> None:

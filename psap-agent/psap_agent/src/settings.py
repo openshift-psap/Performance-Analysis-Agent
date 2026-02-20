@@ -1,8 +1,8 @@
-"""Settings configuration for the template agent.
+"""Settings configuration for the PSAP agent.
 
 This module provides centralized configuration management using Pydantic
 BaseSettings for environment variable loading, validation, and default
-value handling for the template agent service.
+value handling for the PSAP agent service.
 """
 
 from typing import Optional
@@ -26,7 +26,7 @@ except Exception as e:
 
 
 class Settings(BaseSettings):
-    """Configuration settings for the template agent.
+    """Configuration settings for the PSAP agent.
 
     Uses Pydantic BaseSettings to load and validate configuration from
     environment variables. Provides default values for optional settings

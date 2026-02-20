@@ -21,7 +21,7 @@ class TestHealthRoute:
 
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["service"] == "Template Agent"
+        assert data["service"] == "PSAP Agent"
 
     def test_health_endpoint_content_type(self):
         """Test health endpoint returns correct content type."""

@@ -1,8 +1,8 @@
-"""Main entry point for the template agent server.
+"""Main entry point for the PSAP agent server.
 
 This module provides the main application entry point, including
 configuration validation, server startup, and graceful shutdown
-handling for the template agent service.
+handling for the PSAP agent service.
 """
 
 import sys
@@ -92,7 +92,7 @@ def handle_startup_error(error: Exception, context: str = "server startup") -> N
 
 
 def main() -> None:
-    """Main entry point for the template agent server.
+    """Main entry point for the PSAP agent server.
 
     Initializes logging, loads configuration, and starts the template
     agent server. Handles graceful shutdown on keyboard interrupt and
@@ -112,7 +112,7 @@ def main() -> None:
         validate_and_initialize_config()
 
         logger.info(
-            f"Starting template agent server on {settings.AGENT_HOST}:{settings.AGENT_PORT}"
+            f"Starting PSAP agent server on {settings.AGENT_HOST}:{settings.AGENT_PORT}"
         )
 
         # Configure uvicorn server settings

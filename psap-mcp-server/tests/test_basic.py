@@ -1,4 +1,4 @@
-"""Basic tests for the Template MCP Server."""
+"""Basic tests for the PSAP MCP Server."""
 
 import importlib
 from unittest.mock import Mock, patch
@@ -95,7 +95,7 @@ class TestServer:
         import psap_mcp_server.src.mcp as server_mod
 
         importlib.reload(server_mod)
-        self.TemplateMCPServer = server_mod.TemplateMCPServer
+        self.PSAPMCPServer = server_mod.PSAPMCPServer
 
     def test_server_initialization(self):
         """Test that server can be initialized."""
@@ -105,7 +105,7 @@ class TestServer:
             patch("psap_mcp_server.src.mcp.FastMCP"),
         ):
             mock_settings.PYTHON_LOG_LEVEL = "INFO"
-            server = self.TemplateMCPServer()
+            server = self.PSAPMCPServer()
             assert server is not None
             assert hasattr(server, "mcp")
             assert hasattr(server, "_register_mcp_tools")
@@ -118,7 +118,7 @@ class TestServer:
             patch("psap_mcp_server.src.mcp.FastMCP"),
         ):
             mock_settings.PYTHON_LOG_LEVEL = "INFO"
-            server = self.TemplateMCPServer()
+            server = self.PSAPMCPServer()
             assert hasattr(server, "_register_mcp_tools")
 
     def test_server_mcp_instance(self):
@@ -129,7 +129,7 @@ class TestServer:
             patch("psap_mcp_server.src.mcp.FastMCP"),
         ):
             mock_settings.PYTHON_LOG_LEVEL = "INFO"
-            server = self.TemplateMCPServer()
+            server = self.PSAPMCPServer()
             assert server.mcp is not None
             assert hasattr(server.mcp, "tool")
 
@@ -219,9 +219,6 @@ class TestIntegration:
             "psap_mcp_server.src.mcp",
             "psap_mcp_server.src.settings",
             "psap_mcp_server.src.main",
-            "psap_mcp_server.src.tools.multiply_tool",
-            "psap_mcp_server.src.resources.redhat_logo",
-            "psap_mcp_server.src.prompts.code_review_prompt",
             "psap_mcp_server.utils.pylogger",
         ]
 

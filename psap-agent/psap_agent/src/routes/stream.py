@@ -1,4 +1,4 @@
-"""Stream route for the template agent API.
+"""Stream route for the PSAP agent API.
 
 This module provides streaming endpoints for real-time agent interactions,
 handling message streaming, token generation, and conversation management.

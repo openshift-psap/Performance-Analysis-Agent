@@ -1,7 +1,7 @@
 .PHONY: local dev test clean
 
 local:
-	@echo "Setting up and starting Template Agent locally..."
+	@echo "Setting up and starting PSAP Agent locally..."
 	@if [ ! -d ".venv" ]; then \
 		echo "Creating virtual environment..."; \
 		uv venv; \
@@ -11,10 +11,10 @@ local:
 	echo "Installing dependencies..." && \
 	uv pip install -e ".[dev]" && \
 	echo "Starting with in-memory storage..." && \
-	USE_INMEMORY_SAVER=true python -m template_agent.src.main
+	USE_INMEMORY_SAVER=true python -m psap_agent.src.main
 
 dev:
-	@echo "Starting Template Agent with podman-compose..."
+	@echo "Starting PSAP Agent with podman-compose..."
 	@podman-compose up --build
 
 test:

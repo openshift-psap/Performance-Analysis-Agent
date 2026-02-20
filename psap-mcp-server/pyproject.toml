@@ -47,10 +47,7 @@ dev = [
 [project.scripts]
 psap-mcp-server = "psap_mcp_server.src.main:main"
 
-[project.urls]
-Homepage = "https://github.com/redhat-data-and-ai/template-mcp-server"
-Repository = "https://github.com/redhat-data-and-ai/template-mcp-server"
-Issues = "https://github.com/redhat-data-and-ai/template-mcp-server/issues"
+
 
 [tool.ruff]
 target-version = "py312"

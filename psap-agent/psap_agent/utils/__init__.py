@@ -1,1 +1,1 @@
-"""Utility package for template MCP server."""
+"""Utility package for the PSAP agent."""

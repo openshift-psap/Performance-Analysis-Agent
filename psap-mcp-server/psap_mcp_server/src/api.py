@@ -1,4 +1,4 @@
-"""This module sets up the FastAPI application for the Template MCP server.
+"""This module sets up the FastAPI application for the PSAP MCP server.
 
 It initializes the FastAPI app, configures CORS middleware, and sets up
 the MCP server with appropriate transport protocols.
@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from psap_mcp_server.src.mcp import TemplateMCPServer
+from psap_mcp_server.src.mcp import PSAPMCPServer
 from psap_mcp_server.src.oauth.handler import OAuth2Handler
 from psap_mcp_server.src.oauth.routes import register_oauth_routes
 from psap_mcp_server.src.oauth.service import OAuthService
@@ -24,7 +24,7 @@ from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger(settings.PYTHON_LOG_LEVEL)
 
-server = TemplateMCPServer()
+server = PSAPMCPServer()
 
 oauth_service_instance: Optional[OAuthService] = None
 
@@ -261,7 +261,7 @@ async def health_check():
         status_code=200,
         content={
             "status": "healthy",
-            "service": "template-mcp-server",
+            "service": "psap-mcp-server",
             "transport_protocol": settings.MCP_TRANSPORT_PROTOCOL,
             "version": "0.1.0",
         },

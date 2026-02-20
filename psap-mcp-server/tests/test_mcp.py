@@ -4,11 +4,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from psap_mcp_server.src.mcp import TemplateMCPServer
+from psap_mcp_server.src.mcp import PSAPMCPServer
 
 
-class TestTemplateMCPServer:
-    """Test the TemplateMCPServer class."""
+class TestPSAPMCPServer:
+    """Test the PSAPMCPServer class."""
 
     @patch("psap_mcp_server.src.mcp.force_reconfigure_all_loggers")
     @patch("psap_mcp_server.src.mcp.settings")
@@ -17,19 +17,19 @@ class TestTemplateMCPServer:
     def test_init_success(
         self, mock_logger, mock_fastmcp, mock_settings, mock_force_reconfigure
     ):
-        """Test successful initialization of TemplateMCPServer."""
+        """Test successful initialization of PSAPMCPServer."""
         # Arrange
         mock_mcp = Mock()
         mock_fastmcp.return_value = mock_mcp
         mock_settings.PYTHON_LOG_LEVEL = "INFO"
 
         # Act
-        server = TemplateMCPServer()
+        server = PSAPMCPServer()
 
         # Assert
         assert server.mcp == mock_mcp
         mock_logger.info.assert_called_with(
-            "Template MCP Server initialized successfully"
+            "PSAP MCP Server initialized successfully"
         )
         # In tools-first architecture, we only register tools
         mock_mcp.tool.assert_called()
@@ -48,10 +48,10 @@ class TestTemplateMCPServer:
 
         # Act & Assert
         with pytest.raises(Exception, match="Test error"):
-            TemplateMCPServer()
+            PSAPMCPServer()
 
         mock_logger.error.assert_called_with(
-            "Failed to initialize Template MCP Server: Test error"
+            "Failed to initialize PSAP MCP Server: Test error"
         )
 
     @patch("psap_mcp_server.src.mcp.force_reconfigure_all_loggers")
@@ -65,7 +65,7 @@ class TestTemplateMCPServer:
         mock_mcp = Mock()
         mock_fastmcp.return_value = mock_mcp
         mock_settings.PYTHON_LOG_LEVEL = "INFO"
-        server = TemplateMCPServer()
+        server = PSAPMCPServer()
 
         # Act
         server._register_mcp_tools()
@@ -84,16 +84,14 @@ class TestTemplateMCPServer:
         mock_mcp = Mock()
         mock_fastmcp.return_value = mock_mcp
         mock_settings.PYTHON_LOG_LEVEL = "INFO"
-        server = TemplateMCPServer()
+        server = PSAPMCPServer()
 
         # Act
         server._register_mcp_tools()
 
         # Assert
         # Verify that tool() was called multiple times (once for each tool)
-        assert (
-            mock_mcp.tool.call_count >= 3
-        )  # multiply_numbers, generate_code_review_prompt, get_redhat_logo
+        assert mock_mcp.tool.call_count >= 3
 
     def test_server_attributes(self):
         """Test that server has required attributes for tools-first architecture."""
@@ -104,7 +102,7 @@ class TestTemplateMCPServer:
             patch("psap_mcp_server.src.mcp.force_reconfigure_all_loggers"),
         ):
             mock_settings.PYTHON_LOG_LEVEL = "INFO"
-            server = TemplateMCPServer()
+            server = PSAPMCPServer()
 
         # Assert
         assert hasattr(server, "mcp")
@@ -119,7 +117,7 @@ class TestTemplateMCPServer:
             patch("psap_mcp_server.src.mcp.force_reconfigure_all_loggers"),
         ):
             mock_settings.PYTHON_LOG_LEVEL = "INFO"
-            server = TemplateMCPServer()
+            server = PSAPMCPServer()
 
         # Assert - These methods should NOT exist in tools-first architecture
         assert not hasattr(server, "_register_mcp_resources"), (

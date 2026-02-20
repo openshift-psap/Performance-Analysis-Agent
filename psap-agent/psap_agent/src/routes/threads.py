@@ -1,4 +1,4 @@
-"""Threads route for the template agent API.
+"""Threads route for the PSAP agent API.
 
 This module provides endpoints for managing conversation threads,
 including listing threads for specific users.

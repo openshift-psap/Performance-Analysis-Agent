@@ -1,87 +1,64 @@
-# Template Agent
+# PSAP Agent
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12,3.13-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://github.com/redhat-data-and-ai/template-agent/actions/workflows/test.yml/badge.svg)](https://github.com/redhat-data-and-ai/template-mcp-server/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/redhat-data-and-ai/template-agent/branch/main/graph/badge.svg)](https://codecov.io/gh/redhat-data-and-ai/template-mcp-server)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A production-ready template for building AI agents with streaming capabilities, conversation management, and enterprise-grade features.
+LangGraph-based AI agent for vLLM inference performance analysis. Powered by Google Gemini, it connects to the [PSAP MCP Server](../psap-mcp-server/) to query benchmark data, analyze PyTorch profiler traces, compare vLLM versions, and generate Grafana dashboard links -- all through natural language.
 
-## 🌟 Features
-
-- **Simplified Streaming API**: Clean, consistent event format for easy client integration
-- **Real-time Streaming**: Server-Sent Events (SSE) with token and message streaming
-- **Multiple Client Examples**: TypeScript, Python async, and Streamlit demo applications
-- **Conversation Management**: Multi-turn conversations with thread persistence
-- **Enterprise Integration**: Langfuse tracing, PostgreSQL checkpointing, SSO support
-- **Modular Architecture**: AgentManager abstraction with clean separation of concerns
-- **Production Ready**: Health checks, error handling, and comprehensive logging
-- **Google AI Integration**: Built-in support for Google Generative AI models
-
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 graph TB
-    subgraph "Client"
-        UI[Web UI]
+    subgraph clients [Clients]
+        UI[Streamlit UI]
         API[API Client]
     end
 
-    subgraph "Template Agent"
-        subgraph "API Layer"
-            Health[Health Check]
-            Stream[Stream Chat]
-            History[Chat History]
-            Threads[Thread Management]
-            Feedback[Feedback]
-        end
-
-        subgraph "Core Layer"
-            Agent[Agent Engine]
-            Utils[Message Utils]
-            Prompt[Prompt Management]
-        end
-
-        subgraph "Data Layer"
-            DB[(PostgreSQL)]
-            Langfuse[Langfuse]
-        end
-
-        subgraph "External Services"
-            Google[Google AI]
-            SSO[SSO Auth]
-        end
+    subgraph agent [PSAP Agent]
+        Stream["/v1/stream (SSE)"]
+        History["/v1/history"]
+        Threads["/v1/threads"]
+        Feedback["/v1/feedback"]
+        Health["/health"]
+        Core[AgentManager + LangGraph ReAct Agent]
+        Prompt[System Prompt]
     end
 
-    UI --> Health
+    subgraph external [External Services]
+        MCP[PSAP MCP Server]
+        Gemini[Google Gemini]
+        PG[(PostgreSQL)]
+        LF[Langfuse]
+    end
+
     UI --> Stream
-    UI --> History
-    UI --> Threads
-    UI --> Feedback
-
-    API --> Health
     API --> Stream
-    API --> History
-    API --> Threads
-    API --> Feedback
+    UI --> History & Threads & Feedback
 
-    Stream --> Agent
-    Agent --> Utils
-    Agent --> Prompt
-    Agent --> Google
-
-    History --> DB
-    Threads --> DB
-    Agent --> DB
-    Agent --> Langfuse
-    Feedback --> Langfuse
+    Stream --> Core
+    Core --> Prompt
+    Core --> Gemini
+    Core -->|MCP protocol| MCP
+    Core --> PG
+    Core --> LF
+    Feedback --> LF
+    History --> PG
+    Threads --> PG
 ```
 
-## 📡 Simplified Streaming API
+The agent uses a LangGraph ReAct loop: Gemini decides which MCP tools to call based on the user's question, the MCP server executes them and returns structured data, and Gemini synthesizes the results into a response. Conversation state is checkpointed to PostgreSQL so users can resume threads across sessions.
 
-The Template Agent now features a simplified streaming API that makes client integration easier while preserving all enterprise features:
+## API Endpoints
 
-### Single Streaming Endpoint
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/v1/stream` | POST | Stream chat responses (SSE) |
+| `/v1/history/{thread_id}` | GET | Get conversation history |
+| `/v1/threads/{user_id}` | GET | List user threads |
+| `/v1/feedback` | POST | Record feedback (sent to Langfuse) |
+
+### Streaming Request
 
 ```http
 POST /v1/stream
@@ -89,292 +66,108 @@ Content-Type: application/json
 Accept: text/event-stream
 ```
 
-### Request Format
-
 ```json
 {
-  "message": "User input message",
-  "thread_id": "conversation-thread-id",
-  "session_id": "session-id",
-  "user_id": "user-identifier",
+  "message": "Compare vLLM 0.13.0 vs 0.11.2 for DeepSeek on H200",
+  "thread_id": "thread-123",
+  "session_id": "session-456",
+  "user_id": "user-789",
   "stream_tokens": true
 }
 ```
 
-### Response Format
+### Streaming Response
 
-```json
-{"type": "message", "content": {"type": "ai", "content": "", "tool_calls": [...]}}
-{"type": "token", "content": "Hello"}
-{"type": "token", "content": " world"}
-{"type": "message", "content": {"type": "ai", "content": "Hello world"}}
+```
+{"type":"message","content":{"type":"ai","content":"","tool_calls":[...]}}
+{"type":"token","content":"The"}
+{"type":"token","content":" throughput"}
+{"type":"message","content":{"type":"ai","content":"The throughput improved by 49%..."}}
 [DONE]
 ```
 
-### Client Examples
+## Configuration
 
-Ready-to-use client examples are available in the [`examples/`](./examples/) directory:
+Environment variables (see `.env.example`):
 
-- **[Streamlit Demo App](./examples/streamlit_app.py)** - Interactive chat application
-- **[Python Async Client](./examples/client_python.py)** - Server-to-server integration
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_HOST` | `0.0.0.0` | Server bind address |
+| `AGENT_PORT` | `8081` | Server port |
+| `MCP_SERVER_URL` | `http://localhost:5001/mcp/` | PSAP MCP Server endpoint |
+| `USE_INMEMORY_SAVER` | `false` | Use in-memory storage instead of PostgreSQL |
+| `POSTGRES_HOST` | `pgvector` | PostgreSQL host |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port |
+| `POSTGRES_DB` | `pgvector` | Database name |
+| `POSTGRES_USER` | `pgvector` | Database user |
+| `POSTGRES_PASSWORD` | `pgvector` | Database password |
+| `GOOGLE_API_KEY` | -- | Google Gemini API key |
+| `LANGFUSE_PUBLIC_KEY` | -- | Langfuse public key |
+| `LANGFUSE_SECRET_KEY` | -- | Langfuse secret key |
+| `LANGFUSE_HOST` | -- | Langfuse server URL |
+| `PYTHON_LOG_LEVEL` | `INFO` | Logging level |
 
-See the [examples README](./examples/README.md) for detailed usage instructions.
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python 3.12+
-- PostgreSQL database
-- Google AI API credentials
-- Langfuse account (optional)
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/redhat-data-and-ai/template-agent.git
-   cd template-agent
-   ```
-
-2. **Create virtual environment**
-   ```bash
-   uv venv
-   source .venv/bin/activate
-
-   ```
-
-3. **Install dependencies**
-   ```bash
-   uv pip install -e ".[dev]"
-   ```
-
-4. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
-
-5. **Run template-mcp-server** following https://github.com/redhat-data-and-ai/template-mcp-server
-
-
-6. **Run the application**
-   ```bash
-   uv run python -m psap_agent.src.main
-   ```
-
-
-## 📚 API Reference
-
-### Endpoints
-
-| Endpoint                  | Method | Description |
-|---------------------------|--------|-------------|
-| `/health`                 | GET | Health check |
-| `/v1/stream`              | POST | Stream chat responses |
-| `/v1/history/{thread_id}` | GET | Get conversation history |
-| `/v1/threads/{user_id}`   | GET | List user threads |
-| `/v1/feedback`            | POST | Record feedback |
-
-### Streaming Chat
+## Local Development
 
 ```bash
-curl -X POST "http://localhost:8081/v1/stream" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Hello, how can you help me?",
-    "thread_id": "thread_123",
-    "user_id": "user_456",
-    "stream_tokens": true
-  }'
+# Create virtual environment and install
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your Google API key, Langfuse keys, etc.
+
+# Run with in-memory storage (no PostgreSQL needed)
+USE_INMEMORY_SAVER=true python -m psap_agent.src.main
+
+# Or use the Makefile
+make local
 ```
 
-### Health Check
+The agent expects the PSAP MCP Server to be running at `MCP_SERVER_URL`. If it's not available and `USE_INMEMORY_SAVER=true`, the agent starts without tools (useful for testing the streaming API).
+
+## Testing
 
 ```bash
-curl "http://localhost:8081/health"
-# Response: {"status": "healthy", "service": "Template Agent"}
+pytest                                          # Run all tests
+pytest --cov=psap_agent.src --cov-report=html   # With coverage
+pytest tests/test_prompt.py -v                  # Specific test file
 ```
 
-## ⚙️ Configuration
-
-### Environment Variables
-
-#### Required
-- `AGENT_HOST`: Server host (default: 0.0.0.0)
-- `AGENT_PORT`: Server port (default: 5002)
-- `PYTHON_LOG_LEVEL`: Logging level (default: INFO)
-
-#### Database
-- `POSTGRES_USER`: Database username (default: pgvector)
-- `POSTGRES_PASSWORD`: Database password (default: pgvector)
-- `POSTGRES_DB`: Database name (default: pgvector)
-- `POSTGRES_HOST`: Database host (default: pgvector)
-- `POSTGRES_PORT`: Database port (default: 5432)
-
-#### Optional
-- `LANGFUSE_TRACING_ENVIRONMENT`: Langfuse environment (default: development)
-- `GOOGLE_SERVICE_ACCOUNT_FILE`: Google credentials
-- `SSO_CALLBACK_URL`: SSO callback URL
-- `AGENT_SSL_KEYFILE`: SSL private key path
-- `AGENT_SSL_CERTFILE`: SSL certificate path
-
-### Configuration Example
-
-```bash
-# .env file
-AGENT_HOST=0.0.0.0
-AGENT_PORT=5002
-PYTHON_LOG_LEVEL=INFO
-
-POSTGRES_USER=myuser
-POSTGRES_PASSWORD=mypassword
-POSTGRES_DB=psap_agent
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-
-LANGFUSE_TRACING_ENVIRONMENT=production
-GOOGLE_SERVICE_ACCOUNT_FILE=/path/to/credentials.json
-```
-
-## 🧪 Testing
-
-### Run Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=psap_agent.src --cov-report=html
-
-# Run specific test file
-pytest tests/test_prompt.py -v
-```
-
-### Test Coverage
-
-Current test coverage includes:
-- ✅ Core utilities (prompt, agent_utils)
-- ✅ Data models (schema)
-- ✅ Configuration (settings)
-- ✅ API endpoints (health, feedback)
-- 🔄 Complex routes (history, stream, threads)
-- 🔄 Application setup (api, main, agent)
-
-## 🚀 Deployment
-
-### Podman Compose
-
-```bash
-# Start with Docker Compose
-podman-compose up -d --build
-```
-
-### Production Considerations
-
-- **SSL/TLS**: Configure SSL certificates for HTTPS
-- **Database**: Use managed PostgreSQL service
-- **Monitoring**: Set up Langfuse for tracing
-- **Scaling**: Configure horizontal pod autoscaling
-- **Security**: Implement proper authentication
-
-## 🔧 Development
-
-### Project Structure
+## Project Structure
 
 ```
-template-agent/
+psap-agent/
 ├── psap_agent/
-│   └── src/
-│       ├── core/           # Core agent functionality
-│       │   ├── agent.py    # Agent initialization
-│       │   ├── agent_utils.py  # Message utilities
-│       │   └── prompt.py   # Prompt management
-│       ├── routes/         # API endpoints
-│       │   ├── health.py   # Health checks
-│       │   ├── stream.py   # Streaming chat
-│       │   ├── history.py  # Chat history
-│       │   ├── threads.py  # Thread management
-│       │   └── feedback.py # Feedback recording
-│       ├── api.py          # FastAPI application
-│       ├── main.py         # Application entry point
-│       ├── schema.py       # Data models
-│       └── settings.py     # Configuration
-├── tests/                  # Test suite
-└── README.md              # This file
+│   ├── src/
+│   │   ├── core/
+│   │   │   ├── agent.py          # Agent initialization (Gemini + MCP client + checkpointer)
+│   │   │   ├── manager.py        # AgentManager: streaming, Langfuse tracing, event formatting
+│   │   │   ├── prompt.py         # System prompt with tool usage instructions
+│   │   │   ├── storage.py        # Global in-memory checkpoint (dev mode)
+│   │   │   ├── cache_manager.py  # Gemini context caching
+│   │   │   └── agent_utils.py    # Message conversion utilities
+│   │   ├── routes/
+│   │   │   ├── stream.py         # SSE streaming endpoint
+│   │   │   ├── health.py         # Health check
+│   │   │   ├── history.py        # Conversation history
+│   │   │   ├── threads.py        # Thread management
+│   │   │   └── feedback.py       # Feedback to Langfuse
+│   │   ├── api.py                # FastAPI app with lifespan
+│   │   ├── main.py               # Entry point
+│   │   ├── schema.py             # Request/response models
+│   │   └── settings.py           # Pydantic settings
+│   └── utils/
+│       └── pylogger.py           # Structured logging
+├── examples/
+│   └── streamlit_app.py          # Streamlit chat UI
+├── tests/
+├── Containerfile                 # UBI9 Python 3.12 image
+├── .env.example
+└── pyproject.toml
 ```
 
-### Code Quality
+## License
 
-```bash
-# Run linting
-ruff check .
-
-# Run type checking
-mypy psap_agent/src/
-
-# Run formatting
-ruff format .
-
-# Run pre-commit hooks
-pre-commit run --all-files
-```
-
-### Adding New Features
-
-1. **Create feature branch**
-   ```bash
-   git checkout -b feature/new-feature
-   ```
-
-2. **Implement changes**
-   - Follow Google docstring format
-   - Add type hints
-   - Write tests for new functionality
-
-3. **Run quality checks**
-   ```bash
-   pre-commit run --all-files
-   pytest
-   ```
-
-4. **Submit pull request**
-   - Include tests
-   - Update documentation
-   - Follow commit message conventions
-
-### Development Setup
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
-
-### Code Standards
-
-- **Python**: Follow PEP 8 and use type hints
-- **Documentation**: Use Google docstring format
-- **Tests**: Maintain >80% code coverage
-- **Commits**: Use conventional commit messages
-
-This template includes `.cursor/rules.md` - a comprehensive development guide specifically designed to help AI coding assistants understand and work effectively with this MCP server template.
-
-### What's Included
-
-## 🆘 Support
-
-- **Issues**: [GitHub Issues](https://github.com/redhat-data-and-ai/template-agent/issues)
-
-## 🔗 Related Projects
-
-- [LangChain](https://github.com/langchain-ai/langchain) - LLM application framework
-- [LangGraph](https://github.com/langchain-ai/langgraph) - Stateful LLM applications
-- [FastAPI](https://fastapi.tiangolo.com/) - Modern web framework
-- [Langfuse](https://langfuse.com/) - LLM observability platform
-
----
-
-**Built with ❤️ by the Red Hat Data & AI team**
+[Apache 2.0](LICENSE)

@@ -1,4 +1,4 @@
-"""Exception handling for the Template MCP server."""
+"""Exception handling for the PSAP agent."""
 
 from __future__ import annotations
 

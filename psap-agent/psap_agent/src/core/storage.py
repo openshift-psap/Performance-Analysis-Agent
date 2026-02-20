@@ -1,4 +1,4 @@
-"""Global storage management for the template agent system.
+"""Global storage management for the PSAP agent system.
 
 This module provides a single global checkpoint instance that persists across
 the entire application lifecycle when using in-memory storage mode.
