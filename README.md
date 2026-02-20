@@ -197,4 +197,4 @@ See [scripts/README.md](scripts/README.md) for details on the expected directory
 
 ## License
 
-[Apache 2.0](psap-agent/LICENSE)
+[Apache 2.0](LICENSE)
