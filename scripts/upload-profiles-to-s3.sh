@@ -2,14 +2,17 @@
 # =============================================================================
 # Upload PyTorch profile traces to S3
 # =============================================================================
-# Uploads all .json trace files from a local folder into the S3 structure
-# expected by the MCP server:
+# Uploads a single rank-0 .json trace file from a local folder into the S3
+# structure expected by the MCP server:
 #
 #   s3://<BUCKET>/<PREFIX>/<model>/<version>/<filename>.json
 #
+# Only rank 0 is uploaded (one file per folder). This keeps S3 costs low
+# while giving the agent a representative single-GPU trace to analyze.
+#
 # The MCP server discovers profiles by listing S3 folders automatically.
 # No manifest or stats files are needed -- just upload the raw Chrome trace
-# JSON files and the agent will find them.
+# JSON file and the agent will find it.
 #
 # Usage:
 #   ./scripts/upload-profiles-to-s3.sh <model> <version> <folder>
@@ -19,8 +22,8 @@
 #   ./scripts/upload-profiles-to-s3.sh gpt-oss vLLM-0.13.0 /tmp/gpt-oss-traces
 #   ./scripts/upload-profiles-to-s3.sh llama-70b vLLM-0.14.0 ./my-traces
 #
-# The files should contain "rank" in their name (e.g. trace_rank0_pid455.json)
-# so the agent can identify which GPU rank each trace belongs to.
+# The selected file must contain "rank0" in its name (e.g. trace_rank0_pid455.json).
+# If multiple rank-0 files exist, the first one (alphabetically) is used.
 #
 # Prerequisites:
 #   - AWS CLI configured (aws configure) or environment variables set
@@ -87,46 +90,60 @@ if [ ! -d "$LOCAL_FOLDER" ]; then
     exit 1
 fi
 
-# ---------- Scan files ----------
-UPLOAD_FILES=()
+# ---------- Scan for rank-0 file ----------
+RANK0_FILES=()
 SKIP_FILES=()
 
 for json_file in "$LOCAL_FOLDER"/*.json; do
     [ -f "$json_file" ] || continue
     filename="$(basename "$json_file")"
 
-    if [[ ! "$filename" =~ rank ]]; then
-        SKIP_FILES+=("$filename")
+    if [[ "$filename" =~ rank0 ]]; then
+        RANK0_FILES+=("$filename")
     else
-        UPLOAD_FILES+=("$filename")
+        SKIP_FILES+=("$filename")
     fi
 done
 
-if [ ${#UPLOAD_FILES[@]} -eq 0 ] && [ ${#SKIP_FILES[@]} -eq 0 ]; then
+if [ ${#RANK0_FILES[@]} -eq 0 ] && [ ${#SKIP_FILES[@]} -eq 0 ]; then
     log_err "No .json files found in $LOCAL_FOLDER"
     exit 1
 fi
 
+if [ ${#RANK0_FILES[@]} -eq 0 ]; then
+    log_err "No rank-0 trace files found (expected filename containing 'rank0')"
+    echo ""
+    echo "  Files in folder:"
+    for f in "${SKIP_FILES[@]}"; do
+        echo "    ⏭  $f"
+    done
+    exit 1
+fi
+
+UPLOAD_FILE="${RANK0_FILES[0]}"
+UPLOAD_FILES=("$UPLOAD_FILE")
+
 # ---------- Display file listing ----------
-echo "  Files to upload (${#UPLOAD_FILES[@]}):"
-for f in "${UPLOAD_FILES[@]}"; do
-    echo "    ✔  $f"
-done
+echo "  File to upload (rank 0):"
+echo "    ✔  $UPLOAD_FILE"
+
+if [ ${#RANK0_FILES[@]} -gt 1 ]; then
+    echo ""
+    echo "  Other rank-0 files skipped (only uploading first match):"
+    for f in "${RANK0_FILES[@]:1}"; do
+        echo "    ⏭  $f"
+    done
+fi
 
 if [ ${#SKIP_FILES[@]} -gt 0 ]; then
     echo ""
-    echo "  Files to skip — no 'rank' in filename (${#SKIP_FILES[@]}):"
+    echo "  Non-rank-0 files skipped (${#SKIP_FILES[@]}):"
     for f in "${SKIP_FILES[@]}"; do
         echo "    ⏭  $f"
     done
 fi
 
 echo ""
-
-if [ ${#UPLOAD_FILES[@]} -eq 0 ]; then
-    log_err "No uploadable files (all files missing 'rank' in filename)"
-    exit 1
-fi
 
 # ---------- Confirmation ----------
 read -p "Proceed with upload? [y/N] " -n 1 -r
@@ -192,16 +209,10 @@ done
 echo ""
 echo "========================================"
 if [ $SUCCEEDED -gt 0 ]; then
-    log_ok "Uploaded $SUCCEEDED / ${#UPLOAD_FILES[@]} file(s) to s3://$BUCKET/$PREFIX/$MODEL_NAME/$VERSION/"
+    log_ok "Uploaded $UPLOAD_FILE to s3://$BUCKET/$PREFIX/$MODEL_NAME/$VERSION/"
 fi
 if [ $FAILED -gt 0 ]; then
-    log_err "Failed $FAILED file(s) after $MAX_RETRIES attempts:"
-    for f in "${FAILED_FILES[@]}"; do
-        echo "        - $f"
-    done
-fi
-if [ ${#SKIP_FILES[@]} -gt 0 ]; then
-    log_skip "Skipped ${#SKIP_FILES[@]} file(s) (no 'rank' in filename)"
+    log_err "Failed to upload $UPLOAD_FILE after $MAX_RETRIES attempts"
 fi
 echo "========================================"
 echo ""

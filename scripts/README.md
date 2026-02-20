@@ -1,10 +1,10 @@
 # Upload PyTorch Profiles to S3
 
-A helper script to upload PyTorch profiler trace files to the S3 bucket used by the PSAP MCP server for performance analysis.
+A helper script to upload a single rank-0 PyTorch profiler trace file to the S3 bucket used by the PSAP MCP server for performance analysis.
 
 ## How It Works
 
-The MCP server discovers PyTorch profiles by listing the S3 bucket at runtime. This script uploads `.json` trace files into the expected folder structure so the agent can find and analyze them automatically.
+The MCP server discovers PyTorch profiles by listing the S3 bucket at runtime. This script uploads one rank-0 `.json` trace file per invocation into the expected folder structure so the agent can find and analyze it automatically. Only rank 0 is uploaded to keep S3 costs low while providing a representative single-GPU trace for analysis.
 
 **S3 structure:**
 
@@ -18,17 +18,14 @@ For example:
 s3://psap-dashboard-data/profiles/rhaiis/
 ├── deepseek-r1/
 │   ├── vLLM-0.11.2/
-│   │   ├── trace_rank0_pid455_range2000-2010.json
-│   │   ├── trace_rank1_pid456_range2000-2010.json
-│   │   └── ...
+│   │   └── trace_rank0_pid455_range2000-2010.json
 │   └── vLLM-0.13.0/
-│       ├── trace_rank0_pid467_range2000-2010.json
-│       └── ...
+│       └── trace_rank0_pid467_range2000-2010.json
 ├── gpt-oss/
 │   ├── vLLM-0.11.2/
-│   │   └── ...
+│   │   └── trace_rank0_pid480_range2000-2010.json
 │   └── vLLM-0.13.0/
-│       └── ...
+│       └── trace_rank0_pid490_range2000-2010.json
 └── llama-70b/
     └── ...
 ```
@@ -69,15 +66,16 @@ s3://psap-dashboard-data/profiles/rhaiis/
 ./scripts/upload-profiles-to-s3.sh llama-70b vLLM-0.14.0 ./my-llama-traces
 ```
 
-## File Naming Requirements
+## File Selection
 
-Trace filenames **must** contain `rank` so the agent can identify which GPU rank each trace belongs to. Common patterns:
+The script scans the local folder for `.json` files containing `rank0` in the filename. If multiple rank-0 files exist, the first one alphabetically is selected. All other files (non-rank-0 and non-JSON) are skipped.
+
+Common matching filenames:
 
 - `trace_rank0_pid455_range2000-2010.json`
-- `trace_rank3_pid470_range2000-2010.json`
 - `rank0_forward_pass.json`
 
-Files without `rank` in the name will be skipped with a warning.
+Files without `rank0` in the name are skipped with a message.
 
 ## Environment Variables
 
@@ -140,6 +138,6 @@ for u in json.load(sys.stdin):
 
 ## What Happens After Upload
 
-- The MCP server will **automatically discover** the new profiles on the next request (no restart needed).
+- The MCP server will **automatically discover** the new profile on the next request (no restart needed).
 - Profile discovery results are cached for **5 minutes**. After that, new uploads will be picked up.
-- The AI agent can then analyze, compare, and provide insights on the uploaded profiles.
+- The AI agent can then analyze, compare, and provide insights on the uploaded trace.
