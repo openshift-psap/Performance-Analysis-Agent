@@ -9,6 +9,7 @@ Dashboard selection logic (matches performance-dashboard/dashboard.py):
   - MI300X                        -> MI300X dashboard
 """
 
+import os
 from typing import Dict, Optional
 import pandas as pd
 
@@ -16,8 +17,7 @@ from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
-# Grafana base URL
-GRAFANA_BASE_URL = "https://grafana-psap-obs.apps.ocp4.intlab.redhat.com"
+GRAFANA_BASE_URL = os.environ.get("GRAFANA_URL", "")
 
 # Dashboard configuration — mirrors GRAFANA_DASHBOARDS in dashboard.py
 GRAFANA_DASHBOARDS = {

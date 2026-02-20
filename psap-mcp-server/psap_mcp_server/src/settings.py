@@ -221,7 +221,7 @@ class Settings(BaseSettings):
         json_schema_extra={
             "env": "POSTGRES_PASSWORD",
             "description": "PostgreSQL password",
-            "example": "secretpassword",
+            "example": "your-postgres-password",
             "sensitive": True,
         },
     )

@@ -96,11 +96,11 @@ Environment variables (see `.env.example`):
 | `AGENT_PORT` | `8081` | Server port |
 | `MCP_SERVER_URL` | `http://localhost:5001/mcp/` | PSAP MCP Server endpoint |
 | `USE_INMEMORY_SAVER` | `false` | Use in-memory storage instead of PostgreSQL |
-| `POSTGRES_HOST` | `pgvector` | PostgreSQL host |
+| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
 | `POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `POSTGRES_DB` | `pgvector` | Database name |
-| `POSTGRES_USER` | `pgvector` | Database user |
-| `POSTGRES_PASSWORD` | `pgvector` | Database password |
+| `POSTGRES_DB` | `psap` | Database name |
+| `POSTGRES_USER` | `psap_user` | Database user |
+| `POSTGRES_PASSWORD` | -- | Database password |
 | `GOOGLE_API_KEY` | -- | Google Gemini API key |
 | `LANGFUSE_PUBLIC_KEY` | -- | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | -- | Langfuse secret key |
