@@ -137,7 +137,7 @@ def stream_agent_response(
             f"{api_url}/v1/stream",
             json=request_data,
             stream=True,
-            timeout=90,  # 5 minutes timeout for complex queries with clarifications
+            timeout=300,
             headers={"Accept": "text/event-stream"},
         )
         response.raise_for_status()

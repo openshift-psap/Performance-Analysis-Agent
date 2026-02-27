@@ -89,16 +89,14 @@ async def get_psap_agent(
             # Use model with caching support
             # Note: model must match the cache model (gemini-2.5-flash)
             model = ChatGoogleGenerativeAI(
-                model="gemini-3-flash-preview",  # Must match cache model
+                model=settings.GEMINI_MODEL,
                 temperature=0.3,
-                # Try to pass cached content through model_kwargs
                 model_kwargs={"cached_content": cache_name} if cache_name else {}
             )
         except Exception as e:
             logger.warning(f"Failed to initialize caching: {e}. Falling back to non-cached mode.")
-            # Fallback to non-cached model
             model = ChatGoogleGenerativeAI(
-                model="gemini-3-flash-preview",
+                model=settings.GEMINI_MODEL,
                 temperature=0.3
             )
     else:
@@ -106,12 +104,11 @@ async def get_psap_agent(
             logger.info("Caching disabled: Gemini API doesn't support cached_content with tools")
         else:
             logger.info("Caching disabled by configuration")
-        # Use model without caching
         model = ChatGoogleGenerativeAI(
-            model="gemini-3-flash-preview",
+            model=settings.GEMINI_MODEL,
             temperature=0.3
         )
-        logger.info(f"🤖 Using model: gemini-3-flash-preview")
+        logger.info(f"🤖 Using model: {settings.GEMINI_MODEL}")
 
     if not enable_checkpointing:
         # Create agent without checkpointing for streaming-only operations

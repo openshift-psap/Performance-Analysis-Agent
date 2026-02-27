@@ -179,13 +179,13 @@ The manifests deploy 9 pods: PostgreSQL, ClickHouse, Redis, MinIO, Langfuse Work
 The PyTorch profiler tools expect Chrome trace JSON files in S3 under a specific layout:
 
 ```
-s3://<bucket>/profiles/rhaiis/<model>/<version>/trace_rank<N>_*.json
+s3://<bucket>/profiles/rhaiis/<accelerator>/<model>/<version>/trace_rank<N>_*.json
 ```
 
 Use the helper script to upload:
 
 ```bash
-./scripts/upload-profiles-to-s3.sh <local-traces-dir> <model> <version>
+./scripts/upload-profiles-to-s3.sh <accelerator> <model> <version> <local-traces-dir>
 ```
 
 See [scripts/README.md](scripts/README.md) for details on the expected directory structure and S3 layout.

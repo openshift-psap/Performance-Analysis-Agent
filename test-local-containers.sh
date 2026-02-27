@@ -112,6 +112,16 @@ prompt_for_credentials() {
     else
         log_success "Google API Key detected in environment"
     fi
+
+    # Gemini Model
+    if [ -z "$GEMINI_MODEL" ]; then
+        if [ -f psap-agent/.env ] && grep -q "GEMINI_MODEL" psap-agent/.env; then
+            GEMINI_MODEL=$(grep "GEMINI_MODEL" psap-agent/.env | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+            log_success "Gemini model loaded from psap-agent/.env: $GEMINI_MODEL"
+        fi
+    else
+        log_success "Gemini model detected in environment: $GEMINI_MODEL"
+    fi
     echo ""
     
     # Grafana Credentials
@@ -584,6 +594,7 @@ start_agent() {
       -e POSTGRES_USER=psap_user \
       -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
       -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
+      -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
       -e MCP_SERVER_URL="http://psap-mcp-server:5001/mcp/" \
       -e ENABLE_PROMPT_CACHING=true \
       -e CACHE_TTL_HOURS=4 \

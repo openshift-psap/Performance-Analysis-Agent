@@ -184,8 +184,29 @@ def _get_github_headers() -> Dict[str, str]:
 
 
 def _normalize_version(version: str) -> str:
-    """Normalize version string to GitHub tag format."""
+    """Normalize version string to a vLLM GitHub tag.
+
+    Handles RHAIIS product versions (e.g. ``RHAIIS-3.3``) by resolving them
+    through the version mappings file, as well as plain vLLM versions
+    (e.g. ``0.13.0`` or ``v0.13.0``).
+    """
     version = version.strip()
+
+    if version.upper().startswith("RHAIIS"):
+        try:
+            from psap_mcp_server.src.tools.vllm_release_notes_tool import (
+                _resolve_to_vllm_version,
+            )
+            resolved, _, was_mapped = _resolve_to_vllm_version(version)
+            if was_mapped:
+                return resolved
+            logger.warning(
+                f"RHAIIS version '{version}' not found in mappings — "
+                f"passing through as-is"
+            )
+        except ImportError:
+            logger.warning("Could not import version resolver; using raw version")
+
     if not version.startswith("v"):
         version = f"v{version}"
     return version

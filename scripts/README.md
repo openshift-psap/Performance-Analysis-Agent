@@ -44,38 +44,37 @@ s3://psap-dashboard-data/profiles/rhaiis/
 ## Usage
 
 ```bash
-./scripts/upload-profiles-to-s3.sh <model-name> <version> <local-folder>
+./scripts/upload-profiles-to-s3.sh <accelerator> <model-name> <version> <local-folder>
 ```
 
 | Argument       | Description                                          | Examples                          |
 |----------------|------------------------------------------------------|-----------------------------------|
+| `accelerator`  | Accelerator type                                     | `H200`, `MI300X`                  |
 | `model-name`   | S3 model folder name                                 | `deepseek-r1`, `gpt-oss`, `llama-70b` |
-| `version`      | vLLM version folder name                             | `vLLM-0.11.2`, `vLLM-0.13.0`, `vLLM-0.14.0` |
+| `version`      | Version folder name                                  | `rhaiis-3.2.5`, `vLLM-0.13.0`    |
 | `local-folder` | Path to directory containing `.json` trace files     | `~/profiler/traces`, `/tmp/run1`  |
 
 ### Examples
 
 ```bash
-# Upload DeepSeek traces for vLLM 0.11.2
-./scripts/upload-profiles-to-s3.sh deepseek-r1 vLLM-0.11.2 ~/profiler/deepseek-v0112
+# Upload DeepSeek traces for H200
+./scripts/upload-profiles-to-s3.sh H200 deepseek-r1 rhaiis-3.2.5 ~/profiler/deepseek-v325
 
-# Upload GPT-OSS traces for vLLM 0.13.0
-./scripts/upload-profiles-to-s3.sh gpt-oss vLLM-0.13.0 /tmp/gpt-oss-traces
+# Upload GPT-OSS traces for H200
+./scripts/upload-profiles-to-s3.sh H200 gpt-oss vLLM-0.13.0 /tmp/gpt-oss-traces
 
-# Upload a new model
-./scripts/upload-profiles-to-s3.sh llama-70b vLLM-0.14.0 ./my-llama-traces
+# Upload for MI300X
+./scripts/upload-profiles-to-s3.sh MI300X llama-70b vLLM-0.14.0 ./my-llama-traces
 ```
 
 ## File Selection
 
-The script scans the local folder for `.json` files containing `rank0` in the filename. If multiple rank-0 files exist, the first one alphabetically is selected. All other files (non-rank-0 and non-JSON) are skipped.
+The script scans the local folder for `.json` files that are rank-0 traces. It supports two naming conventions:
 
-Common matching filenames:
+- **Explicit rank**: `trace_rank0_pid455_range2000-2010.json` (contains `rank0`)
+- **Positional rank**: `trace_1050_1060_0_20260225_002159.json` (3rd underscore-delimited field is `0`)
 
-- `trace_rank0_pid455_range2000-2010.json`
-- `rank0_forward_pass.json`
-
-Files without `rank0` in the name are skipped with a message.
+If multiple rank-0 files exist, the first one alphabetically is selected. All other files are skipped with a message.
 
 ## Environment Variables
 
@@ -87,7 +86,7 @@ Files without `rank0` in the name are skipped with a message.
 Override them if you're using a different bucket:
 
 ```bash
-S3_BUCKET=my-bucket PROFILE_S3_PREFIX=my-prefix ./scripts/upload-profiles-to-s3.sh deepseek-r1 vLLM-0.11.2 ./traces
+S3_BUCKET=my-bucket PROFILE_S3_PREFIX=my-prefix ./scripts/upload-profiles-to-s3.sh H200 deepseek-r1 rhaiis-3.2.5 ./traces
 ```
 
 ## Verifying Uploads
@@ -95,7 +94,7 @@ S3_BUCKET=my-bucket PROFILE_S3_PREFIX=my-prefix ./scripts/upload-profiles-to-s3.
 After uploading, verify the files are in S3:
 
 ```bash
-aws s3 ls s3://psap-dashboard-data/profiles/rhaiis/deepseek-r1/vLLM-0.11.2/
+aws s3 ls s3://psap-dashboard-data/profiles/rhaiis/H200/deepseek-r1/rhaiis-3.2.5/
 ```
 
 ## Troubleshooting: Incomplete Multipart Uploads

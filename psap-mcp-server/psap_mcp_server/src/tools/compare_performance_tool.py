@@ -402,6 +402,7 @@ async def compare_versions_comprehensive(
     model: Optional[str] = None,
     accelerator: Optional[str] = None,
     profile: Optional[str] = None,
+    tp: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Comprehensive version comparison with peak, mean, median, and geometric mean metrics.
     
@@ -421,10 +422,10 @@ async def compare_versions_comprehensive(
     TOOL_NAME=compare_versions_comprehensive
     DISPLAY_NAME=Compare Versions Comprehensive
     USECASE=Get a complete performance comparison between two versions using peak, mean, median, AND geometric mean metrics. Use this for thorough version regression analysis.
-    INSTRUCTIONS=1. Specify two versions to compare (order doesn't matter — newer is auto-detected), 2. Optionally filter by model/accelerator/profile, 3. Results show how the newer version changed relative to the older baseline
-    INPUT_DESCRIPTION=version1 (str): First version; version2 (str): Second version; model (str, optional): Filter by model; accelerator (str, optional): Filter by accelerator; profile (str, optional): Filter by profile like "1k/1k"
+    INSTRUCTIONS=1. Specify two versions to compare (order doesn't matter — newer is auto-detected), 2. Optionally filter by model/accelerator/profile/tp, 3. Results show how the newer version changed relative to the older baseline
+    INPUT_DESCRIPTION=version1 (str): First version; version2 (str): Second version; model (str, optional): Filter by model; accelerator (str, optional): Filter by accelerator; profile (str, optional): Filter by profile like "1k/1k"; tp (int, optional): Filter by tensor parallelism value
     OUTPUT_DESCRIPTION=Dictionary with peak, mean, median, and geometric mean comparisons for each metric, plus overall verdict. Changes are always expressed as newer version relative to older baseline.
-    EXAMPLES=compare_versions_comprehensive("RHAIIS-3.2.4", "RHAIIS-3.2.5"), compare_versions_comprehensive("v0.11.2", "v0.13.0", model="DeepSeek")
+    EXAMPLES=compare_versions_comprehensive("RHAIIS-3.2.4", "RHAIIS-3.2.5"), compare_versions_comprehensive("v0.11.2", "v0.13.0", model="DeepSeek"), compare_versions_comprehensive("RHAIIS-3.3", "RHAIIS-3.2.5", model="gpt-oss-120b", accelerator="H200", profile="1k/1k", tp=4)
     PREREQUISITES=Performance data must be available for both versions
     RELATED_TOOLS=compare_configurations, analyze_regression, get_vllm_release_notes
     
@@ -434,6 +435,7 @@ async def compare_versions_comprehensive(
         model: Optional model filter
         accelerator: Optional accelerator filter  
         profile: Optional profile filter (e.g., "1k/1k", "2048/128")
+        tp: Optional tensor parallelism filter (e.g., 1, 4, 8)
     
     Returns:
         Dictionary with comprehensive comparison including:
@@ -505,11 +507,33 @@ async def compare_versions_comprehensive(
                             df_newer = df_n_filtered
                             break
         
+        if tp is not None:
+            df_baseline = df_baseline[df_baseline["TP"] == tp]
+            df_newer = df_newer[df_newer["TP"] == tp]
+        
         if df_baseline.empty or df_newer.empty:
             return {
                 "status": "error",
                 "message": "No matching data after applying filters",
             }
+        
+        # Detect TP mismatch when user did not specify TP
+        if tp is None and "TP" in df_baseline.columns and "TP" in df_newer.columns:
+            all_tps = set(df_baseline["TP"].dropna().unique().tolist()) | set(df_newer["TP"].dropna().unique().tolist())
+            unique_tps = sorted([int(t) for t in all_tps])
+            if len(unique_tps) > 1:
+                tp_list = ", ".join([f"TP={t}" for t in unique_tps])
+                return {
+                    "status": "error",
+                    "error_type": "tp_mismatch",
+                    "message": (
+                        f"Multiple Tensor Parallelism (TP) values found in the filtered data: {tp_list}. "
+                        f"Mixing TP values produces incorrect geometric means. "
+                        f"Please specify which TP value to use (e.g., tp={unique_tps[0]})."
+                    ),
+                    "tp_values_found": unique_tps,
+                    "suggestion": f"Retry with tp={unique_tps[0]} or tp={unique_tps[-1]}",
+                }
         
         # Metrics to compare with their properties
         metrics_config = {
@@ -730,6 +754,7 @@ async def compare_versions_comprehensive(
                 "model": model,
                 "accelerator": accelerator,
                 "profile": profile,
+                "tp": tp,
             },
             "common_concurrencies": sorted(list(common_concurrencies)),
             "metrics_comparison": metrics_comparison,

@@ -85,6 +85,11 @@ class Settings(BaseSettings):
         default=None, json_schema_extra={"env": "GOOGLE_API_KEY"}
     )
     
+    # LLM Model Configuration
+    GEMINI_MODEL: str = Field(
+        default="gemini-3-flash-preview", json_schema_extra={"env": "GEMINI_MODEL"}
+    )
+
     # Context Caching Configuration
     ENABLE_PROMPT_CACHING: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_PROMPT_CACHING"}

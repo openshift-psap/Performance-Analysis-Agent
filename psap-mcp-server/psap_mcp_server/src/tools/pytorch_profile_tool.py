@@ -1,10 +1,10 @@
 """MCP tool for analyzing PyTorch profiler traces from vLLM benchmark runs.
 
 This tool dynamically discovers Chrome trace JSON files from either S3
-(``s3://<bucket>/<PROFILE_S3_PREFIX>/<model>/<version>/``) or a local
-directory fallback, extracts kernel statistics, and enables comparison
-between different vLLM versions to identify performance regressions and
-improvements.
+(``s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/``)
+or a local directory fallback, extracts kernel statistics, and enables
+comparison between different vLLM versions to identify performance
+regressions and improvements.
 
 New profiles are auto-discovered -- just upload trace files to S3 under
 the expected folder structure and the agent will find them.
@@ -31,12 +31,14 @@ KNOWN_MODELS: Dict[str, Dict[str, str]] = {
     "deepseek-r1": {
         "display_name": "DeepSeek-R1",
         "model_id": "deepseek-ai/DeepSeek-R1-0528",
-        "gpus": "H200",
     },
     "gpt-oss": {
         "display_name": "GPT-OSS",
         "model_id": "gpt-oss",
-        "gpus": "H200",
+    },
+    "gpt-oss-120b": {
+        "display_name": "GPT-OSS-120B",
+        "model_id": "openai/gpt-oss-120b",
     },
 }
 
@@ -44,8 +46,12 @@ KNOWN_MODELS: Dict[str, Dict[str, str]] = {
 _MODEL_ALIASES: Dict[str, str] = {
     "deepseek": "deepseek-r1",
     "deepseek-r1-0528": "deepseek-r1",
-    "gptoss": "gpt-oss",
-    "gpt_oss": "gpt-oss",
+    "gpt-oss": "gpt-oss-120b",
+    "gptoss": "gpt-oss-120b",
+    "gpt_oss": "gpt-oss-120b",
+    "gpt-oss-120b": "gpt-oss-120b",
+    "gptoss120b": "gpt-oss-120b",
+    "gpt_oss_120b": "gpt-oss-120b",
 }
 
 # Local fallback directory (used when S3 is not configured or unreachable)
@@ -117,12 +123,27 @@ def _parse_rank_from_filename(filename: str) -> Optional[int]:
     """Extract the rank number from a profiler trace filename.
 
     Handles patterns produced by PyTorch profiler, e.g.:
-      trace_rank0_pid467_range2000-2010.json
-      trace_rank3_pid458_range2000-2010_v0112.json
-      rank7.json
+      trace_rank0_pid467_range2000-2010.json        -> rank 0  (explicit rank)
+      trace_rank3_pid458_range2000-2010_v0112.json  -> rank 3
+      rank7.json                                     -> rank 7
+      trace_1050_1060_0_20260225_002159.json         -> rank 0  (3rd underscore-delimited segment)
+
+    The fallback pattern matches ``trace_<start>_<end>_<rank>_<date>_<time>.json``
+    which is the format produced by the RHAIIS profiling pipeline.
     """
     match = re.search(r"rank(\d+)", filename)
-    return int(match.group(1)) if match else None
+    if match:
+        return int(match.group(1))
+
+    # Fallback: trace_<start>_<end>_<rank>_<date>_<time>.json
+    parts = filename.replace(".json", "").split("_")
+    if len(parts) >= 4 and parts[0] == "trace":
+        try:
+            return int(parts[3])
+        except (ValueError, IndexError):
+            pass
+
+    return None
 
 
 def _extract_bare_version(version: str) -> str:
@@ -161,54 +182,84 @@ def _match_version(user_version: str, available_versions: List[str]) -> Optional
     return None
 
 
-def _match_model(user_model: Optional[str], available_models: List[str]) -> Optional[str]:
-    """Fuzzy-match a user-provided model name against discovered folder names.
+def _bare_model(composite_key: str) -> str:
+    """Extract the bare model name from a composite ``accelerator/model`` key."""
+    return composite_key.split("/", 1)[1] if "/" in composite_key else composite_key
 
-    Returns the matched folder name, or the first available model when
-    *user_model* is ``None``.
+
+def _key_accelerator(composite_key: str) -> str:
+    """Extract the accelerator from a composite ``accelerator/model`` key."""
+    return composite_key.split("/", 1)[0] if "/" in composite_key else "unknown"
+
+
+def _match_all_models(user_model: Optional[str], available_models: List[str]) -> List[str]:
+    """Fuzzy-match a user-provided model name against discovered composite keys.
+
+    Composite keys have the form ``accelerator/model`` (e.g. ``H200/deepseek-r1``).
+    The user may provide just the model part, just the accelerator, or both.
+
+    Returns **all** matching composite keys (empty list if no match).
     """
     if not available_models:
-        return None
+        return []
 
     if user_model is None:
-        return available_models[0]
+        return available_models
 
     lower = user_model.lower().strip()
 
-    # Direct match
-    if lower in available_models:
-        return lower
+    # Direct case-insensitive match on full composite key
+    for key in available_models:
+        if key.lower() == lower:
+            return [key]
 
-    # Alias match
+    # Alias: resolve bare model aliases, then collect all matching keys
     alias = _MODEL_ALIASES.get(lower)
-    if alias and alias in available_models:
-        return alias
+    if alias:
+        matches = [k for k in available_models if _bare_model(k) == alias]
+        if matches:
+            return matches
 
-    # Substring / known-metadata match
-    for model_key in available_models:
-        if lower in model_key or model_key in lower:
-            return model_key
-        info = KNOWN_MODELS.get(model_key, {})
+    # Substring match against the full key, bare model part, and known metadata
+    matches = []
+    for key in available_models:
+        bare = _bare_model(key).lower()
+        if lower in key.lower() or lower in bare or bare in lower:
+            matches.append(key)
+            continue
+        info = KNOWN_MODELS.get(bare, {})
         if lower in info.get("display_name", "").lower():
-            return model_key
+            matches.append(key)
+            continue
         if lower in info.get("model_id", "").lower():
-            return model_key
+            matches.append(key)
 
-    return None
+    return matches
+
+
+def _match_model(user_model: Optional[str], available_models: List[str]) -> Optional[str]:
+    """Convenience wrapper: returns the single match or first match."""
+    matches = _match_all_models(user_model, available_models)
+    return matches[0] if matches else None
 
 
 def _get_display_name(model_key: str) -> str:
-    """Human-friendly display name for a model folder name."""
-    return KNOWN_MODELS.get(model_key, {}).get("display_name", model_key)
+    """Human-friendly display name for a composite model key."""
+    bare = _bare_model(model_key)
+    name = KNOWN_MODELS.get(bare, {}).get("display_name", bare)
+    accel = _key_accelerator(model_key)
+    return f"{name} ({accel})" if accel != "unknown" else name
 
 
 def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
     """Build a model info dict from known metadata + discovered data."""
-    known = KNOWN_MODELS.get(model_key, {})
+    bare = _bare_model(model_key)
+    accel = _key_accelerator(model_key)
+    known = KNOWN_MODELS.get(bare, {})
     return {
-        "display_name": known.get("display_name", model_key),
-        "model_id": known.get("model_id", model_key),
-        "gpus": known.get("gpus", "unknown"),
+        "display_name": known.get("display_name", bare),
+        "model_id": known.get("model_id", bare),
+        "gpus": accel,
         "tensor_parallelism": num_ranks,
         "num_ranks": num_ranks,
     }
@@ -221,9 +272,10 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
 def _discover_profiles_s3() -> Optional[Dict]:
     """Discover available profiles from S3 by listing directories.
 
-    Walks ``s3://<bucket>/<prefix>/<model>/<version>/`` and returns::
+    Walks ``s3://<bucket>/<prefix>/<accelerator>/<model>/<version>/`` and
+    returns::
 
-        {model: {version: {rank: {"source": "s3", "key": ..., ...}}}}
+        {"accelerator/model": {version: {rank: {"source": "s3", "key": ..., ...}}}}
 
     Returns ``None`` if S3 is not configured or unreachable.
     """
@@ -248,58 +300,61 @@ def _discover_profiles_s3() -> Optional[Dict]:
 
     index: Dict[str, Dict[str, Dict[int, Dict]]] = {}
 
+    def _list_prefixes(parent_prefix: str) -> List[str]:
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=parent_prefix, Delimiter="/")
+        return [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+
+    def _scan_version_traces(version_prefix: str, composite_key: str) -> None:
+        """List trace files under a version prefix and add them to the index."""
+        paginator_token = None
+        while True:
+            kwargs: Dict[str, Any] = {"Bucket": bucket, "Prefix": version_prefix}
+            if paginator_token:
+                kwargs["ContinuationToken"] = paginator_token
+
+            resp = s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                filename = key.split("/")[-1]
+                if not filename.endswith(".json"):
+                    continue
+                rank = _parse_rank_from_filename(filename)
+                if rank is None:
+                    continue
+
+                index.setdefault(composite_key, {}).setdefault(
+                    version_prefix.rstrip("/").split("/")[-1], {}
+                )[rank] = {
+                    "source": "s3",
+                    "key": key,
+                    "filename": filename,
+                    "size_bytes": obj.get("Size", 0),
+                }
+
+            if resp.get("IsTruncated"):
+                paginator_token = resp.get("NextContinuationToken")
+            else:
+                break
+
     try:
-        # 1. List model folders
-        resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
-        model_prefixes = [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+        # 1. List accelerator folders  (e.g. H200/, MI300X/)
+        accel_prefixes = _list_prefixes(prefix)
 
-        for model_prefix in model_prefixes:
-            model_name = model_prefix.rstrip("/").split("/")[-1]
+        for accel_prefix in accel_prefixes:
+            accelerator = accel_prefix.rstrip("/").split("/")[-1]
 
-            # 2. List version folders
-            resp2 = s3.list_objects_v2(
-                Bucket=bucket, Prefix=model_prefix, Delimiter="/"
-            )
-            version_prefixes = [
-                cp["Prefix"] for cp in resp2.get("CommonPrefixes", [])
-            ]
+            # 2. List model folders  (e.g. deepseek-r1/, gpt-oss/)
+            model_prefixes = _list_prefixes(accel_prefix)
 
-            for version_prefix in version_prefixes:
-                version_name = version_prefix.rstrip("/").split("/")[-1]
+            for model_prefix in model_prefixes:
+                model_name = model_prefix.rstrip("/").split("/")[-1]
+                composite_key = f"{accelerator}/{model_name}"
 
-                # 3. List trace files (handle pagination)
-                paginator_token = None
-                while True:
-                    kwargs: Dict[str, Any] = {
-                        "Bucket": bucket,
-                        "Prefix": version_prefix,
-                    }
-                    if paginator_token:
-                        kwargs["ContinuationToken"] = paginator_token
+                # 3. List version folders  (e.g. rhaiis-3.2.5/, vLLM-0.13.0/)
+                version_prefixes = _list_prefixes(model_prefix)
 
-                    resp3 = s3.list_objects_v2(**kwargs)
-                    for obj in resp3.get("Contents", []):
-                        key = obj["Key"]
-                        filename = key.split("/")[-1]
-                        if not filename.endswith(".json"):
-                            continue
-                        rank = _parse_rank_from_filename(filename)
-                        if rank is None:
-                            continue
-
-                        index.setdefault(model_name, {}).setdefault(
-                            version_name, {}
-                        )[rank] = {
-                            "source": "s3",
-                            "key": key,
-                            "filename": filename,
-                            "size_bytes": obj.get("Size", 0),
-                        }
-
-                    if resp3.get("IsTruncated"):
-                        paginator_token = resp3.get("NextContinuationToken")
-                    else:
-                        break
+                for version_prefix in version_prefixes:
+                    _scan_version_traces(version_prefix, composite_key)
 
         if index:
             summary = ", ".join(
@@ -321,12 +376,12 @@ def _discover_profiles_s3() -> Optional[Dict]:
 def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
     """Discover available profiles from the local filesystem.
 
-    Scans ``base_dir/<model>/<version>/*.json`` for files containing
-    ``rank`` in the filename.
+    Scans ``base_dir/<accelerator>/<model>/<version>/*.json`` for files
+    containing ``rank`` in the filename.
 
     Returns::
 
-        {model: {version: {rank: {"source": "local", "path": Path, ...}}}}
+        {"accelerator/model": {version: {rank: {"source": "local", "path": Path, ...}}}}
     """
     base = Path(base_dir or LOCAL_PROFILE_BASE)
     index: Dict[str, Dict[str, Dict[int, Dict]]] = {}
@@ -335,31 +390,37 @@ def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
         logger.info(f"Local profile base not found: {base}")
         return index
 
-    for model_dir in sorted(base.iterdir()):
-        if not model_dir.is_dir() or model_dir.name.startswith("."):
+    for accel_dir in sorted(base.iterdir()):
+        if not accel_dir.is_dir() or accel_dir.name.startswith("."):
             continue
-        model_name = model_dir.name
+        accelerator = accel_dir.name
 
-        for version_dir in sorted(model_dir.iterdir()):
-            if not version_dir.is_dir() or version_dir.name.startswith("."):
+        for model_dir in sorted(accel_dir.iterdir()):
+            if not model_dir.is_dir() or model_dir.name.startswith("."):
                 continue
-            version_name = version_dir.name
+            model_name = model_dir.name
+            composite_key = f"{accelerator}/{model_name}"
 
-            for f in sorted(version_dir.iterdir()):
-                if not f.is_file() or not f.name.endswith(".json"):
+            for version_dir in sorted(model_dir.iterdir()):
+                if not version_dir.is_dir() or version_dir.name.startswith("."):
                     continue
-                rank = _parse_rank_from_filename(f.name)
-                if rank is None:
-                    continue
+                version_name = version_dir.name
 
-                index.setdefault(model_name, {}).setdefault(
-                    version_name, {}
-                )[rank] = {
-                    "source": "local",
-                    "path": f,
-                    "filename": f.name,
-                    "size_bytes": f.stat().st_size,
-                }
+                for f in sorted(version_dir.rglob("*.json")):
+                    if not f.is_file():
+                        continue
+                    rank = _parse_rank_from_filename(f.name)
+                    if rank is None:
+                        continue
+
+                    index.setdefault(composite_key, {}).setdefault(
+                        version_name, {}
+                    )[rank] = {
+                        "source": "local",
+                        "path": f,
+                        "filename": f.name,
+                        "size_bytes": f.stat().st_size,
+                    }
 
     if index:
         summary = ", ".join(
@@ -394,7 +455,7 @@ def _discover_profiles(force_refresh: bool = False) -> Dict:
     else:
         logger.warning(
             "No profile data found in S3. "
-            "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<model>/<version>/"
+            "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/"
         )
         index = {}
 
@@ -672,11 +733,21 @@ def _resolve_model_and_version(
         return None, None, "No profile data available. Check S3 configuration or local profile directory.", index
 
     available_models = sorted(index.keys())
-    model_key = _match_model(model, available_models)
-    if model_key is None:
+    matches = _match_all_models(model, available_models)
+
+    if not matches:
         return None, None, (
             f"Model '{model}' not found. Available models: {available_models}"
         ), index
+
+    if len(matches) > 1:
+        formatted = ", ".join(matches)
+        return None, None, (
+            f"Multiple models match '{model}': {formatted}. "
+            f"Please specify the accelerator, e.g. '{matches[0]}'"
+        ), index
+
+    model_key = matches[0]
 
     available_versions = sorted(index[model_key].keys())
     matched_version = _match_version(version, available_versions)
@@ -884,12 +955,21 @@ async def compare_pytorch_profiles(
             return {"status": "error", "message": "No profile data available."}
 
         available_models = sorted(index.keys())
-        model_key = _match_model(model, available_models)
-        if model_key is None:
+        matches = _match_all_models(model, available_models)
+        if not matches:
             return {
                 "status": "error",
                 "message": f"Model '{model}' not found. Available: {available_models}",
             }
+        if len(matches) > 1:
+            return {
+                "status": "error",
+                "message": (
+                    f"Multiple models match '{model}': {', '.join(matches)}. "
+                    f"Please specify the accelerator, e.g. '{matches[0]}'"
+                ),
+            }
+        model_key = matches[0]
 
         available_versions = sorted(index[model_key].keys())
 
@@ -1510,16 +1590,16 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                 "data_source": "S3" if settings.S3_BUCKET else "local",
             }
 
-        # Optionally filter to a single model
+        # Optionally filter by model name
         if model is not None:
             available_models = sorted(index.keys())
-            model_key = _match_model(model, available_models)
-            if model_key is None:
+            matches = _match_all_models(model, available_models)
+            if not matches:
                 return {
                     "status": "error",
                     "message": f"Model '{model}' not found. Available: {available_models}",
                 }
-            models_to_show = {model_key: index[model_key]}
+            models_to_show = {k: index[k] for k in matches}
         else:
             models_to_show = index
 
@@ -1555,6 +1635,7 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
             models_data[model_key] = {
                 "display_name": model_info["display_name"],
                 "model_id": model_info["model_id"],
+                "accelerator": _key_accelerator(model_key),
                 "available_versions": sorted(versions.keys()),
                 "profiles": profiles_list,
                 "profile_info": {
@@ -1624,13 +1705,13 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
         # Optionally filter
         if model is not None:
             available_models = sorted(index.keys())
-            model_key = _match_model(model, available_models)
-            if model_key is None:
+            matches = _match_all_models(model, available_models)
+            if not matches:
                 return {
                     "status": "error",
                     "message": f"Model '{model}' not found. Available: {available_models}",
                 }
-            models_to_check = {model_key: index[model_key]}
+            models_to_check = {k: index[k] for k in matches}
         else:
             models_to_check = index
 

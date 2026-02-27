@@ -110,10 +110,10 @@ Performance metrics are loaded from S3 or a local `consolidated_dashboard.csv` f
 Chrome trace JSON files are expected at:
 
 ```
-s3://<bucket>/<PROFILE_S3_PREFIX>/<model>/<version>/trace_rank<N>_*.json
+s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/trace_rank<N>_*.json
 ```
 
-The server auto-discovers available models and versions by listing S3 prefixes.
+The server auto-discovers available accelerators, models, and versions by listing S3 prefixes.
 
 ### vLLM Source and Releases (GitHub API)
 
