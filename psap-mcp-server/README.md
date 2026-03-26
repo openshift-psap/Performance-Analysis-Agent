@@ -3,7 +3,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12,3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-FastMCP server providing 24 performance analysis tools over the Model Context Protocol. Designed for the [PSAP Agent](../psap-agent/) but compatible with any MCP client (Claude Desktop, Cursor, custom agents). Tools query vLLM benchmark data from S3, analyze PyTorch profiler traces, fetch vLLM source code and diffs from GitHub, and generate Grafana dashboard links.
+FastMCP server providing 28 performance analysis tools over the Model Context Protocol. Designed for the [PSAP Agent](../psap-agent/) but compatible with any MCP client (Claude Desktop, Cursor, custom agents). Tools query vLLM benchmark data from S3, analyze PyTorch profiler traces, fetch vLLM source code and diffs from GitHub, and generate Grafana dashboard links.
 
 ## Tool Catalog
 
@@ -18,6 +18,8 @@ FastMCP server providing 24 performance analysis tools over the Model Context Pr
 | Kernel-to-Code | `map_kernel_to_vllm_code`, `get_kernel_categories`, `correlate_kernel_with_changes` | Map profiler kernel names to vLLM source files, correlate performance changes with code changes |
 | vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff` | Fetch vLLM source code at any version tag and line-level diffs between versions via GitHub API |
 | vLLM Releases | `get_vllm_release_notes`, `compare_vllm_versions`, `get_version_mappings`, `get_vllm_pull_request` | Fetch release notes, compare changelogs, resolve version mappings, inspect PRs |
+| vLLM Logs | `fetch_vllm_logs`, `compare_vllm_logs` | Fetch and compare vLLM server logs (engine config, compilation timings, memory allocation) between versions |
+| Performance Triage | `get_vllm_performance_triage_guide` | Structured 5-step vLLM performance triage workflow and diagnostic guidance |
 
 ## Architecture
 
@@ -31,7 +33,7 @@ graph LR
 
     subgraph server [PSAP MCP Server :5001]
         API[FastAPI + FastMCP]
-        Tools[24 MCP Tools]
+        Tools[28 MCP Tools]
     end
 
     subgraph data [Data Sources]
@@ -151,6 +153,8 @@ psap-mcp-server/
 │   │   │   ├── vllm_release_notes_tool.py  # Release notes, PRs, version mappings
 │   │   │   ├── pytorch_profile_tool.py     # Profiler trace analysis
 │   │   │   ├── kernel_code_mapper_tool.py  # Kernel-to-source mapping, GitHub code/diff
+│   │   │   ├── vllm_log_tool.py            # vLLM server log fetching and comparison
+│   │   │   ├── vllm_performance_triage_tool.py # 5-step performance triage guide
 │   │   │   ├── performance_data_loader.py  # S3/CSV data loading
 │   │   │   └── s3_utils.py                 # S3 client helper
 │   │   ├── oauth/                          # OAuth2 support

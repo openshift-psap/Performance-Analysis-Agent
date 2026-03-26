@@ -176,43 +176,36 @@ async def compare_configurations(
                 "errored_requests",
             ]
 
-        # Query data for each configuration
-        config_results = []
+        # First pass: gather filtered dataframes for each configuration
+        config_filtered_dfs = []
         for i, config in enumerate(configurations):
             filtered_df = df.copy()
 
-            # Apply filters
             if config.get("model"):
                 filtered_df = filtered_df[filtered_df["model"].str.contains(config["model"], case=False, na=False)]
             if config.get("accelerator"):
                 filtered_df = filtered_df[filtered_df["accelerator"].str.contains(config["accelerator"], case=False, na=False)]
             if config.get("version"):
-                # Use exact match for version to avoid matching "RHAIIS-3.2.3" when user wants "RHAIIS-3.2.3" (not async)
-                # But use case-insensitive comparison to handle "rhaiis" vs "RHAIIS"
                 filtered_df = filtered_df[filtered_df["version"].str.lower() == config["version"].lower()]
             if config.get("tp") is not None:
                 filtered_df = filtered_df[filtered_df["TP"] == config["tp"]]
-            
-            # Profile filtering (format: "1k/1k" or "2048/128")
+
             if config.get("profile"):
                 profile = config["profile"]
                 if "/" in profile:
                     parts = profile.lower().split("/")
                     if len(parts) == 2:
                         try:
-                            # Helper function to parse token counts with k notation
                             def parse_token_count(s):
                                 s = s.strip()
                                 if 'k' in s:
                                     num = float(s.replace('k', ''))
-                                    # Try both decimal (k=1000) and binary (k=1024) interpretations
                                     return [int(num * 1000), int(num * 1024)]
                                 return [int(s)]
-                            
+
                             prompt_candidates = parse_token_count(parts[0])
                             output_candidates = parse_token_count(parts[1])
-                            
-                            # Try all combinations and find matches
+
                             match_found = False
                             for p_tok in prompt_candidates:
                                 for o_tok in output_candidates:
@@ -229,6 +222,49 @@ async def compare_configurations(
                         except (ValueError, AttributeError):
                             pass
 
+            config_filtered_dfs.append((i, config, filtered_df))
+
+        # Compute concurrency cap: min of max concurrencies across non-empty configs.
+        # When one config was benchmarked to higher concurrency than another, comparing
+        # peak throughput is unfair (throughput rises with concurrency until saturation).
+        conc_col = "intended concurrency"
+        max_conc_per_config = {}
+        for i, config, filtered_df in config_filtered_dfs:
+            if not filtered_df.empty and conc_col in filtered_df.columns:
+                max_conc = filtered_df[conc_col].dropna().max()
+                if pd.notna(max_conc):
+                    max_conc_per_config[i] = int(max_conc)
+
+        concurrency_cap = None
+        concurrency_cap_note = None
+        if len(max_conc_per_config) >= 2:
+            min_max = min(max_conc_per_config.values())
+            max_max = max(max_conc_per_config.values())
+            if min_max < max_max:
+                concurrency_cap = min_max
+                higher = []
+                capped_by = []
+                for i, config, _ in config_filtered_dfs:
+                    mc = max_conc_per_config.get(i)
+                    if mc is None:
+                        continue
+                    label = config.get("version") or config.get("model") or f"config_{i+1}"
+                    if mc > min_max:
+                        higher.append(f"{label} (tested up to concurrency {mc})")
+                    else:
+                        capped_by.append(label)
+                concurrency_cap_note = (
+                    f"Concurrency capped at {concurrency_cap} for a fair comparison. "
+                    f"{', '.join(higher)} had data at higher concurrency levels, "
+                    f"but it was excluded because {', '.join(capped_by)} was only "
+                    f"benchmarked up to concurrency {concurrency_cap}. "
+                    f"For a comparison across all common concurrency levels using "
+                    f"geometric means, ask for a comprehensive version comparison."
+                )
+
+        # Second pass: apply concurrency cap and pick best rows
+        config_results = []
+        for i, config, filtered_df in config_filtered_dfs:
             if filtered_df.empty:
                 config_results.append({
                     "config_id": f"config_{i+1}",
@@ -238,17 +274,27 @@ async def compare_configurations(
                 })
                 continue
 
-            # Get best result (highest throughput)
+            if concurrency_cap is not None and conc_col in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df[conc_col] <= concurrency_cap]
+
+            if filtered_df.empty:
+                config_results.append({
+                    "config_id": f"config_{i+1}",
+                    "config": config,
+                    "found": False,
+                    "message": f"No data found at or below concurrency {concurrency_cap}",
+                })
+                continue
+
             if "output_tok/sec" in filtered_df.columns:
                 best_row = filtered_df.sort_values("output_tok/sec", ascending=False).iloc[0]
             else:
                 best_row = filtered_df.iloc[0]
 
-            # Create profile string from prompt and output tokens
             profile_str = None
             if pd.notna(best_row.get("prompt toks")) and pd.notna(best_row.get("output toks")):
                 profile_str = f"{int(best_row['prompt toks'])}/{int(best_row['output toks'])}"
-            
+
             result = {
                 "config_id": f"config_{i+1}",
                 "config": config,
@@ -259,13 +305,23 @@ async def compare_configurations(
                     "version": best_row.get("version"),
                     "TP": int(best_row.get("TP")) if pd.notna(best_row.get("TP")) else None,
                     "profile": profile_str,
-                    "concurrency": int(best_row.get("intended concurrency")) if pd.notna(best_row.get("intended concurrency")) else None,
-                    "concurrency_note": "Concurrency at which peak throughput was achieved",
+                    "concurrency": int(best_row.get(conc_col)) if pd.notna(best_row.get(conc_col)) else None,
+                    "concurrency_note": (
+                        f"All metrics are from the single data point where peak output throughput "
+                        f"was achieved at this concurrency level (capped at max concurrency "
+                        f"{concurrency_cap} for fair comparison). For a comparison across all "
+                        f"common concurrency levels using geometric means, ask for a "
+                        f"comprehensive version comparison."
+                        if concurrency_cap
+                        else "All metrics are from the single data point where peak output "
+                        "throughput was achieved at this concurrency level. For a comparison "
+                        "across all concurrency levels using geometric means, ask for a "
+                        "comprehensive version comparison."
+                    ),
                 },
                 "metrics": {},
             }
 
-            # Extract requested metrics
             for metric in metrics:
                 if metric in best_row.index and pd.notna(best_row[metric]):
                     result["metrics"][metric] = float(best_row[metric])
@@ -379,13 +435,16 @@ async def compare_configurations(
 
         logger.info(f"Compared {len(valid_results)} configurations across {len(metrics)} metrics")
 
-        return {
+        result = {
             "status": "success",
             "comparison": config_results,
             "relative_performance": relative_performance,
             "winner": winner,
             "message": f"Successfully compared {len(valid_results)} configurations",
         }
+        if concurrency_cap_note:
+            result["concurrency_cap_note"] = concurrency_cap_note
+        return result
 
     except Exception as e:
         logger.error(f"Error comparing configurations: {e}")

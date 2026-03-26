@@ -135,8 +135,22 @@ for u in json.load(sys.stdin):
 
 
 
+## Uploading vLLM Log Files
+
+In addition to profiler traces, you can upload vLLM server log files into the same version folder. The MCP server will discover them automatically and make them available via `fetch_vllm_logs` and `compare_vllm_logs` tools.
+
+**Naming**: The log file must contain "log" in its name and have a `.txt` or `.log` extension. Examples: `3.3-logs.txt`, `vllm-server.log`.
+
+**Upload manually** (the upload script handles traces only):
+
+```bash
+aws s3 cp ./3.3-logs.txt s3://psap-dashboard-data/profiles/rhaiis/H200/gpt-oss-120b/rhaiis-3.3/3.3-logs.txt
+```
+
+The agent uses these logs to compare engine configurations (quantization, attention backend, CUDA graph settings, memory allocation) between versions, which is critical for explaining performance differences not visible in kernel-level profiling.
+
 ## What Happens After Upload
 
-- The MCP server will **automatically discover** the new profile on the next request (no restart needed).
-- Profile discovery results are cached for **5 minutes**. After that, new uploads will be picked up.
-- The AI agent can then analyze, compare, and provide insights on the uploaded trace.
+- The MCP server will **automatically discover** new profiles and log files on the next request (no restart needed).
+- Discovery results are cached for **5 minutes**. After that, new uploads will be picked up.
+- The AI agent can then analyze, compare, and provide insights on the uploaded traces and logs.

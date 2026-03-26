@@ -60,6 +60,13 @@ from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     fetch_vllm_source,
     get_vllm_code_diff,
 )
+from psap_mcp_server.src.tools.vllm_log_tool import (
+    fetch_vllm_logs,
+    compare_vllm_logs,
+)
+from psap_mcp_server.src.tools.vllm_performance_triage_tool import (
+    get_vllm_performance_triage_guide,
+)
 from psap_mcp_server.utils.pylogger import (
     force_reconfigure_all_loggers,
     get_python_logger,
@@ -121,6 +128,9 @@ class PSAPMCPServer:
         - correlate_kernel_with_changes: Correlate kernel performance with code changes
         - fetch_vllm_source: Fetch actual vLLM source code from GitHub at a specific version
         - get_vllm_code_diff: Fetch code diff between two vLLM versions for specific files
+        - fetch_vllm_logs: Fetch and parse vLLM server logs for a specific version
+        - compare_vllm_logs: Compare vLLM server logs between two versions
+        - get_vllm_performance_triage_guide: Retrieve vLLM performance triage guidance (5-step diagnostic workflow)
         """
         # Register performance analysis tools
         self.mcp.tool()(query_performance_metrics)
@@ -152,3 +162,8 @@ class PSAPMCPServer:
         # Register vLLM source code access tools
         self.mcp.tool()(fetch_vllm_source)
         self.mcp.tool()(get_vllm_code_diff)
+        # Register vLLM log analysis tools
+        self.mcp.tool()(fetch_vllm_logs)
+        self.mcp.tool()(compare_vllm_logs)
+        # Register vLLM performance triage guide
+        self.mcp.tool()(get_vllm_performance_triage_guide)

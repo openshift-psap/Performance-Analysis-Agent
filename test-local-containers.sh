@@ -286,31 +286,76 @@ create_network() {
     fi
 }
 
-build_images() {
-    log_info "Building container images..."
-    
-    # Build MCP Server (build from mcp/ to include performance-dashboard)
-    # Build for local platform (ARM64 on Mac, AMD64 on Linux)
+PLATFORM="linux/$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+
+build_mcp() {
     log_info "Building MCP Server..."
-    podman build --platform linux/$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') \
+    podman build --platform $PLATFORM \
         -t psap-mcp-server:local -f psap-mcp-server/Containerfile .
     log_success "MCP Server image built"
-    
-    # Build Agent
+}
+
+build_agent() {
     log_info "Building PSAP Agent..."
     cd psap-agent
-    podman build --platform linux/$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') \
+    podman build --platform $PLATFORM \
         -t psap-agent:local -f Containerfile .
     cd ..
     log_success "Agent image built"
-    
-    # Build Streamlit UI
+}
+
+build_streamlit() {
     log_info "Building Streamlit UI..."
     cd psap-agent/examples
-    podman build --platform linux/$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') \
+    podman build --platform $PLATFORM \
         -t streamlit-ui:local -f Containerfile .
     cd ../..
     log_success "Streamlit UI image built"
+}
+
+build_images() {
+    log_info "Building container images..."
+    build_mcp
+    build_agent
+    build_streamlit
+}
+
+# Map user-facing component names to build/start functions and container names
+resolve_component() {
+    case "$1" in
+        mcp|mcp-server)   echo "mcp" ;;
+        agent)            echo "agent" ;;
+        streamlit|ui)     echo "streamlit" ;;
+        *)
+            log_error "Unknown component: $1"
+            echo "  Valid components: mcp, agent, streamlit (or: ui)"
+            exit 1
+            ;;
+    esac
+}
+
+component_container_name() {
+    case "$1" in
+        mcp)       echo "psap-mcp-server" ;;
+        agent)     echo "psap-agent" ;;
+        streamlit) echo "streamlit-ui" ;;
+    esac
+}
+
+build_component() {
+    case "$1" in
+        mcp)       build_mcp ;;
+        agent)     build_agent ;;
+        streamlit) build_streamlit ;;
+    esac
+}
+
+start_component() {
+    case "$1" in
+        mcp)       start_mcp_server ;;
+        agent)     start_agent ;;
+        streamlit) start_streamlit ;;
+    esac
 }
 
 start_postgres() {
@@ -733,7 +778,57 @@ main() {
 }
 
 # Handle script arguments
+show_help() {
+    cat <<'EOF'
+PSAP Agent – Local Container Testing
+
+Usage:
+  ./test-local-containers.sh [command]
+
+Commands:
+  start                  Full setup: build images, start all containers
+                         (PostgreSQL, Langfuse, MCP Server, Agent, Streamlit UI)
+  restart [component]    Restart app containers (keeps PostgreSQL & Langfuse).
+                         Optionally restart a single component.
+  rebuild [component]    Rebuild app images only — does not touch PostgreSQL
+                         or Langfuse (all or a single component).
+  cleanup                Stop and remove all containers and the Podman network
+  logs                   Tail live logs from all app containers (Ctrl+C to exit)
+  help                   Show this help message
+
+Components (for rebuild / restart):
+  mcp          MCP Server          (container: psap-mcp-server)
+  agent        PSAP Agent          (container: psap-agent)
+  streamlit    Streamlit UI        (container: streamlit-ui, alias: ui)
+
+Examples:
+  ./test-local-containers.sh rebuild                # Rebuild all images
+  ./test-local-containers.sh rebuild streamlit      # Rebuild Streamlit only
+  ./test-local-containers.sh restart agent          # Restart Agent only
+  ./test-local-containers.sh rebuild ui && ./test-local-containers.sh restart ui
+
+Credentials:
+  Google API Key     – loaded from GOOGLE_API_KEY env var or psap-agent/.env
+  Grafana            – loaded from GRAFANA_* env vars or psap-mcp-server/.env
+  S3 / AWS           – loaded from psap-mcp-server/.env
+  Langfuse           – prompted interactively on first start
+
+Access URLs (after startup):
+  Streamlit UI   http://localhost:8501
+  Agent API      http://localhost:5002
+  MCP Server     http://localhost:5001
+  Langfuse UI    http://localhost:3000
+  PostgreSQL     localhost:5432
+EOF
+}
+
 case "${1:-}" in
+    start)
+        main
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
     cleanup)
         log_info "Running cleanup only..."
         cleanup_existing
@@ -741,40 +836,50 @@ case "${1:-}" in
         log_success "Cleanup complete"
         ;;
     rebuild)
-        log_info "Rebuilding images..."
-        build_images
+        if [ -n "${2:-}" ]; then
+            comp=$(resolve_component "$2")
+            build_component "$comp"
+        else
+            log_info "Rebuilding all images..."
+            build_images
+        fi
         log_success "Rebuild complete"
         ;;
     restart)
-        log_info "Restarting app containers (keeping PostgreSQL & Langfuse)..."
-        
-        # Prompt for credentials in case they need updating
         prompt_for_credentials
-        
-        # Stop and remove only app containers
-        for container in streamlit-ui psap-agent psap-mcp-server; do
-            if podman ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
-                podman stop $container 2>/dev/null || true
-                podman rm $container 2>/dev/null || true
-            fi
-        done
-        
-        # Check if network exists, create if needed
+
         if ! podman network exists $NETWORK_NAME 2>/dev/null; then
             create_network
         fi
-        
-        # Restart app containers
-        start_mcp_server
-        start_agent
-        start_streamlit
+
+        if [ -n "${2:-}" ]; then
+            comp=$(resolve_component "$2")
+            cname=$(component_container_name "$comp")
+            log_info "Restarting $cname..."
+            if podman ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
+                podman stop "$cname" 2>/dev/null || true
+                podman rm "$cname" 2>/dev/null || true
+            fi
+            start_component "$comp"
+        else
+            log_info "Restarting all app containers (keeping PostgreSQL & Langfuse)..."
+            for container in streamlit-ui psap-agent psap-mcp-server; do
+                if podman ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+                    podman stop $container 2>/dev/null || true
+                    podman rm $container 2>/dev/null || true
+                fi
+            done
+            start_mcp_server
+            start_agent
+            start_streamlit
+        fi
         show_status
         ;;
     logs)
         view_logs
         ;;
     *)
-        main "$@"
+        show_help
         ;;
 esac
 

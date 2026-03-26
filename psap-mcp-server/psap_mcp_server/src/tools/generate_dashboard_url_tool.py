@@ -5,7 +5,7 @@ allowing users to directly visualize the data being discussed.
 """
 
 from typing import Dict, List, Optional
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode
 
 
 # Profile mapping from shorthand notation to full dashboard names
@@ -25,6 +25,24 @@ PROFILE_MAPPING = {
     "1k/100": "Profile F: Prefill Heavy (1k/100)",
 }
 
+VALID_PP_Y_VALUES = [
+    "Throughput (Output tokens/second generated)",
+    "Efficiency (Output tokens/sec per TP unit)",
+    "Inter-Token Latency P95 (Time between tokens)",
+    "Time to First Token P95 (Response start delay)",
+    "Request Latency Median (Total request processing time)",
+    "Request Latency Max (Maximum request processing time)",
+    "Time Per Output Token P95 (Token generation time)",
+    "Total Throughput (Total tokens/second processed)",
+    "Request Count (Successful completions)",
+    "Error Rate (% Failed requests)",
+]
+
+VALID_SECTIONS = ["cost_analysis", "performance_plots", "compare_versions"]
+
+
+VALID_FULL_PROFILES = set(PROFILE_MAPPING.values())
+
 
 def normalize_profile(profile: str) -> str:
     """Convert shorthand profile notation to full dashboard profile name.
@@ -35,12 +53,23 @@ def normalize_profile(profile: str) -> str:
     Returns:
         Full profile name as used in the dashboard
     """
-    # If it's already a full profile name, return it
-    if profile.startswith("Profile "):
+    if profile in VALID_FULL_PROFILES:
         return profile
-    
-    # Try to find in mapping
-    return PROFILE_MAPPING.get(profile, profile)
+
+    mapped = PROFILE_MAPPING.get(profile)
+    if mapped:
+        return mapped
+
+    # Try to extract shorthand from parentheses, e.g. "Profile B: Throughput (512/2k)" -> "512/2k"
+    import re
+    match = re.search(r"\(([^)]+)\)", profile)
+    if match:
+        shorthand = match.group(1)
+        mapped = PROFILE_MAPPING.get(shorthand)
+        if mapped:
+            return mapped
+
+    return profile
 
 
 async def generate_dashboard_url(
@@ -50,6 +79,17 @@ async def generate_dashboard_url(
     versions: Optional[List[str]] = None,
     profile: Optional[str] = None,
     tp_sizes: Optional[List[int]] = None,
+    section: Optional[str] = None,
+    # Performance plots parameters (section="performance_plots")
+    pp_x: Optional[str] = None,
+    pp_y: Optional[str] = None,
+    pp_conc: Optional[int] = None,
+    # Compare versions parameters (section="compare_versions")
+    cv_v1: Optional[str] = None,
+    cv_v2: Optional[str] = None,
+    cv_gpu: Optional[str] = None,
+    cv_profile: Optional[str] = None,
+    cv_conc: Optional[List[int]] = None,
     base_url: str = "https://aidash.app.intlab.redhat.com",
 ) -> str:
     """Generate a URL to the performance dashboard with specified filters.
@@ -57,44 +97,82 @@ async def generate_dashboard_url(
     This tool creates direct links to the dashboard with pre-applied filters,
     allowing users to visualize the exact data being analyzed.
     
+    Supports three dashboard sections via the 'section' parameter:
+    - "cost_analysis": Cost per million tokens view
+    - "performance_plots": Charts of metrics vs concurrency (use pp_* params)
+    - "compare_versions": Structured delta-table between two versions (use cv_* params)
+    
     Args:
         view: Dashboard view ("RHAIIS Dashboard", "MLPerf Dashboard", or "LLM-D Dashboard")
         accelerators: List of accelerators (e.g., ["H200", "MI300X"])
         models: List of models (e.g., ["meta-llama/Llama-3.3-70B-Instruct"])
         versions: List of versions (e.g., ["RHAIIS-3.2.3", "RHAIIS-3.2.2"])
-        profile: Profile in shorthand (e.g., "1k/1k") or full format (e.g., "Profile A: Balanced (1k/1k)")
+        profile: Sidebar profile filter in shorthand (e.g., "1k/1k") or full format
         tp_sizes: List of tensor parallelism sizes (e.g., [8])
-        base_url: Base URL of the dashboard (default: https://aidash.app.intlab.redhat.com)
+        section: Dashboard section ("cost_analysis", "performance_plots", or "compare_versions")
+        pp_x: Performance plots X-axis. Only valid value: "Concurrency"
+        pp_y: Performance plots Y-axis metric (e.g., "Throughput (Output tokens/second generated)").
+            Valid values: "Throughput (Output tokens/second generated)", "Efficiency (Output tokens/sec per TP unit)",
+            "Inter-Token Latency P95 (Time between tokens)", "Time to First Token P95 (Response start delay)",
+            "Request Latency Median (Total request processing time)", "Request Latency Max (Maximum request processing time)",
+            "Time Per Output Token P95 (Token generation time)", "Total Throughput (Total tokens/second processed)",
+            "Request Count (Successful completions)", "Error Rate (% Failed requests)"
+        pp_conc: Performance plots max concurrency filter (integer). Only used when pp_x="Concurrency".
+        cv_v1: Compare versions — version 1 (e.g., "RHAIIS-3.3")
+        cv_v2: Compare versions — version 2 (e.g., "RHAIIS-3.2.5")
+        cv_gpu: Compare versions — accelerator (e.g., "H200")
+        cv_profile: Compare versions — profile in shorthand (e.g., "1k/1k") or full format
+        cv_conc: Compare versions — list of concurrency values to compare (e.g., [1, 50, 100, 200, 300])
+        base_url: Base URL of the dashboard
         
     Returns:
         A formatted string containing the dashboard URL and filter summary
         
     Examples:
-        >>> # Compare models across versions
+        >>> # Performance plot: throughput vs concurrency
         >>> generate_dashboard_url(
-        ...     view="RHAIIS Dashboard",
         ...     accelerators=["H200"],
-        ...     models=["deepseek-ai/DeepSeek-R1-0528"],
-        ...     versions=["RHAIIS-3.2.3", "RHAIIS-3.2.2"],
-        ...     profile="1k/1k",
-        ...     tp_sizes=[8]
+        ...     models=["RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"],
+        ...     versions=["RHAIIS-3.3"],
+        ...     profile="1k/1k", tp_sizes=[4],
+        ...     section="performance_plots",
+        ...     pp_x="Concurrency",
+        ...     pp_y="Throughput (Output tokens/second generated)",
+        ...     pp_conc=650,
         ... )
         
-        >>> # View cost analysis for a specific model
+        >>> # Compare two versions
         >>> generate_dashboard_url(
-        ...     view="RHAIIS Dashboard",
+        ...     accelerators=["H200", "MI300X"],
+        ...     models=["RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"],
+        ...     versions=["RHAIIS-3.4-EA2"],
+        ...     profile="512/2k", tp_sizes=[1, 4],
+        ...     section="compare_versions",
+        ...     cv_v1="RHAIIS-3.4-EA2", cv_v2="RHAIIS-3.4-EA1",
+        ...     cv_gpu="H200", cv_profile="1k/1k",
+        ...     cv_conc=[1, 50, 100, 200, 300],
+        ... )
+        
+        >>> # Cost analysis
+        >>> generate_dashboard_url(
         ...     accelerators=["H200"],
-        ...     models=["meta-llama/Llama-3.3-70B-Instruct"],
-        ...     versions=["RHAIIS-3.2.3"],
-        ...     profile="512/2k"
+        ...     models=["RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"],
+        ...     versions=["RHAIIS-3.3"],
+        ...     profile="1k/1k", tp_sizes=[4],
+        ...     section="cost_analysis",
         ... )
     """
-    # Validate view
     valid_views = ["RHAIIS Dashboard", "MLPerf Dashboard", "LLM-D Dashboard"]
     if view not in valid_views:
         return f"Error: Invalid view '{view}'. Must be one of: {', '.join(valid_views)}"
-    
-    # Build query parameters
+
+    if section and section not in VALID_SECTIONS:
+        return f"Error: Invalid section '{section}'. Must be one of: {', '.join(VALID_SECTIONS)}"
+
+    if pp_y and pp_y not in VALID_PP_Y_VALUES:
+        return f"Error: Invalid pp_y '{pp_y}'. Must be one of: {VALID_PP_Y_VALUES}"
+
+    # Build query parameters (order matters for readable URLs)
     params = {"view": view}
     filters_applied = {}
     
@@ -111,7 +189,6 @@ async def generate_dashboard_url(
         filters_applied["versions"] = versions
     
     if profile:
-        # Normalize profile to full format
         full_profile = normalize_profile(profile)
         params["profile"] = full_profile
         filters_applied["profile"] = full_profile
@@ -120,15 +197,40 @@ async def generate_dashboard_url(
         params["tp_sizes"] = ",".join(map(str, tp_sizes))
         filters_applied["tp_sizes"] = tp_sizes
     
+    if section:
+        params["section"] = section
+        filters_applied["section"] = section
+
+    # Section-specific parameters
+    if section == "performance_plots":
+        if pp_x:
+            params["pp_x"] = pp_x
+        if pp_y:
+            params["pp_y"] = pp_y
+        if pp_conc is not None and pp_x == "Concurrency":
+            params["pp_conc"] = str(pp_conc)
+
+    elif section == "compare_versions":
+        if cv_v1:
+            params["cv_v1"] = cv_v1
+        if cv_v2:
+            params["cv_v2"] = cv_v2
+        if cv_gpu:
+            params["cv_gpu"] = cv_gpu
+        if cv_profile:
+            params["cv_profile"] = normalize_profile(cv_profile)
+        if cv_conc:
+            params["cv_conc"] = ",".join(map(str, cv_conc))
+
     # Generate URL with proper encoding
-    url = f"{base_url}/?{urlencode(params, quote_via=quote)}"
+    url = f"{base_url}/?{urlencode(params)}"
     
     # Create filter summary for display
     filter_summary = []
     if accelerators:
         filter_summary.append(f"Accelerators: {', '.join(accelerators)}")
     if models:
-        model_display = [m.split("/")[-1] for m in models]  # Show short names
+        model_display = [m.split("/")[-1] for m in models]
         filter_summary.append(f"Models: {', '.join(model_display)}")
     if versions:
         filter_summary.append(f"Versions: {', '.join(versions)}")
@@ -136,8 +238,8 @@ async def generate_dashboard_url(
         filter_summary.append(f"Profile: {normalize_profile(profile)}")
     if tp_sizes:
         filter_summary.append(f"TP Sizes: {', '.join(map(str, tp_sizes))}")
+    if section:
+        filter_summary.append(f"Section: {section}")
     
-    # Return formatted string with URL and summary
     summary = " | ".join(filter_summary) if filter_summary else "No filters applied"
     return f"Dashboard URL: {url}\n\nFilters Applied: {summary}\n\nView: {view}\nNote: Open this URL in your browser to see interactive visualizations of the data."
-

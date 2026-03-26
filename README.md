@@ -26,7 +26,7 @@ graph LR
         LF[Langfuse v3 :3000]
     end
 
-    subgraph tools [MCP Tools — 24 tools]
+    subgraph tools [MCP Tools — 28 tools]
         T1[Benchmark Query & Comparison]
         T2[PyTorch Profiler Analysis]
         T3[Kernel → Source Code Mapper]
@@ -34,24 +34,27 @@ graph LR
         T5[vLLM Release Notes & PRs]
         T6[Grafana GPU Metrics]
         T7[Cost & Regression Analysis]
+        T8[vLLM Log Analysis]
+        T9[Performance Triage Guide]
     end
 
     ST -->|HTTP / SSE| AG
     AG -->|MCP| MCP
     AG --> PG
     AG --> LF
-    MCP --> T1 & T2 & T3 & T4 & T5 & T6 & T7
+    MCP --> T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9
     T1 --> S3
     T2 --> S3
     T3 --> GH
     T4 --> GH
     T5 --> GH
     T6 --> GF
+    T8 --> S3
 ```
 
 **PSAP Agent** — LangGraph-based agent powered by Google Gemini. Handles multi-turn conversations with streaming responses (SSE) and thread persistence. Traces are sent to Langfuse for observability.
 
-**MCP Server** — FastMCP server exposing 24 performance analysis tools over the Model Context Protocol. Tools query benchmark data from S3/CSV, parse PyTorch profiler traces, fetch vLLM source code and diffs from GitHub, compare versions, and generate Grafana links.
+**MCP Server** — FastMCP server exposing 28 performance analysis tools over the Model Context Protocol. Tools query benchmark data from S3/CSV, parse PyTorch profiler traces, fetch vLLM source code and diffs from GitHub, compare versions, and generate Grafana links.
 
 **Streamlit UI** — Web interface for interacting with the agent. Supports multi-turn conversations with feedback buttons.
 
@@ -87,6 +90,8 @@ The Langfuse stack (ClickHouse, Redis, MinIO, Worker, Web) is deployed alongside
 | Kernel ↔ Code | `map_kernel_to_vllm_code`, `get_kernel_categories`, `correlate_kernel_with_changes` | Map profiler kernel names to vLLM source files, categorize kernels, correlate performance changes with code changes |
 | vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff` | Fetch actual vLLM source code at any version tag and retrieve line-level diffs between versions via the GitHub API |
 | vLLM Releases | `get_vllm_release_notes`, `compare_vllm_versions`, `get_version_mappings`, `get_vllm_pull_request` | Fetch release notes, compare changelogs, resolve version mappings, inspect specific PRs |
+| vLLM Logs | `fetch_vllm_logs`, `compare_vllm_logs` | Fetch and compare vLLM server logs (engine config, compilation timings, memory allocation) between versions |
+| Performance Triage | `get_vllm_performance_triage_guide` | Structured 5-step vLLM performance triage workflow and diagnostic guidance |
 
 ## Repository Structure
 
@@ -98,7 +103,7 @@ The Langfuse stack (ClickHouse, Redis, MinIO, Worker, Web) is deployed alongside
 │   ├── Containerfile           #   UBI9 Python 3.12 container image
 │   ├── .env.example            #   Agent-specific env vars
 │   └── README.md
-├── psap-mcp-server/            # FastMCP server with 24 analysis tools
+├── psap-mcp-server/            # FastMCP server with 28 analysis tools
 │   ├── psap_mcp_server/src/    #   Tool implementations, MCP registration
 │   │   └── tools/              #   One module per tool category
 │   ├── Containerfile           #   UBI9 Python 3.12 container image

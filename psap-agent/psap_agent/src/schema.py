@@ -50,6 +50,11 @@ class StreamRequest(UserInput):
         description="Whether to stream LLM tokens to the client in real-time.",
         default=True,
     )
+    model: str | None = Field(
+        description="Optional Gemini model override. When not provided, the server default is used.",
+        default=None,
+        examples=["gemini-3-flash-preview", "gemini-3.1-pro-preview"],
+    )
 
 
 class ToolCall(TypedDict):

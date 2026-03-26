@@ -49,7 +49,10 @@ def initialize_session_state():
         st.session_state.user_email = None
     
     if "feedback_given" not in st.session_state:
-        st.session_state.feedback_given = set()  # Track which messages have feedback
+        st.session_state.feedback_given = set()
+
+    if "pending_negative_feedback" not in st.session_state:
+        st.session_state.pending_negative_feedback = None
 
 
 def show_login_screen():
@@ -105,6 +108,7 @@ def stream_agent_response(
     user_id: str,
     stream_tokens: bool = True,
     api_url: str = "http://localhost:8081",
+    model: str | None = None,
 ) -> tuple[str, List[Dict[str, Any]]]:
     """Stream response from the PSAP Agent using the simplified API.
 
@@ -115,6 +119,7 @@ def stream_agent_response(
         user_id: User identifier
         stream_tokens: Whether to stream individual tokens
         api_url: Base URL of the PSAP Agent API
+        model: Optional Gemini model override
 
     Returns:
         Tuple of (final_response, all_messages)
@@ -127,6 +132,8 @@ def stream_agent_response(
         "user_id": user_id,
         "stream_tokens": stream_tokens,
     }
+    if model:
+        request_data["model"] = model
 
     full_response = ""
     all_messages = []
@@ -192,6 +199,7 @@ def send_feedback(
     user_query: str,
     assistant_response: str,
     api_url: str = "http://localhost:5002",
+    comment: str = "",
 ) -> bool:
     """Send feedback for an agent response to the API.
     
@@ -201,20 +209,25 @@ def send_feedback(
         user_query: The user's original question
         assistant_response: The agent's response
         api_url: Base URL of the PSAP Agent API
+        comment: Optional free-text comment from the user
         
     Returns:
         True if feedback was successfully sent, False otherwise
     """
     try:
+        kwargs = {
+            "user_query": user_query,
+            "assistant_response": assistant_response[:500],
+            "timestamp": str(st.session_state.get("session_id", "")),
+        }
+        if comment:
+            kwargs["user_comment"] = comment
+
         feedback_data = {
             "run_id": run_id,
             "key": "user-feedback",
             "score": score,
-            "kwargs": {
-                "user_query": user_query,
-                "assistant_response": assistant_response[:500],  # Limit length
-                "timestamp": str(st.session_state.get("session_id", "")),
-            }
+            "kwargs": kwargs,
         }
         
         response = requests.post(
@@ -324,6 +337,25 @@ def main():
             value=True,
             help="Enable real-time token streaming for faster response display",
         )
+
+        model_options = {
+            "Gemini 3 Flash (default)": "gemini-3-flash-preview",
+            "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
+        }
+        selected_label = st.selectbox(
+            "LLM Model",
+            options=list(model_options.keys()),
+            index=0,
+            help="Select the Gemini model. Pro offers higher quality at higher latency/cost.",
+        )
+        selected_model = model_options[selected_label]
+
+        if selected_model == "gemini-3.1-pro-preview":
+            st.warning(
+                "**Gemini 3 Flash** is the default and recommended model for most use cases. "
+                "Use **Pro** only when you need deeper reasoning or higher quality output. "
+                "Pro has significantly higher latency and cost, please use it mindfully."
+            )
 
         # API test
         st.subheader("API Status")
@@ -442,35 +474,68 @@ def main():
                 
                 if run_id:
                     feedback_key = f"feedback_{idx}_{run_id}"
-                    
-                    # Check if feedback was already given
-                    if feedback_key not in st.session_state.feedback_given:
+                    pending = st.session_state.pending_negative_feedback
+
+                    if feedback_key in st.session_state.feedback_given:
+                        st.caption("✓ Feedback submitted")
+
+                    elif pending and pending.get("feedback_key") == feedback_key:
+                        st.markdown("**What could be improved?**")
+                        comment = st.text_area(
+                            "Your feedback (optional)",
+                            key=f"comment_{idx}",
+                            placeholder="e.g. The data was incorrect, missed the comparison I asked for...",
+                            max_chars=500,
+                        )
+                        c1, c2, _ = st.columns([1, 1, 6])
+                        with c1:
+                            if st.button("Submit", key=f"submit_fb_{idx}", use_container_width=True):
+                                send_feedback(
+                                    pending["run_id"], 0.0,
+                                    pending["user_query"],
+                                    pending["assistant_response"],
+                                    api_url,
+                                    comment=comment,
+                                )
+                                st.session_state.feedback_given.add(feedback_key)
+                                st.session_state.pending_negative_feedback = None
+                                st.rerun()
+                        with c2:
+                            if st.button("Skip", key=f"skip_fb_{idx}", use_container_width=True):
+                                send_feedback(
+                                    pending["run_id"], 0.0,
+                                    pending["user_query"],
+                                    pending["assistant_response"],
+                                    api_url,
+                                )
+                                st.session_state.feedback_given.add(feedback_key)
+                                st.session_state.pending_negative_feedback = None
+                                st.rerun()
+
+                    else:
                         col1, col2, col3 = st.columns([1, 1, 10])
-                        
                         with col1:
                             thumbs_up = st.button("👍", key=f"thumbs_up_{idx}", help="Good response")
-                        
                         with col2:
                             thumbs_down = st.button("👎", key=f"thumbs_down_{idx}", help="Poor response")
-                        
-                        # Process feedback immediately after button state is captured
+
                         if thumbs_up:
                             user_query = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
                             assistant_response = content.get("content", "")
-                            
                             if send_feedback(run_id, 1.0, user_query, assistant_response, api_url):
                                 st.session_state.feedback_given.add(feedback_key)
                                 st.rerun()
-                        
+
                         if thumbs_down:
                             user_query = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
                             assistant_response = content.get("content", "")
-                            
-                            if send_feedback(run_id, 0.0, user_query, assistant_response, api_url):
-                                st.session_state.feedback_given.add(feedback_key)
-                                st.rerun()
-                    else:
-                        st.caption("✓ Feedback submitted")
+                            st.session_state.pending_negative_feedback = {
+                                "feedback_key": feedback_key,
+                                "run_id": run_id,
+                                "user_query": user_query,
+                                "assistant_response": assistant_response,
+                            }
+                            st.rerun()
 
     # Always show chat input
     prompt = st.chat_input("Ask about RHAIIS performance, models, or configurations...")
@@ -504,6 +569,7 @@ def main():
                     user_id=st.session_state.user_email,
                     stream_tokens=stream_tokens,
                     api_url=api_url,
+                    model=selected_model,
                 )
 
             # Display the final response

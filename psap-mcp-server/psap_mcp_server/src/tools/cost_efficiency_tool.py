@@ -15,7 +15,7 @@ logger = get_python_logger()
 # Cloud provider pricing per hour (as of October 20th, 2025)
 ACCELERATOR_PRICING = {
     "H200": {
-        "hourly_cost": 63.30,
+        "hourly_cost": 41.62,
         "provider": "AWS",
         "instance": "p6en.48xlarge",
         "configuration": "8xNVIDIA H200-144GB",
@@ -45,6 +45,7 @@ async def calculate_cost_efficiency(
     accelerator: Optional[str] = None,
     model: Optional[str] = None,
     version: Optional[str] = None,
+    profile: Optional[str] = None,
     max_itl_p95_ms: Optional[float] = None,
     max_ttft_p95_ms: Optional[float] = None,
     top_n: int = 10,
@@ -56,9 +57,9 @@ async def calculate_cost_efficiency(
     DISPLAY_NAME=Calculate Cost Efficiency with Latency SLOs
     USECASE=Calculate cost per million tokens using adjusted throughput (8-GPU instance for H200/MI300X) at optimal concurrency meeting latency SLOs
     INSTRUCTIONS=1. Ask user for latency requirements (ITL P95, TTFT P95) if not specified, 2. Specify filters, 3. Get cost analysis with latency-aware optimal concurrency
-    INPUT_DESCRIPTION=accelerator (str, optional): Filter by accelerator; model (str, optional): Filter by model; version (str, optional): Filter by RHAIIS version; max_itl_p95_ms (float, optional): Maximum Inter-Token Latency P95 in ms (PSAP default: 65ms); max_ttft_p95_ms (float, optional): Maximum Time to First Token P95 in ms (PSAP default: 3400ms); top_n (int): Number of results; custom_pricing (dict, optional): Custom hourly pricing per accelerator
+    INPUT_DESCRIPTION=accelerator (str, optional): Filter by accelerator; model (str, optional): Filter by model; version (str, optional): Filter by RHAIIS version; profile (str, optional): Workload profile (e.g., "1k/1k", "512/2k"); max_itl_p95_ms (float, optional): Maximum Inter-Token Latency P95 in ms (PSAP default: 65ms); max_ttft_p95_ms (float, optional): Maximum Time to First Token P95 in ms (PSAP default: 3400ms); top_n (int): Number of results; custom_pricing (dict, optional): Custom hourly pricing per accelerator
     OUTPUT_DESCRIPTION=Dictionary with cost efficiency metrics (adjusted throughput, TTMT, CPMT) and latency values (ITL P95, TTFT P95)
-    EXAMPLES=calculate_cost_efficiency(accelerator="H200", max_itl_p95_ms=65, max_ttft_p95_ms=3400), calculate_cost_efficiency(model="gpt-oss-120b", version="RHAIIS-3.2.3")
+    EXAMPLES=calculate_cost_efficiency(accelerator="H200", profile="512/2k", max_itl_p95_ms=65, max_ttft_p95_ms=3400), calculate_cost_efficiency(model="gpt-oss-120b", version="RHAIIS-3.2.3", profile="1k/1k")
     PREREQUISITES=RHAIIS performance data with latency metrics (itl_p95, ttft_p95) and pricing information
     RELATED_TOOLS=query_performance_metrics, get_performance_rankings
 
@@ -66,6 +67,7 @@ async def calculate_cost_efficiency(
         accelerator: Optional accelerator filter
         model: Optional model filter
         version: Optional RHAIIS version filter (supports partial match)
+        profile: Optional workload profile filter (e.g., "1k/1k", "512/2k", "2k/128")
         max_itl_p95_ms: Maximum Inter-Token Latency P95 in milliseconds (filters for latency SLO compliance)
         max_ttft_p95_ms: Maximum Time to First Token P95 in milliseconds (filters for latency SLO compliance)
         top_n: Number of results to return
@@ -107,6 +109,41 @@ async def calculate_cost_efficiency(
             # Use exact match (case-insensitive) to avoid matching "RHAIIS-3.2.3-async" when user wants "RHAIIS-3.2.3"
             filtered_df = filtered_df[filtered_df["version"].str.lower() == version.lower()]
             filters_applied["version"] = version
+
+        if profile:
+            if "prompt toks" in filtered_df.columns and "output toks" in filtered_df.columns:
+                if "/" in profile:
+                    parts = profile.lower().split("/")
+                    if len(parts) == 2:
+                        try:
+                            def parse_token_count(s):
+                                s = s.strip()
+                                if 'k' in s:
+                                    num = float(s.replace('k', ''))
+                                    return [int(num * 1000), int(num * 1024)]
+                                return [int(s)]
+
+                            prompt_candidates = parse_token_count(parts[0])
+                            output_candidates = parse_token_count(parts[1])
+
+                            match_found = False
+                            for p_tok in prompt_candidates:
+                                for o_tok in output_candidates:
+                                    matched_df = filtered_df[
+                                        (filtered_df["prompt toks"] == p_tok) &
+                                        (filtered_df["output toks"] == o_tok)
+                                    ]
+                                    if not matched_df.empty:
+                                        filtered_df = matched_df
+                                        match_found = True
+                                        break
+                                if match_found:
+                                    break
+
+                            if match_found:
+                                filters_applied["profile"] = profile
+                        except (ValueError, AttributeError):
+                            pass
 
         # Apply latency constraints (PSAP SLO compliance)
         latency_constraints = {}
@@ -182,10 +219,14 @@ async def calculate_cost_efficiency(
             # Calculate efficiency score (effective throughput per dollar per hour)
             efficiency_score = effective_throughput / total_hourly_cost if total_hourly_cost > 0 else 0
 
+            prompt_toks = int(row.get("prompt toks")) if pd.notna(row.get("prompt toks")) else None
+            output_toks = int(row.get("output toks")) if pd.notna(row.get("output toks")) else None
+
             cost_results.append({
                 "model": row.get("model"),
                 "accelerator": row.get("accelerator"),
                 "version": row.get("version"),
+                "profile": f"{prompt_toks}/{output_toks}" if prompt_toks and output_toks else None,
                 "TP": tp_count,
                 "concurrency": int(row.get("intended_concurrency")) if pd.notna(row.get("intended_concurrency")) else None,
                 "raw_throughput_tokens_per_sec": round(float(raw_throughput), 2),
@@ -228,6 +269,11 @@ async def calculate_cost_efficiency(
 
         # Identify best value (lowest cost per million tokens)
         best_value = top_results[0] if top_results else None
+        if best_value:
+            best_value["data_source"] = (
+                f"Actual benchmark data point at intended concurrency {best_value.get('concurrency')}. "
+                "This is NOT interpolated — all values (throughput, ITL, TTFT) are from a single benchmark run at this exact concurrency level."
+            )
 
         # Calculate statistics
         all_costs = [r["cost_per_million_tokens_usd"] for r in cost_results_valid if r["cost_per_million_tokens_usd"] is not None]

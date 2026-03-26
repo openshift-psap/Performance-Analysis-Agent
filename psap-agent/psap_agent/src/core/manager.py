@@ -79,7 +79,9 @@ class AgentManager:
         # Use persistent agent for both streaming and state persistence
         # This ensures LangGraph handles state management automatically
         async with get_psap_agent(
-            self.redhat_sso_token, enable_checkpointing=True
+            self.redhat_sso_token,
+            enable_checkpointing=True,
+            model_name=request.model,
         ) as persistent_agent:
             try:
                 # Prepare input for the persistent agent
