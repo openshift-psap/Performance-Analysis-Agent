@@ -28,8 +28,9 @@ dependencies = [
     "langchain-mcp-adapters==0.2.1",
 
     # LangGraph ecosystem
-    "langgraph==1.0.8",
-    "langgraph-checkpoint-postgres==3.0.4",
+    "langgraph==1.0.10",
+    "langgraph-prebuilt==1.0.8",
+    "langgraph-checkpoint-postgres==3.0.5",
 
     # Google AI
     "google-genai==1.62.0",

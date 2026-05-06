@@ -1,209 +1,145 @@
 """MCP tool for fetching and comparing vLLM server logs.
 
-Log files sit alongside PyTorch profiler traces in S3 at
-``s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/``.
-They contain engine configuration, compilation timings, memory allocation,
-CUDA graph capture details, and other runtime information that is critical
-for understanding performance differences between versions.
+Log files are stored in a flat layout at ``s3://<LOG_S3_BUCKET>/<LOG_S3_PREFIX>/<uuid>.log``.
+The UUID for each benchmark run is recorded in the consolidated dashboard CSV loaded by
+``load_rhaiis_data()``.  The tools in this module look up the UUID from the CSV using the
+caller-supplied model / version / accelerator filters, then download and parse the log.
 """
 
 import re
-import time as _time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+import pandas as pd
 
 from psap_mcp_server.src.settings import settings
+from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
-# ---------------------------------------------------------------------------
-# Log index cache  (composite_key -> version -> {source, key/path, filename})
-# ---------------------------------------------------------------------------
-_log_index_cache: Optional[Dict] = None
-_log_index_ts: float = 0.0
-_LOG_INDEX_TTL: int = 300  # seconds
-
 
 # ===================================================================== #
-#  Log discovery (S3)                                                    #
+#  UUID lookup from benchmark CSV                                        #
 # ===================================================================== #
 
-def _discover_logs_s3() -> Optional[Dict]:
-    """Discover vLLM log files from S3.
+def _find_uuid_for_run(
+    version: str,
+    model: Optional[str] = None,
+    accelerator: Optional[str] = None,
+    tp: Optional[int] = None,
+    profile: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Look up the run UUID from the benchmark CSV.
 
-    Walks the same ``s3://<bucket>/<prefix>/<accelerator>/<model>/<version>/``
-    hierarchy used for profiler traces and indexes ``.txt`` and ``.log`` files.
+    Filters the RHAIIS DataFrame by version (required) and optionally by
+    model, accelerator, TP, and profile, then returns the UUID of the
+    matching deployment.
 
-    Returns::
-
-        {"accelerator/model": {version: {"source": "s3", "key": ..., "filename": ...}}}
-
-    Only the first matching log file per version is stored (there should be one).
-    Returns ``None`` if S3 is not configured or unreachable.
+    Returns:
+        (uuid, None) on success, or (None, error_message) on failure.
     """
-    bucket = settings.S3_BUCKET
-    prefix = getattr(settings, "PROFILE_S3_PREFIX", "profiles/rhaiis")
-    if not bucket:
-        return None
+    df = load_rhaiis_data()
+    if df is None or df.empty:
+        return None, "Failed to load benchmark data (RHAIIS CSV)."
 
-    if not prefix.endswith("/"):
-        prefix += "/"
+    if "uuid" not in df.columns:
+        return None, "Benchmark CSV does not contain a 'uuid' column."
 
-    try:
-        from psap_mcp_server.src.tools.s3_utils import get_s3_client
-        s3 = get_s3_client()
-    except ImportError:
-        logger.warning("boto3 not installed -- S3 log discovery unavailable")
-        return None
-    except Exception as exc:
-        logger.warning(f"Failed to create S3 client: {exc}")
-        return None
+    filtered = df.copy()
 
-    index: Dict[str, Dict[str, Dict]] = {}
+    filtered = filtered[filtered["version"].str.contains(version, case=False, na=False)]
+    if filtered.empty:
+        available = sorted(df["version"].dropna().unique().tolist())
+        return None, f"Version '{version}' not found. Available versions: {available}"
 
-    def _list_prefixes(parent_prefix: str) -> List[str]:
-        resp = s3.list_objects_v2(Bucket=bucket, Prefix=parent_prefix, Delimiter="/")
-        return [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+    if model:
+        model_tokens = model.lower().split()
+        mask = filtered["model"].str.lower().apply(
+            lambda x: all(tok in x for tok in model_tokens) if pd.notna(x) else False
+        )
+        filtered = filtered[mask]
+        if filtered.empty:
+            available = sorted(df["model"].dropna().unique().tolist())
+            return None, f"Model '{model}' not found for version '{version}'. Available models: {available}"
 
-    try:
-        accel_prefixes = _list_prefixes(prefix)
-        for accel_prefix in accel_prefixes:
-            accelerator = accel_prefix.rstrip("/").split("/")[-1]
-            model_prefixes = _list_prefixes(accel_prefix)
+    if accelerator:
+        filtered = filtered[filtered["accelerator"].str.contains(accelerator, case=False, na=False)]
+        if filtered.empty:
+            available = sorted(df["accelerator"].dropna().unique().tolist())
+            return None, f"Accelerator '{accelerator}' not found for version '{version}'. Available: {available}"
 
-            for model_prefix in model_prefixes:
-                model_name = model_prefix.rstrip("/").split("/")[-1]
-                composite_key = f"{accelerator}/{model_name}"
-                version_prefixes = _list_prefixes(model_prefix)
+    if tp is not None and "TP" in filtered.columns:
+        filtered = filtered[filtered["TP"] == tp]
+        if filtered.empty:
+            return None, f"TP={tp} not found for version '{version}'. Try without tp filter."
 
-                for version_prefix in version_prefixes:
-                    version_name = version_prefix.rstrip("/").split("/")[-1]
-                    resp = s3.list_objects_v2(Bucket=bucket, Prefix=version_prefix)
-                    for obj in resp.get("Contents", []):
-                        key = obj["Key"]
-                        filename = key.split("/")[-1]
-                        if filename.endswith((".txt", ".log")) and "log" in filename.lower():
-                            index.setdefault(composite_key, {})[version_name] = {
-                                "source": "s3",
-                                "key": key,
-                                "filename": filename,
-                                "size_bytes": obj.get("Size", 0),
-                            }
-                            break  # one log per version
+    if profile and "prompt toks" in filtered.columns and "output toks" in filtered.columns:
+        parts = profile.lower().split("/")
+        if len(parts) == 2:
+            try:
+                def _parse_tok(s: str) -> int:
+                    s = s.strip()
+                    if "k" in s:
+                        return int(float(s.replace("k", "")) * 1000)
+                    return int(s)
 
-        if index:
-            summary = ", ".join(f"{m} ({len(vs)} version(s))" for m, vs in index.items())
-            logger.info(f"S3 log discovery: {summary}")
-        else:
-            logger.info(f"S3 log discovery: no log files found under s3://{bucket}/{prefix}")
+                p_tok, o_tok = _parse_tok(parts[0]), _parse_tok(parts[1])
+                filtered = filtered[
+                    (filtered["prompt toks"] == p_tok) & (filtered["output toks"] == o_tok)
+                ]
+                if filtered.empty:
+                    return None, f"Profile '{profile}' not found for version '{version}'."
+            except ValueError:
+                pass
 
-        return index
+    valid = filtered[filtered["uuid"].notna()]
+    if valid.empty:
+        return None, (
+            f"Found {len(filtered)} matching row(s) but none have a UUID. "
+            "Log file unavailable for this run."
+        )
 
-    except Exception as exc:
-        logger.warning(f"S3 log discovery failed: {exc}")
-        return None
+    unique_uuids = valid["uuid"].unique().tolist()
+    if len(unique_uuids) > 1:
+        info_cols = ["model", "version", "accelerator", "uuid"]
+        if "TP" in valid.columns:
+            info_cols.insert(3, "TP")
+        if "prompt toks" in valid.columns and "output toks" in valid.columns:
+            info_cols.insert(3, "prompt toks")
+            info_cols.insert(4, "output toks")
+        combos = valid[info_cols].drop_duplicates(subset=["uuid"]).to_dict("records")
+        return None, (
+            f"Ambiguous: {len(unique_uuids)} distinct runs match. "
+            f"Please specify tp and/or profile to narrow down. "
+            f"Matching runs: {combos}"
+        )
 
-
-def _discover_logs(force_refresh: bool = False) -> Dict:
-    """Discover available log files with in-memory caching."""
-    global _log_index_cache, _log_index_ts
-
-    now = _time.time()
-    if (
-        not force_refresh
-        and _log_index_cache is not None
-        and (now - _log_index_ts) < _LOG_INDEX_TTL
-    ):
-        return _log_index_cache
-
-    index = _discover_logs_s3()
-    if not index:
-        index = {}
-
-    _log_index_cache = index
-    _log_index_ts = now
-    return index
+    return str(unique_uuids[0]), None
 
 
 # ===================================================================== #
-#  Model / version matching (reuse logic from pytorch_profile_tool)      #
+#  S3 log fetching                                                       #
 # ===================================================================== #
 
-def _bare_model(composite_key: str) -> str:
-    return composite_key.split("/", 1)[1] if "/" in composite_key else composite_key
+def _fetch_log_by_uuid(uuid: str) -> Tuple[Optional[str], str]:
+    """Download ``<uuid>.log`` from S3.
 
+    Returns:
+        (log_contents, s3_key) on success, or (None, s3_key) on failure.
+    """
+    bucket = settings.LOG_S3_BUCKET
+    prefix = settings.LOG_S3_PREFIX.rstrip("/")
+    s3_key = f"{prefix}/{uuid}.log"
 
-def _key_accelerator(composite_key: str) -> str:
-    return composite_key.split("/", 1)[0] if "/" in composite_key else "unknown"
-
-
-def _match_model_keys(
-    user_model: Optional[str],
-    user_accelerator: Optional[str],
-    available_keys: List[str],
-) -> List[str]:
-    """Match user-provided model/accelerator against composite keys."""
-    if not available_keys:
-        return []
-
-    matches = available_keys
-
-    if user_accelerator:
-        accel_lower = user_accelerator.lower().strip()
-        matches = [k for k in matches if _key_accelerator(k).lower() == accel_lower]
-
-    if user_model:
-        model_lower = user_model.lower().strip()
-        filtered = []
-        for k in matches:
-            bare = _bare_model(k).lower()
-            if model_lower == bare or model_lower in bare or bare in model_lower:
-                filtered.append(k)
-        matches = filtered
-
-    return matches
-
-
-def _match_version(user_version: str, available_versions: List[str]) -> Optional[str]:
-    """Fuzzy-match a version string against available folder names."""
-    user_lower = user_version.lower().strip()
-    for v in available_versions:
-        if v.lower() == user_lower:
-            return v
-    # Try stripping common prefixes for bare numeric comparison
-    def _bare(ver: str) -> str:
-        ver = ver.strip().lower()
-        for pfx in ("vllm-", "vllm ", "rhaiis-", "rhaiis "):
-            if ver.startswith(pfx):
-                ver = ver[len(pfx):]
-                break
-        return ver.lstrip("v")
-
-    user_bare = _bare(user_version)
-    for v in available_versions:
-        if _bare(v) == user_bare:
-            return v
-    return None
-
-
-# ===================================================================== #
-#  Log fetching                                                          #
-# ===================================================================== #
-
-def _fetch_log_from_s3(s3_key: str) -> Optional[str]:
-    """Download a log file from S3 and return its contents as a string."""
-    bucket = settings.S3_BUCKET
-    if not bucket:
-        return None
     try:
         from psap_mcp_server.src.tools.s3_utils import get_s3_client
         s3 = get_s3_client()
         logger.info(f"Downloading log from S3: s3://{bucket}/{s3_key}")
         response = s3.get_object(Bucket=bucket, Key=s3_key)
-        return response["Body"].read().decode("utf-8", errors="replace")
+        return response["Body"].read().decode("utf-8", errors="replace"), s3_key
     except Exception as exc:
-        logger.error(f"Failed to load log {s3_key}: {exc}")
-        return None
+        logger.error(f"Failed to download log s3://{bucket}/{s3_key}: {exc}")
+        return None, s3_key
 
 
 # ===================================================================== #
@@ -224,12 +160,26 @@ def _safe_int(text: str) -> Optional[int]:
         return None
 
 
+_STARTUP_COMPLETE_MARKER = "Application startup complete."
+
+
+def _truncate_at_startup(raw: str) -> str:
+    """Return only the portion of the log up to and including the startup-complete line."""
+    for i, line in enumerate(raw.splitlines()):
+        if _STARTUP_COMPLETE_MARKER in line:
+            return "\n".join(raw.splitlines()[: i + 1])
+    return raw
+
+
 def _parse_vllm_log(raw: str) -> Dict[str, Any]:
     """Parse a vLLM server log into structured sections.
 
     Extracts configuration, compilation, memory, and timing information
     using regex patterns matched against known vLLM log output formats.
+    Only the startup portion of the log (up to "Application startup complete")
+    is analyzed; request-serving output is discarded.
     """
+    raw = _truncate_at_startup(raw)
     result: Dict[str, Any] = {
         "server_config": {},
         "engine_config": {},
@@ -246,6 +196,11 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
         m = re.search(r"vLLM API server version (\S+)", line)
         if m:
             result["server_config"]["vllm_version"] = m.group(1)
+
+        if "vllm_version" not in result["server_config"]:
+            m = re.search(r"version\s+(\d+\.\S+)", line)
+            if m and "utils.py" in line:
+                result["server_config"]["vllm_version"] = m.group(1)
 
         m = re.search(r"non-default args:\s*(\{.+\})", line)
         if m:
@@ -267,6 +222,10 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
 
         # --- Engine config from init log line ---
         if "Initializing a V1 LLM engine" in line or "Initializing an LLM engine" in line:
+            em = re.search(r"LLM engine \(v(\S+?)\)", line)
+            if em and "vllm_version" not in result["server_config"]:
+                result["server_config"]["vllm_version"] = em.group(1)
+
             for field, pattern in [
                 ("dtype", r"dtype=(\S+?)(?:,|$)"),
                 ("quantization", r"quantization=(\S+?)(?:,|$)"),
@@ -321,6 +280,18 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
         if m:
             result["compilation"]["attention_backend"] = m.group(1)
 
+        m = re.search(r"Using FlashAttention version (\d+)", line)
+        if m:
+            result["compilation"]["flash_attention_version"] = int(m.group(1))
+
+        m = re.search(r"vLLM is using nccl==(\S+)", line)
+        if m:
+            result["compilation"]["nccl_version"] = m.group(1)
+
+        m = re.search(r"Enabled custom fusions:\s*(.+)", line)
+        if m:
+            result["compilation"]["custom_fusions"] = m.group(1).strip()
+
         # --- MoE stream ---
         if "separate cuda stream for MoE shared_experts" in line:
             result["compilation"]["moe_shared_experts_stream"] = True
@@ -349,7 +320,7 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
         if m:
             result["compilation"]["graph_compile_time_s"] = _safe_float(m.group(1))
 
-        m = re.search(r"torch\.compile takes (\S+)\s*s in total", line)
+        m = re.search(r"torch\.compile (?:takes|took) (\S+)\s*s in total", line)
         if m:
             result["compilation"]["torch_compile_time_s"] = _safe_float(m.group(1))
 
@@ -372,6 +343,10 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
             result["compilation"]["cuda_graph_capture_time_s"] = _safe_int(m.group(1))
             result["compilation"]["cuda_graph_memory_gib"] = _safe_float(m.group(2))
 
+        m = re.search(r"Initial profiling/warmup run took (\S+)\s*s", line)
+        if m:
+            result["compilation"]["warmup_time_s"] = _safe_float(m.group(1))
+
         # --- Engine init ---
         m = re.search(r"init engine .+ took (\S+) seconds", line)
         if m:
@@ -390,37 +365,11 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
         # --- Warnings and errors ---
         if "WARNING" in line or "ERROR" in line:
             cleaned = line.strip()
-            # Skip noisy progress bars and routine log lines
             if cleaned and "Loading safetensors" not in cleaned and "Capturing CUDA" not in cleaned:
                 result["warnings_errors"].append(cleaned)
 
     # Remove empty sections
     return {k: v for k, v in result.items() if v}
-
-
-# ===================================================================== #
-#  Resolve helpers                                                       #
-# ===================================================================== #
-
-def _resolve_model_key(
-    model: Optional[str],
-    accelerator: Optional[str],
-    index: Dict,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Resolve user inputs to a single composite key, or return an error message."""
-    available = sorted(index.keys())
-    if not available:
-        return None, "No vLLM log files found in S3."
-
-    matches = _match_model_keys(model, accelerator, available)
-    if not matches:
-        return None, f"No logs found for model='{model}', accelerator='{accelerator}'. Available: {available}"
-    if len(matches) > 1:
-        return None, (
-            f"Ambiguous: multiple matches found: {matches}. "
-            f"Please specify both model and accelerator to disambiguate."
-        )
-    return matches[0], None
 
 
 # ===================================================================== #
@@ -431,6 +380,8 @@ async def fetch_vllm_logs(
     version: str,
     model: Optional[str] = None,
     accelerator: Optional[str] = None,
+    tp: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fetch and parse vLLM server logs for a specific version.
 
@@ -445,48 +396,41 @@ async def fetch_vllm_logs(
     TOOL_NAME=fetch_vllm_logs
     DISPLAY_NAME=Fetch vLLM Logs
     USECASE=Read parsed vLLM server logs to understand the runtime configuration of a benchmark run. Use this alongside profiling tools to get the full picture of how the engine was configured.
-    INSTRUCTIONS=1. Specify a version (e.g., "rhaiis-3.3" or "vLLM-0.13.0"), 2. Optionally specify model and accelerator to disambiguate, 3. Returns structured config + compilation + memory + timing data
-    INPUT_DESCRIPTION=version (str): Version folder name; model (str, optional): Model name; accelerator (str, optional): GPU type (e.g., "H200")
+    INSTRUCTIONS=1. Specify a version (e.g., "rhaiis-3.3" or "vLLM-0.13.0"), 2. Optionally specify model, accelerator, tp, and profile to disambiguate, 3. Returns structured config + compilation + memory + timing data
+    INPUT_DESCRIPTION=version (str): Version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism value; profile (str, optional): Workload profile e.g. "1k/1k"
     OUTPUT_DESCRIPTION=Dictionary with parsed log sections: server_config, engine_config, compilation, memory, timing, warnings_errors
-    EXAMPLES=fetch_vllm_logs("rhaiis-3.3", model="gpt-oss-120b", accelerator="H200")
-    PREREQUISITES=Log files must be uploaded to S3 alongside profiler traces
+    EXAMPLES=fetch_vllm_logs("vLLM-0.17.1", model="gpt-oss-120b", accelerator="H200", tp=4, profile="1k/1k")
+    PREREQUISITES=Benchmark CSV must contain a uuid column; log files must exist in S3 at <LOG_S3_BUCKET>/logs/<uuid>.log
     RELATED_TOOLS=compare_vllm_logs, analyze_pytorch_profile, compare_pytorch_profiles
 
     Args:
-        version: Version folder name (e.g., "rhaiis-3.3", "vLLM-0.13.0").
+        version: Version string (e.g., "rhaiis-3.3", "vLLM-0.13.0").
         model: Model name filter (e.g., "gpt-oss-120b", "deepseek-r1").
         accelerator: Accelerator filter (e.g., "H200", "B200").
+        tp: Tensor parallelism filter (e.g., 4).
+        profile: Workload profile filter (e.g., "1k/1k", "512/2k").
 
     Returns:
         Dictionary with parsed log data and metadata.
     """
     try:
-        index = _discover_logs()
-        model_key, error = _resolve_model_key(model, accelerator, index)
+        uuid, error = _find_uuid_for_run(version, model, accelerator, tp, profile)
         if error:
             return {"status": "error", "message": error}
 
-        versions = sorted(index[model_key].keys())
-        matched_version = _match_version(version, versions)
-        if matched_version is None:
-            return {
-                "status": "error",
-                "message": f"Version '{version}' not found for {model_key}. Available: {versions}",
-            }
-
-        entry = index[model_key][matched_version]
-        raw = _fetch_log_from_s3(entry["key"])
+        raw, s3_key = _fetch_log_by_uuid(uuid)
         if raw is None:
-            return {"status": "error", "message": f"Failed to download log file: {entry['key']}"}
+            return {"status": "error", "message": f"Failed to download log file: {s3_key}"}
 
         parsed = _parse_vllm_log(raw)
 
         return {
             "status": "success",
-            "model": model_key,
-            "version": matched_version,
-            "log_file": entry["filename"],
-            "log_size_bytes": entry.get("size_bytes", 0),
+            "uuid": uuid,
+            "version": version,
+            "model": model,
+            "accelerator": accelerator,
+            "log_file": f"{uuid}.log",
             "parsed": parsed,
         }
 
@@ -500,6 +444,8 @@ async def compare_vllm_logs(
     version2: str,
     model: Optional[str] = None,
     accelerator: Optional[str] = None,
+    tp: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compare vLLM server logs between two versions to identify configuration differences.
 
@@ -512,45 +458,39 @@ async def compare_vllm_logs(
     TOOL_NAME=compare_vllm_logs
     DISPLAY_NAME=Compare vLLM Logs
     USECASE=Compare engine configurations between two vLLM versions. Use this to find config differences (quantization, attention backend, CUDA graphs, memory) that explain performance changes not visible in kernel profiling.
-    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model and accelerator, 3. Returns only the fields that differ between versions plus full parsed data for both
-    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; accelerator (str, optional): GPU type
+    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model, accelerator, tp, and profile, 3. Returns only the fields that differ between versions plus full parsed data for both
+    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile e.g. "1k/1k"
     OUTPUT_DESCRIPTION=Dictionary with config_differences (only changed fields), plus full parsed logs for both versions
-    EXAMPLES=compare_vllm_logs("rhaiis-3.2.5", "rhaiis-3.3", model="gpt-oss-120b", accelerator="H200")
-    PREREQUISITES=Log files must exist for both versions in S3
+    EXAMPLES=compare_vllm_logs("vLLM-0.16.0", "vLLM-0.17.1", model="gpt-oss-120b", accelerator="H200", tp=4, profile="1k/1k")
+    PREREQUISITES=Benchmark CSV must contain uuid column; log files must exist in S3 for both versions
     RELATED_TOOLS=fetch_vllm_logs, compare_pytorch_profiles, analyze_performance_insights
 
     Args:
-        version1: Baseline version folder name.
-        version2: Comparison version folder name.
+        version1: Baseline version string.
+        version2: Comparison version string.
         model: Model name filter.
         accelerator: Accelerator filter.
+        tp: Tensor parallelism filter (e.g., 4).
+        profile: Workload profile filter (e.g., "1k/1k", "512/2k").
 
     Returns:
         Dictionary with differences and full parsed logs for both versions.
     """
     try:
-        index = _discover_logs()
-        model_key, error = _resolve_model_key(model, accelerator, index)
-        if error:
-            return {"status": "error", "message": error}
+        uuid1, err1 = _find_uuid_for_run(version1, model, accelerator, tp, profile)
+        if err1:
+            return {"status": "error", "message": f"Version 1 ({version1}): {err1}"}
 
-        versions = sorted(index[model_key].keys())
-        mv1 = _match_version(version1, versions)
-        mv2 = _match_version(version2, versions)
-        if mv1 is None:
-            return {"status": "error", "message": f"Version '{version1}' not found for {model_key}. Available: {versions}"}
-        if mv2 is None:
-            return {"status": "error", "message": f"Version '{version2}' not found for {model_key}. Available: {versions}"}
+        uuid2, err2 = _find_uuid_for_run(version2, model, accelerator, tp, profile)
+        if err2:
+            return {"status": "error", "message": f"Version 2 ({version2}): {err2}"}
 
-        entry1 = index[model_key][mv1]
-        entry2 = index[model_key][mv2]
-
-        raw1 = _fetch_log_from_s3(entry1["key"])
-        raw2 = _fetch_log_from_s3(entry2["key"])
+        raw1, key1 = _fetch_log_by_uuid(uuid1)
+        raw2, key2 = _fetch_log_by_uuid(uuid2)
         if raw1 is None:
-            return {"status": "error", "message": f"Failed to download log: {entry1['key']}"}
+            return {"status": "error", "message": f"Failed to download log: {key1}"}
         if raw2 is None:
-            return {"status": "error", "message": f"Failed to download log: {entry2['key']}"}
+            return {"status": "error", "message": f"Failed to download log: {key2}"}
 
         parsed1 = _parse_vllm_log(raw1)
         parsed2 = _parse_vllm_log(raw2)
@@ -558,7 +498,6 @@ async def compare_vllm_logs(
         # Build diff: only fields that changed
         differences: Dict[str, Dict[str, Any]] = {}
         all_sections = set(list(parsed1.keys()) + list(parsed2.keys()))
-        # Skip warnings_errors from diff (list comparison is noisy)
         all_sections.discard("warnings_errors")
 
         for section in sorted(all_sections):
@@ -572,8 +511,7 @@ async def compare_vllm_logs(
                 v1 = s1.get(key)
                 v2 = s2.get(key)
                 if v1 != v2:
-                    entry_diff: Dict[str, Any] = {mv1: v1, mv2: v2}
-                    # Add delta for numeric values
+                    entry_diff: Dict[str, Any] = {version1: v1, version2: v2}
                     if isinstance(v1, (int, float)) and isinstance(v2, (int, float)) and v1:
                         entry_diff["change_pct"] = round((v2 - v1) / v1 * 100, 1)
                     section_diff[key] = entry_diff
@@ -582,8 +520,10 @@ async def compare_vllm_logs(
 
         return {
             "status": "success",
-            "model": model_key,
-            "versions_compared": [mv1, mv2],
+            "model": model,
+            "accelerator": accelerator,
+            "versions_compared": [version1, version2],
+            "uuids": {version1: uuid1, version2: uuid2},
             "config_differences": differences,
             "num_differences": sum(len(v) for v in differences.values()),
             "version1_parsed": parsed1,

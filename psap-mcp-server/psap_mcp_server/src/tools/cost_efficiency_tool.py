@@ -12,13 +12,27 @@ from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
-# Cloud provider pricing per hour (as of October 20th, 2025)
+# Cloud provider pricing per hour (AWS on-demand)
 ACCELERATOR_PRICING = {
+    "B200": {
+        "hourly_cost": 82.368,
+        "provider": "AWS",
+        "instance": "p6-b200.48xlarge",
+        "configuration": "8xNVIDIA B200",
+        "notes": "Full 8-GPU instance cost regardless of TP"
+    },
     "H200": {
         "hourly_cost": 41.62,
         "provider": "AWS",
         "instance": "p6en.48xlarge",
         "configuration": "8xNVIDIA H200-144GB",
+        "notes": "Full 8-GPU instance cost regardless of TP"
+    },
+    "H100": {
+        "hourly_cost": 34.608,
+        "provider": "AWS",
+        "instance": "p5.48xlarge",
+        "configuration": "8xNVIDIA H100",
         "notes": "Full 8-GPU instance cost regardless of TP"
     },
     "MI300X": {
@@ -35,9 +49,13 @@ ACCELERATOR_PRICING = {
         "configuration": "Per-core pricing",
         "notes": "Per-core pricing, multiply by TP count"
     },
-    # Legacy/other accelerators (estimates)
-    "H100": {"hourly_cost": 40.00, "provider": "AWS/Azure"},
-    "A100": {"hourly_cost": 30.00, "provider": "AWS/Azure/GCP"},
+    "A100": {
+        "hourly_cost": 11.80,
+        "provider": "AWS",
+        "instance": "p4d.24xlarge",
+        "configuration": "8xNVIDIA A100",
+        "notes": "Full 8-GPU instance cost regardless of TP"
+    },
 }
 
 
@@ -57,9 +75,9 @@ async def calculate_cost_efficiency(
     DISPLAY_NAME=Calculate Cost Efficiency with Latency SLOs
     USECASE=Calculate cost per million tokens using adjusted throughput (8-GPU instance for H200/MI300X) at optimal concurrency meeting latency SLOs
     INSTRUCTIONS=1. Ask user for latency requirements (ITL P95, TTFT P95) if not specified, 2. Specify filters, 3. Get cost analysis with latency-aware optimal concurrency
-    INPUT_DESCRIPTION=accelerator (str, optional): Filter by accelerator; model (str, optional): Filter by model; version (str, optional): Filter by RHAIIS version; profile (str, optional): Workload profile (e.g., "1k/1k", "512/2k"); max_itl_p95_ms (float, optional): Maximum Inter-Token Latency P95 in ms (PSAP default: 65ms); max_ttft_p95_ms (float, optional): Maximum Time to First Token P95 in ms (PSAP default: 3400ms); top_n (int): Number of results; custom_pricing (dict, optional): Custom hourly pricing per accelerator
+    INPUT_DESCRIPTION=accelerator (str, optional): Filter by accelerator; model (str, optional): Filter by model; version (str, optional): Filter by RHAIIS version; profile (str, optional): Workload profile (e.g., "1k/1k", "512/2k"); max_itl_p95_ms (float, optional): Maximum Inter-Token Latency P95 in ms (PSAP default: 65ms); max_ttft_p95_ms (float, optional): Maximum Time to First Token P95 in ms (PSAP default: 4000ms); top_n (int): Number of results; custom_pricing (dict, optional): Custom hourly pricing per accelerator
     OUTPUT_DESCRIPTION=Dictionary with cost efficiency metrics (adjusted throughput, TTMT, CPMT) and latency values (ITL P95, TTFT P95)
-    EXAMPLES=calculate_cost_efficiency(accelerator="H200", profile="512/2k", max_itl_p95_ms=65, max_ttft_p95_ms=3400), calculate_cost_efficiency(model="gpt-oss-120b", version="RHAIIS-3.2.3", profile="1k/1k")
+    EXAMPLES=calculate_cost_efficiency(accelerator="H200", profile="512/2k", max_itl_p95_ms=65, max_ttft_p95_ms=4000), calculate_cost_efficiency(model="gpt-oss-120b", version="RHAIIS-3.2.3", profile="1k/1k")
     PREREQUISITES=RHAIIS performance data with latency metrics (itl_p95, ttft_p95) and pricing information
     RELATED_TOOLS=query_performance_metrics, get_performance_rankings
 

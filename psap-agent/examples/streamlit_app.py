@@ -57,6 +57,7 @@ def initialize_session_state():
 
 def show_login_screen():
     """Display login screen to collect user's Red Hat email."""
+    app_title = os.getenv("APP_TITLE", "RHAIIS Performance Analysis Agent")
     # Center the login form
     col1, col2, col3 = st.columns([1, 2, 1])
     
@@ -71,7 +72,7 @@ def show_login_screen():
                 unsafe_allow_html=True,
             )
         
-        st.markdown("<h2 style='text-align: center;'>RHAIIS Performance Analysis Agent</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2 style='text-align: center;'>{app_title}</h2>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #888;'>Please sign in with your Red Hat email to continue</p>", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -272,15 +273,16 @@ def display_message(message: Dict[str, Any], role: str):
 
 def main():
     """Main Streamlit application."""
-    st.set_page_config(page_title="RHAIIS Performance Analysis Agent", page_icon="📊", layout="wide")
+    app_title = os.getenv("APP_TITLE", "RHAIIS Performance Analysis Agent")
+    st.set_page_config(page_title=app_title, page_icon="📊", layout="wide")
 
     # Display title with Red Hat logo
     logo_base64 = get_logo_base64()
     if logo_base64:
         logo_html = f'<img src="data:image/png;base64,{logo_base64}" style="height: 40px; vertical-align: middle; margin-right: 10px;">'
-        st.markdown(f'{logo_html}<span style="font-size: 2.0rem; font-weight: 600;">RHAIIS Performance Analysis Agent</span>', unsafe_allow_html=True)
+        st.markdown(f'{logo_html}<span style="font-size: 2.0rem; font-weight: 600;">{app_title}</span>', unsafe_allow_html=True)
     else:
-        st.title("📊 RHAIIS Performance Analysis Agent")
+        st.title(f"📊 {app_title}")
     
     st.markdown("**AI-powered performance analysis for RHAIIS benchmarking data** • Compare models, versions, and accelerators with intelligent insights")
 
@@ -309,8 +311,17 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # Display logged-in user
-        st.info(f"👤 Signed in as:\n\n**{st.session_state.user_email}**")
+        # Display logged-in user with Red Hat logo
+        if logo_base64:
+            st.markdown(
+                f'<div style="background-color: rgba(49, 51, 63, 0.1); border-radius: 0.5rem; padding: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">'
+                f'<img src="data:image/png;base64,{logo_base64}" style="height: 24px;">'
+                f'<strong>{st.session_state.user_email}</strong>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(f"**{st.session_state.user_email}**")
         
         # Logout button
         if st.button("🚪 Sign Out", use_container_width=True):
@@ -325,18 +336,6 @@ def main():
 
         # Get API URL from environment variable (for containers) or use localhost as default
         default_api_url = os.getenv("AGENT_API_URL", "http://localhost:5002")
-        
-        api_url = st.text_input(
-            "API URL",
-            value=default_api_url,
-            help="Base URL of the Performance Agent API",
-        )
-
-        stream_tokens = st.checkbox(
-            "Stream Tokens",
-            value=True,
-            help="Enable real-time token streaming for faster response display",
-        )
 
         model_options = {
             "Gemini 3 Flash (default)": "gemini-3-flash-preview",
@@ -358,15 +357,14 @@ def main():
             )
 
         # API test
-        st.subheader("API Status")
         try:
-            health_response = requests.get(f"{api_url}/health", timeout=5)
+            health_response = requests.get(f"{default_api_url}/health", timeout=5)
             if health_response.status_code == 200:
-                st.success("✅ API Connected")
+                st.success("API Status: ✅ Connected")
             else:
-                st.error(f"❌ API Error: {health_response.status_code}")
+                st.error(f"API Status: ❌ Error {health_response.status_code}")
         except Exception as e:
-            st.error(f"❌ API Unreachable: {e}")
+            st.error(f"API Status: ❌ Unreachable")
 
         st.divider()
         
@@ -375,13 +373,12 @@ def main():
         
         example_queries = [
             "Do we have any data for mistral models?",
-            "What models were tested for RHAIIS-3.2.5 version?",
-            "What's the cost per million tokens of Llama-3.3-70B-Instruct-FP8-dynamic on H200?",
-            "What was the performance difference for deepseek model going from RHAIIS-3.2.2 to RHAIIS-3.2.3 on H200?",
-            "Compare all common models across RHAIIS-3.2.2 and RHAIIS-3.2.3 on H200 for 512/2048 isl/osl profile",
-            "Compare the performance of common models across RHAIIS-3.2.5 and sglang-0.5.5 on H200 for 1k/1k isl/osl profile",
-            "Compare Llama-4-Maverick base fp16 model with the quantized fp8 model on H200 for 1k/1k profile",
-            "Show me GPU utilization for GPT-OSS-120B model on RHAIIS-3.2.4 for H200 with 1k/1k profile",
+            "What models were tested for vLLM-0.18.0 version?",
+            "What vllm configs should a customer use for deploying gpt-oss-120b model on Nvidia gpu's?",
+            "What's the cost per million tokens of Llama-3.3-70B-Instruct-FP8-dynamic on H200 using RHAIIS-3.3?",
+            "What was the performance difference for deepseek-R1 model going from RHAIIS-3.2.2 to RHAIIS-3.2.3 on H200?",
+            "Compare Llama-4-Maverick base fp16 model with the quantized fp8 model on H200 for 1k/1k profile using RHAIIS-3.2.3 version?",
+            "Show me the GPU utilization for GPT-OSS-120B model on RHAIIS-3.2.4 for H200 with 1k/1k profile",
         ]
         
         # Use a scrollable container - height shows ~4 buttons
@@ -391,6 +388,20 @@ def main():
                 if st.button(query, key=f"example_{i}", use_container_width=True):
                     st.session_state.example_query = query
         
+        st.divider()
+
+        api_url = st.text_input(
+            "API URL",
+            value=default_api_url,
+            help="Base URL of the Performance Agent API",
+        )
+
+        stream_tokens = st.checkbox(
+            "Stream Tokens",
+            value=True,
+            help="Enable real-time token streaming for faster response display",
+        )
+
         st.divider()
 
         # Session information
@@ -539,7 +550,8 @@ def main():
 
     # Always show chat input
     prompt = st.chat_input("Ask about RHAIIS performance, models, or configurations...")
-    
+    st.caption("Your responses are used to improve our Performance Agent.")
+
     # Check if an example query was clicked (takes priority over chat input)
     example_query = st.session_state.get("example_query")
     if example_query:

@@ -19,6 +19,9 @@ from psap_mcp_server.src.tools.compare_performance_tool import (
 from psap_mcp_server.src.tools.cost_efficiency_tool import (
     calculate_cost_efficiency,
 )
+from psap_mcp_server.src.tools.energy_efficiency_tool import (
+    calculate_energy_efficiency,
+)
 from psap_mcp_server.src.tools.regression_analysis_tool import (
     analyze_regression,
 )
@@ -109,6 +112,7 @@ class PSAPMCPServer:
         - compare_configurations: Compare performance across configurations
         - compare_versions_comprehensive: Compare versions with peak, mean, median, and geometric mean
         - calculate_cost_efficiency: Calculate cost per million tokens analysis
+        - calculate_energy_efficiency: Calculate GPU energy consumption and energy per million tokens
         - analyze_regression: Version-to-version performance change analysis
         - get_dataset_metadata: Discover all available models, accelerators, profiles, and versions
         - discover_configurations: Discover what was actually tested with specific filters
@@ -137,6 +141,7 @@ class PSAPMCPServer:
         self.mcp.tool()(compare_configurations)
         self.mcp.tool()(compare_versions_comprehensive)
         self.mcp.tool()(calculate_cost_efficiency)
+        self.mcp.tool()(calculate_energy_efficiency)
         self.mcp.tool()(analyze_regression)
         self.mcp.tool()(get_dataset_metadata)
         self.mcp.tool()(discover_configurations)

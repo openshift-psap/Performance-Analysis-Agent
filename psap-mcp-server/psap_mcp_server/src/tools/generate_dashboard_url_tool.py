@@ -4,6 +4,7 @@ This tool generates URLs to the performance dashboard with specific filter param
 allowing users to directly visualize the data being discussed.
 """
 
+import os
 from typing import Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -17,12 +18,9 @@ PROFILE_MAPPING = {
     "512/2k": "Profile B: Variable Workload (512/2k)",
     "2048/128": "Profile C: Large Prompt (2k/128)",
     "2k/128": "Profile C: Large Prompt (2k/128)",
-    "32000/256": "Profile D: Prefill Heavy (32k/256)",
-    "32k/256": "Profile D: Prefill Heavy (32k/256)",
-    "8000/1000": "Profile E: Prefill Heavy (8k/1k)",
-    "8k/1k": "Profile E: Prefill Heavy (8k/1k)",
-    "1000/100": "Profile F: Prefill Heavy (1k/100)",
-    "1k/100": "Profile F: Prefill Heavy (1k/100)",
+    "8000/1000": "Profile D: Prefill Heavy (8k/1k)",
+    "8k/1k": "Profile D: Prefill Heavy (8k/1k)",
+
 }
 
 VALID_PP_Y_VALUES = [
@@ -90,7 +88,7 @@ async def generate_dashboard_url(
     cv_gpu: Optional[str] = None,
     cv_profile: Optional[str] = None,
     cv_conc: Optional[List[int]] = None,
-    base_url: str = "https://aidash.app.intlab.redhat.com",
+    base_url: Optional[str] = None,
 ) -> str:
     """Generate a URL to the performance dashboard with specified filters.
     
@@ -122,7 +120,7 @@ async def generate_dashboard_url(
         cv_v2: Compare versions — version 2 (e.g., "RHAIIS-3.2.5")
         cv_gpu: Compare versions — accelerator (e.g., "H200")
         cv_profile: Compare versions — profile in shorthand (e.g., "1k/1k") or full format
-        cv_conc: Compare versions — list of concurrency values to compare (e.g., [1, 50, 100, 200, 300])
+        cv_conc: Compare versions — list of concurrency values to compare. Use ONLY values from actual benchmark data (e.g., from compare_configurations or compare_versions_comprehensive output). Omit if unknown.
         base_url: Base URL of the dashboard
         
     Returns:
@@ -162,6 +160,9 @@ async def generate_dashboard_url(
         ...     section="cost_analysis",
         ... )
     """
+    if base_url is None:
+        base_url = os.environ.get("DASHBOARD_BASE_URL", "https://aidash.app.intlab.redhat.com")
+
     valid_views = ["RHAIIS Dashboard", "MLPerf Dashboard", "LLM-D Dashboard"]
     if view not in valid_views:
         return f"Error: Invalid view '{view}'. Must be one of: {', '.join(valid_views)}"
