@@ -277,7 +277,15 @@ class Settings(BaseSettings):
             "example": "true",
         },
     )
-    GRAFANA_URL: str = Field(
+    DASHBOARD_BASE_URL: str = Field(
+        default="https://aidash.app.intlab.redhat.com",
+        json_schema_extra={
+            "env": "DASHBOARD_BASE_URL",
+            "description": "Base URL for the performance dashboard (production or staging)",
+            "example": "https://staging-aidash.apps.ocp4.intlab.redhat.com",
+        },
+    )
+    GRAFANA_URL: Optional[str] = Field(
         default=None,
         json_schema_extra={
             "env": "GRAFANA_URL",
@@ -293,7 +301,7 @@ class Settings(BaseSettings):
             "example": "glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         },
     )
-    GRAFANA_DATASOURCE_UID: str = Field(
+    GRAFANA_DATASOURCE_UID: Optional[str] = Field(
         default=None,
         json_schema_extra={
             "env": "GRAFANA_DATASOURCE_UID",
@@ -369,6 +377,24 @@ class Settings(BaseSettings):
             "env": "PROFILE_S3_PREFIX",
             "description": "S3 key prefix under S3_BUCKET where PyTorch profile traces are stored (model/version/trace_*.json)",
             "example": "profiles/rhaiis",
+        },
+    )
+
+    # S3 configuration for vLLM log files
+    LOG_S3_BUCKET: str = Field(
+        default="psap-model-furnace",
+        json_schema_extra={
+            "env": "LOG_S3_BUCKET",
+            "description": "S3 bucket where vLLM log files are stored (flat layout: logs/<uuid>.log)",
+            "example": "psap-model-furnace",
+        },
+    )
+    LOG_S3_PREFIX: str = Field(
+        default="logs",
+        json_schema_extra={
+            "env": "LOG_S3_PREFIX",
+            "description": "S3 key prefix under LOG_S3_BUCKET where vLLM log files are stored",
+            "example": "logs",
         },
     )
 

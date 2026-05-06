@@ -2,17 +2,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: psap-mcp-server
+  name: psap-mcp-server-staging
   namespace: psap-ai-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: psap-mcp-server
+      app: psap-mcp-server-staging
   template:
     metadata:
       labels:
-        app: psap-mcp-server
+        app: psap-mcp-server-staging
     spec:
       containers:
       - name: mcp-server
@@ -28,7 +28,7 @@ spec:
         - name: ENABLE_AUTH
           value: "false"
         - name: DASHBOARD_BASE_URL
-          value: "<your-production-dashboard-url>"  # UPDATE to your production dashboard URL
+          value: "<your-staging-dashboard-url>"  # UPDATE to your staging dashboard URL
         - name: POSTGRES_HOST
           value: "psap-postgres"
         - name: POSTGRES_PORT
@@ -66,7 +66,6 @@ spec:
               name: psap-secrets
               key: GRAFANA_DATASOURCE_UID
               optional: true
-        # S3 Configuration for performance data
         - name: S3_BUCKET
           valueFrom:
             secretKeyRef:
@@ -74,11 +73,7 @@ spec:
               key: S3_BUCKET
               optional: true
         - name: S3_KEY
-          valueFrom:
-            secretKeyRef:
-              name: psap-secrets
-              key: S3_KEY
-              optional: true
+          value: "staging/rhaiis-dashboard/consolidated_dashboard.csv"
         - name: S3_REGION
           valueFrom:
             secretKeyRef:
@@ -103,7 +98,6 @@ spec:
               name: psap-secrets
               key: AWS_SECRET_ACCESS_KEY
               optional: true
-        # PyTorch profile S3 prefix (model/version/trace_*.json)
         - name: PROFILE_S3_PREFIX
           value: "profiles/rhaiis"
         resources:
@@ -130,14 +124,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: psap-mcp-server
+  name: psap-mcp-server-staging
   namespace: psap-ai-agent
 spec:
   selector:
-    app: psap-mcp-server
+    app: psap-mcp-server-staging
   ports:
   - port: 5001
     targetPort: 5001
     protocol: TCP
   type: ClusterIP
-

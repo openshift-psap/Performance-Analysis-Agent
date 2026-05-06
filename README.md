@@ -149,10 +149,10 @@ Each component also has its own `.env.example` for standalone development:
 ### 2. Run the full stack
 
 ```bash
-./test-local-containers.sh
+./test-local-containers.sh start
 ```
 
-This starts PostgreSQL, the Langfuse v3 stack (ClickHouse, Redis, MinIO, Worker, Web), the MCP Server, the Agent, and the Streamlit UI.
+This starts PostgreSQL, the Langfuse v3 stack (ClickHouse, Redis, MinIO, Worker, Web), the MCP Server, the Agent, and the Streamlit UI — both main and staging environments.
 
 ### 3. Open the UI
 
@@ -167,11 +167,34 @@ Navigate to [http://localhost:8501](http://localhost:8501) and start asking ques
 ### Useful commands
 
 ```bash
-./test-local-containers.sh rebuild   # Rebuild images after code changes
-./test-local-containers.sh restart   # Restart containers without rebuilding
-podman logs -f psap-agent            # Stream agent logs
-podman logs -f psap-mcp-server       # Stream MCP server logs
+# Rebuild and restart everything
+./test-local-containers.sh rebuild          # Rebuild all images after code changes
+./test-local-containers.sh restart          # Restart all app containers (keeps DB & Langfuse)
+
+# Rebuild and restart a single component
+./test-local-containers.sh rebuild mcp      # Rebuild MCP server image only
+./test-local-containers.sh restart mcp      # Restart MCP server container only
+
+# Other commands
+./test-local-containers.sh logs             # Tail live logs from all containers
+./test-local-containers.sh cleanup          # Stop and remove all containers
+./test-local-containers.sh help             # Show all commands and components
+
+# Podman logs
+podman logs -f psap-agent                   # Stream agent logs
+podman logs -f psap-mcp-server              # Stream MCP server logs
 ```
+
+Valid components for `rebuild` / `restart`: `mcp`, `agent`, `streamlit` (alias `ui`), `mcp-staging`, `agent-staging`, `streamlit-staging` (alias `ui-staging`).
+
+### Access URLs
+
+| Environment | Streamlit UI | Agent API | MCP Server |
+|---|---|---|---|
+| Main | [localhost:8501](http://localhost:8501) | [localhost:5002](http://localhost:5002) | [localhost:5001](http://localhost:5001) |
+| Staging | [localhost:8502](http://localhost:8502) | [localhost:5004](http://localhost:5004) | [localhost:5003](http://localhost:5003) |
+
+Shared services: Langfuse UI at [localhost:3000](http://localhost:3000), PostgreSQL at `localhost:5432`.
 
 ## OpenShift Deployment
 

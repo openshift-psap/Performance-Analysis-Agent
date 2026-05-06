@@ -65,6 +65,7 @@ GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-}"
 # S3 Configuration (for loading performance data from S3)
 S3_BUCKET="${S3_BUCKET:-}"
 S3_KEY="${S3_KEY:-main/rhaiis-dashboard/consolidated_dashboard.csv}"
+S3_KEY_STAGING="${S3_KEY_STAGING:-staging/rhaiis-dashboard/consolidated_dashboard.csv}"
 S3_REGION="${S3_REGION:-us-east-1}"
 S3_CACHE_TTL_SECONDS="${S3_CACHE_TTL_SECONDS:-300}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
@@ -192,8 +193,12 @@ prompt_for_credentials() {
             fi
         fi
         
-        if grep -q "^S3_KEY" psap-mcp-server/.env; then
+        if grep -q "^S3_KEY=" psap-mcp-server/.env; then
             S3_KEY=$(extract_env_value "S3_KEY" "psap-mcp-server/.env")
+        fi
+        
+        if grep -q "^S3_KEY_STAGING=" psap-mcp-server/.env; then
+            S3_KEY_STAGING=$(extract_env_value "S3_KEY_STAGING" "psap-mcp-server/.env")
         fi
         
         if grep -q "^S3_REGION" psap-mcp-server/.env; then
@@ -262,7 +267,7 @@ cleanup_existing() {
     log_info "Cleaning up existing containers..."
     
     # List of all containers managed by this script
-    ALL_CONTAINERS="streamlit-ui psap-agent psap-mcp-server langfuse-web langfuse-worker langfuse-minio langfuse-redis langfuse-clickhouse langfuse psap-postgres pgvector-agent"
+    ALL_CONTAINERS="streamlit-ui-staging psap-agent-staging psap-mcp-server-staging streamlit-ui psap-agent psap-mcp-server langfuse-web langfuse-worker langfuse-minio langfuse-redis langfuse-clickhouse langfuse psap-postgres pgvector-agent"
     
     for container in $ALL_CONTAINERS; do
         if podman container exists $container 2>/dev/null; then
@@ -323,12 +328,16 @@ build_images() {
 # Map user-facing component names to build/start functions and container names
 resolve_component() {
     case "$1" in
-        mcp|mcp-server)   echo "mcp" ;;
-        agent)            echo "agent" ;;
-        streamlit|ui)     echo "streamlit" ;;
+        mcp|mcp-server)           echo "mcp" ;;
+        agent)                    echo "agent" ;;
+        streamlit|ui)             echo "streamlit" ;;
+        mcp-staging)              echo "mcp-staging" ;;
+        agent-staging)            echo "agent-staging" ;;
+        streamlit-staging|ui-staging) echo "streamlit-staging" ;;
         *)
             log_error "Unknown component: $1"
             echo "  Valid components: mcp, agent, streamlit (or: ui)"
+            echo "  Staging:          mcp-staging, agent-staging, streamlit-staging (or: ui-staging)"
             exit 1
             ;;
     esac
@@ -336,25 +345,31 @@ resolve_component() {
 
 component_container_name() {
     case "$1" in
-        mcp)       echo "psap-mcp-server" ;;
-        agent)     echo "psap-agent" ;;
-        streamlit) echo "streamlit-ui" ;;
+        mcp)                echo "psap-mcp-server" ;;
+        agent)              echo "psap-agent" ;;
+        streamlit)          echo "streamlit-ui" ;;
+        mcp-staging)        echo "psap-mcp-server-staging" ;;
+        agent-staging)      echo "psap-agent-staging" ;;
+        streamlit-staging)  echo "streamlit-ui-staging" ;;
     esac
 }
 
 build_component() {
     case "$1" in
-        mcp)       build_mcp ;;
-        agent)     build_agent ;;
-        streamlit) build_streamlit ;;
+        mcp|mcp-staging)             build_mcp ;;
+        agent|agent-staging)         build_agent ;;
+        streamlit|streamlit-staging) build_streamlit ;;
     esac
 }
 
 start_component() {
     case "$1" in
-        mcp)       start_mcp_server ;;
-        agent)     start_agent ;;
-        streamlit) start_streamlit ;;
+        mcp)               start_mcp_server ;;
+        agent)             start_agent ;;
+        streamlit)         start_streamlit ;;
+        mcp-staging)       start_mcp_server_staging ;;
+        agent-staging)     start_agent_staging ;;
+        streamlit-staging) start_streamlit_staging ;;
     esac
 }
 
@@ -576,6 +591,7 @@ start_mcp_server() {
       -e GRAFANA_URL="$GRAFANA_URL" \
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
+      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-https://aidash.app.intlab.redhat.com}" \
       $S3_ENV_VARS \
       $PROFILE_ENV \
       $PROFILE_MOUNT \
@@ -646,6 +662,7 @@ start_agent() {
       -e LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" \
       -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
       -e LANGFUSE_HOST="http://langfuse-web:3000" \
+      -e LANGFUSE_TRACING_ENVIRONMENT="production" \
       -p 5002:5002 \
       psap-agent:local
     
@@ -681,6 +698,112 @@ start_streamlit() {
     fi
 }
 
+start_mcp_server_staging() {
+    log_info "Starting MCP Server (Staging)..."
+
+    S3_ENV_VARS_STAGING=""
+    if [ -n "$S3_BUCKET" ]; then
+        S3_ENV_VARS_STAGING="-e S3_BUCKET=$S3_BUCKET -e S3_KEY=$S3_KEY_STAGING -e S3_REGION=$S3_REGION -e S3_CACHE_TTL_SECONDS=$S3_CACHE_TTL_SECONDS"
+        if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+            S3_ENV_VARS_STAGING="$S3_ENV_VARS_STAGING -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
+        fi
+        log_info "S3 staging data: s3://$S3_BUCKET/$S3_KEY_STAGING"
+    else
+        log_info "S3 not configured, staging MCP will use local data files"
+    fi
+
+    PROFILE_ENV_STAGING=""
+    PROFILE_S3_PREFIX="${PROFILE_S3_PREFIX:-profiles/rhaiis}"
+    if [ -n "$S3_BUCKET" ]; then
+        PROFILE_ENV_STAGING="-e PROFILE_S3_PREFIX=$PROFILE_S3_PREFIX"
+    fi
+
+    podman run -d \
+      --name psap-mcp-server-staging \
+      --network $NETWORK_NAME \
+      --memory=8g \
+      -e MCP_HOST=0.0.0.0 \
+      -e MCP_PORT=5001 \
+      -e ENABLE_AUTH=false \
+      -e POSTGRES_HOST=psap-postgres \
+      -e POSTGRES_PORT=5432 \
+      -e POSTGRES_DB=psap \
+      -e POSTGRES_USER=psap_user \
+      -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
+      -e GRAFANA_URL="$GRAFANA_URL" \
+      -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
+      -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
+      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL_STAGING:-https://staging-aidash.apps.ocp4.intlab.redhat.com}" \
+      $S3_ENV_VARS_STAGING \
+      $PROFILE_ENV_STAGING \
+      -p 5003:5001 \
+      psap-mcp-server:local
+
+    log_info "Waiting for MCP Server (Staging) to be ready..."
+    sleep 5
+
+    if curl -s -f http://localhost:5003/health &> /dev/null; then
+        log_success "MCP Server (Staging) is ready"
+    else
+        log_warning "MCP Server (Staging) might not be ready yet"
+    fi
+}
+
+start_agent_staging() {
+    log_info "Starting PSAP Agent (Staging)..."
+
+    podman run -d \
+      --name psap-agent-staging \
+      --network $NETWORK_NAME \
+      -e AGENT_PORT=5002 \
+      -e POSTGRES_HOST=psap-postgres \
+      -e POSTGRES_PORT=5432 \
+      -e POSTGRES_DB=psap \
+      -e POSTGRES_USER=psap_user \
+      -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
+      -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
+      -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
+      -e MCP_SERVER_URL="http://psap-mcp-server-staging:5001/mcp/" \
+      -e ENABLE_PROMPT_CACHING=true \
+      -e CACHE_TTL_HOURS=4 \
+      -e LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" \
+      -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
+      -e LANGFUSE_HOST="http://langfuse-web:3000" \
+      -e LANGFUSE_TRACING_ENVIRONMENT="staging" \
+      -p 5004:5002 \
+      psap-agent:local
+
+    log_info "Waiting for Agent (Staging) to be ready..."
+    sleep 10
+
+    if curl -s -f http://localhost:5004/health &> /dev/null; then
+        log_success "Agent (Staging) is ready"
+    else
+        log_warning "Agent (Staging) might not be ready yet"
+    fi
+}
+
+start_streamlit_staging() {
+    log_info "Starting Streamlit UI (Staging)..."
+
+    podman run -d \
+      --name streamlit-ui-staging \
+      --network $NETWORK_NAME \
+      -e AGENT_API_URL="http://psap-agent-staging:5002" \
+      -e APP_TITLE="Staging Performance Analysis Agent" \
+      -p 8502:8501 \
+      streamlit-ui:local
+
+    log_info "Waiting for Streamlit (Staging) to be ready..."
+    sleep 5
+
+    if curl -s -f http://localhost:8502/_stcore/health &> /dev/null; then
+        log_success "Streamlit UI (Staging) is ready"
+    else
+        log_warning "Streamlit (Staging) might not be ready yet"
+    fi
+}
+
 show_status() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
@@ -694,11 +817,18 @@ show_status() {
     echo ""
     
     # Show access URLs
-    log_info "Access URLs:"
+    log_info "Access URLs (Main):"
     echo "  🌐 Streamlit UI:  http://localhost:8501"
-    echo "  📊 Langfuse UI:   http://localhost:3000"
     echo "  🤖 Agent API:     http://localhost:5002"
     echo "  🔧 MCP Server:    http://localhost:5001"
+    echo ""
+    log_info "Access URLs (Staging):"
+    echo "  🌐 Streamlit UI:  http://localhost:8502"
+    echo "  🤖 Agent API:     http://localhost:5004"
+    echo "  🔧 MCP Server:    http://localhost:5003"
+    echo ""
+    log_info "Shared Services:"
+    echo "  📊 Langfuse UI:   http://localhost:3000"
     echo "  🗄️  PostgreSQL:    localhost:5432"
     echo ""
     
@@ -731,21 +861,31 @@ view_logs() {
     log_info "Viewing container logs (Ctrl+C to exit)..."
     echo ""
     
-    # Show logs from all containers
+    LOG_PIDS=""
+
     podman logs -f psap-agent 2>&1 | sed 's/^/[AGENT] /' &
-    AGENT_PID=$!
-    
+    LOG_PIDS="$LOG_PIDS $!"
+
     podman logs -f psap-mcp-server 2>&1 | sed 's/^/[MCP] /' &
-    MCP_PID=$!
-    
+    LOG_PIDS="$LOG_PIDS $!"
+
     podman logs -f streamlit-ui 2>&1 | sed 's/^/[STREAMLIT] /' &
-    STREAMLIT_PID=$!
-    
+    LOG_PIDS="$LOG_PIDS $!"
+
+    podman logs -f psap-agent-staging 2>&1 | sed 's/^/[AGENT-STAGING] /' &
+    LOG_PIDS="$LOG_PIDS $!"
+
+    podman logs -f psap-mcp-server-staging 2>&1 | sed 's/^/[MCP-STAGING] /' &
+    LOG_PIDS="$LOG_PIDS $!"
+
+    podman logs -f streamlit-ui-staging 2>&1 | sed 's/^/[STREAMLIT-STAGING] /' &
+    LOG_PIDS="$LOG_PIDS $!"
+
     podman logs -f langfuse-web 2>&1 | sed 's/^/[LANGFUSE] /' &
-    LANGFUSE_PID=$!
-    
+    LOG_PIDS="$LOG_PIDS $!"
+
     # Wait for user to interrupt
-    trap "kill $AGENT_PID $MCP_PID $STREAMLIT_PID $LANGFUSE_PID 2>/dev/null" EXIT
+    trap "kill $LOG_PIDS 2>/dev/null" EXIT
     wait
 }
 
@@ -767,6 +907,9 @@ main() {
     start_mcp_server
     start_agent
     start_streamlit
+    start_mcp_server_staging
+    start_agent_staging
+    start_streamlit_staging
     show_status
     
     # Ask if user wants to view logs
@@ -797,14 +940,18 @@ Commands:
   help                   Show this help message
 
 Components (for rebuild / restart):
-  mcp          MCP Server          (container: psap-mcp-server)
-  agent        PSAP Agent          (container: psap-agent)
-  streamlit    Streamlit UI        (container: streamlit-ui, alias: ui)
+  mcp                MCP Server          (container: psap-mcp-server)
+  agent              PSAP Agent          (container: psap-agent)
+  streamlit          Streamlit UI        (container: streamlit-ui, alias: ui)
+  mcp-staging        MCP Server Staging  (container: psap-mcp-server-staging)
+  agent-staging      Agent Staging       (container: psap-agent-staging)
+  streamlit-staging  Streamlit Staging   (container: streamlit-ui-staging, alias: ui-staging)
 
 Examples:
-  ./test-local-containers.sh rebuild                # Rebuild all images
-  ./test-local-containers.sh rebuild streamlit      # Rebuild Streamlit only
-  ./test-local-containers.sh restart agent          # Restart Agent only
+  ./test-local-containers.sh rebuild                    # Rebuild all images
+  ./test-local-containers.sh rebuild streamlit          # Rebuild Streamlit only
+  ./test-local-containers.sh restart agent              # Restart Agent only
+  ./test-local-containers.sh restart agent-staging      # Restart Staging Agent only
   ./test-local-containers.sh rebuild ui && ./test-local-containers.sh restart ui
 
 Credentials:
@@ -814,11 +961,17 @@ Credentials:
   Langfuse           – prompted interactively on first start
 
 Access URLs (after startup):
-  Streamlit UI   http://localhost:8501
-  Agent API      http://localhost:5002
-  MCP Server     http://localhost:5001
-  Langfuse UI    http://localhost:3000
-  PostgreSQL     localhost:5432
+  Main:
+    Streamlit UI   http://localhost:8501
+    Agent API      http://localhost:5002
+    MCP Server     http://localhost:5001
+  Staging:
+    Streamlit UI   http://localhost:8502
+    Agent API      http://localhost:5004
+    MCP Server     http://localhost:5003
+  Shared:
+    Langfuse UI    http://localhost:3000
+    PostgreSQL     localhost:5432
 EOF
 }
 
@@ -863,7 +1016,7 @@ case "${1:-}" in
             start_component "$comp"
         else
             log_info "Restarting all app containers (keeping PostgreSQL & Langfuse)..."
-            for container in streamlit-ui psap-agent psap-mcp-server; do
+            for container in streamlit-ui-staging psap-agent-staging psap-mcp-server-staging streamlit-ui psap-agent psap-mcp-server; do
                 if podman ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
                     podman stop $container 2>/dev/null || true
                     podman rm $container 2>/dev/null || true
@@ -872,6 +1025,9 @@ case "${1:-}" in
             start_mcp_server
             start_agent
             start_streamlit
+            start_mcp_server_staging
+            start_agent_staging
+            start_streamlit_staging
         fi
         show_status
         ;;

@@ -12,11 +12,15 @@
     "RHAIIS-3.2.3-async": "v0.11.0",
     "RHAIIS-3.2.4": "v0.11.0",
     "RHAIIS-3.2.5": "v0.11.2",
-    "RHAIIS-3.3": "v0.13.0"
+    "RHAIIS-3.3": "v0.13.0",
+    "RHAIIS-3.4-EA1": "v0.14.1",
+    "RHAIIS-3.4-EA2": "v0.16.0",
+    "RHAIIS-3.4": "v0.18.0"
   },
   
   "_notes": {
     "RHAIIS-3.2.3-async": "Async variant based on same upstream vLLM as RHAIIS-3.2.3",
+    "RHAIIS-3.4": "GA release",
     "mapping_source": "These mappings should be verified against RHAIIS release documentation"
   }
 }
