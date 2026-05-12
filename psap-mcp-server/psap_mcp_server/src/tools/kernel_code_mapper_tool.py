@@ -563,29 +563,32 @@ _MAX_SOURCE_BYTES = 50_000
 async def fetch_vllm_source(
     file_path: str,
     version: str = "v0.13.0",
+    repo: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fetch actual vLLM source code from GitHub at a specific version tag.
+    """Fetch source code from GitHub at a specific version tag.
     
-    Retrieves the full file content from the vLLM repository at the given
-    version. Use this to read the actual implementation of kernels, layers,
-    or configuration files that are relevant to performance analysis.
+    Retrieves the full file content from a GitHub repository at the given
+    version/ref. Defaults to the vLLM repository but can target any public
+    GitHub repo (e.g., "pytorch/pytorch") for verifying upstream dependencies.
     
     No pre-cloning is needed -- files are fetched on demand via the GitHub
     Contents API.
     
     TOOL_NAME=fetch_vllm_source
-    DISPLAY_NAME=Fetch vLLM Source Code
-    USECASE=Read actual vLLM source code at a specific version. Use after map_kernel_to_vllm_code identifies relevant files, to understand the implementation details behind a kernel or optimization.
-    INSTRUCTIONS=1. Provide the file path relative to the vLLM repo root (e.g., "vllm/model_executor/layers/fused_moe/fused_moe.py"), 2. Specify the vLLM version tag (e.g., "v0.13.0" or "v0.11.2"), 3. Compare files across versions to understand code changes
-    INPUT_DESCRIPTION=file_path (str): Path relative to vLLM repo root; version (str): Git tag (default: v0.13.0)
+    DISPLAY_NAME=Fetch GitHub Source Code
+    USECASE=Read source code at a specific version. Defaults to vLLM but can fetch from any public GitHub repo. Use to read kernel implementations, dependency pins (e.g., PyTorch's triton_version.txt), or configuration files.
+    INSTRUCTIONS=1. Provide the file path relative to the repo root, 2. Specify the version tag or ref, 3. Optionally set repo to fetch from a different GitHub repo (e.g., "pytorch/pytorch")
+    INPUT_DESCRIPTION=file_path (str): Path relative to repo root; version (str): Git tag (default: v0.13.0); repo (str, optional): GitHub repo in "owner/name" format (default: vllm-project/vllm)
     OUTPUT_DESCRIPTION=Dictionary with file content, metadata, and GitHub URL
-    EXAMPLES=fetch_vllm_source("vllm/model_executor/layers/fused_moe/fused_moe.py", "v0.13.0"), fetch_vllm_source("vllm/attention/backends/flash_attn.py", "v0.11.2")
+    EXAMPLES=fetch_vllm_source("vllm/model_executor/layers/fused_moe/fused_moe.py", "v0.13.0"), fetch_vllm_source(".ci/docker/triton_version.txt", "v2.9.1", repo="pytorch/pytorch"), fetch_vllm_source("requirements/cuda.txt", "v0.16.0")
     PREREQUISITES=Internet access to GitHub API. Optional: GITHUB_TOKEN for higher rate limits
     RELATED_TOOLS=map_kernel_to_vllm_code, get_vllm_code_diff, correlate_kernel_with_changes
     
     Args:
-        file_path: Path relative to the vLLM repo root.
+        file_path: Path relative to the repo root.
         version: Git tag or ref to fetch from (default: "v0.13.0").
+        repo: GitHub repository in "owner/name" format (default: vllm-project/vllm).
+              Use for upstream dependency verification, e.g., "pytorch/pytorch".
     
     Returns:
         Dictionary containing:
@@ -598,11 +601,12 @@ async def fetch_vllm_source(
         - github_url: Direct link to view the file on GitHub
     """
     try:
-        version = _normalize_version(version)
-        # Strip leading slash if present
+        target_repo = repo or VLLM_REPO
+        if target_repo == VLLM_REPO:
+            version = _normalize_version(version)
         file_path = file_path.lstrip("/")
 
-        url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/contents/{file_path}"
+        url = f"{GITHUB_API_BASE}/repos/{target_repo}/contents/{file_path}"
         params = {"ref": version}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -613,7 +617,7 @@ async def fetch_vllm_source(
                 return {
                     "status": "error",
                     "message": f"File '{file_path}' not found at version {version}.",
-                    "suggestion": f"Check the path exists: https://github.com/{VLLM_REPO}/tree/{version}/{file_path}",
+                    "suggestion": f"Check the path exists: https://github.com/{target_repo}/tree/{version}/{file_path}",
                 }
             if response.status_code == 403:
                 return {
@@ -639,10 +643,11 @@ async def fetch_vllm_source(
                     "status": "success",
                     "file_path": file_path,
                     "version": version,
+                    "repo": target_repo,
                     "type": "directory",
                     "entries": entries,
-                    "message": f"'{file_path}' is a directory with {len(entries)} entries at {version}",
-                    "github_url": f"https://github.com/{VLLM_REPO}/tree/{version}/{file_path}",
+                    "message": f"'{file_path}' is a directory with {len(entries)} entries at {version} in {target_repo}",
+                    "github_url": f"https://github.com/{target_repo}/tree/{version}/{file_path}",
                 }
 
             # Decode file content
@@ -664,20 +669,21 @@ async def fetch_vllm_source(
                 "status": "success",
                 "file_path": file_path,
                 "version": version,
+                "repo": target_repo,
                 "type": "file",
                 "content": content,
                 "size_bytes": size_bytes,
                 "line_count": content.count("\n") + 1,
                 "truncated": truncated,
-                "github_url": f"https://github.com/{VLLM_REPO}/blob/{version}/{file_path}",
-                "message": f"Fetched {file_path} at {version} ({size_bytes:,} bytes, {content.count(chr(10))+1} lines)"
+                "github_url": f"https://github.com/{target_repo}/blob/{version}/{file_path}",
+                "message": f"Fetched {file_path} at {version} from {target_repo} ({size_bytes:,} bytes, {content.count(chr(10))+1} lines)"
                 + (" [truncated]" if truncated else ""),
             }
 
     except httpx.TimeoutException:
         return {"status": "error", "message": "GitHub API request timed out"}
     except Exception as e:
-        logger.error(f"Error fetching vLLM source: {e}")
+        logger.error(f"Error fetching source from {repo or VLLM_REPO}: {e}")
         return {"status": "error", "message": f"Failed to fetch source: {str(e)}"}
 
 

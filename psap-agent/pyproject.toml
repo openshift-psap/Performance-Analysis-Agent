@@ -34,6 +34,8 @@ dependencies = [
 
     # Google AI
     "google-genai==1.62.0",
+    "langchain-google-vertexai>=2.0.0",
+    "anthropic[vertex]>=0.96.0",
 
     # MCP
     "mcp==1.26.0",

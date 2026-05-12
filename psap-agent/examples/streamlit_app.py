@@ -340,12 +340,14 @@ def main():
         model_options = {
             "Gemini 3 Flash (default)": "gemini-3-flash-preview",
             "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
+            "Claude Opus 4.6 (Vertex AI)": "claude-opus-4-6",
+            "Claude Sonnet 4.6 (Vertex AI)": "claude-sonnet-4-6",
         }
         selected_label = st.selectbox(
             "LLM Model",
             options=list(model_options.keys()),
             index=0,
-            help="Select the Gemini model. Pro offers higher quality at higher latency/cost.",
+            help="Select the LLM model. Claude models require Vertex AI credentials.",
         )
         selected_model = model_options[selected_label]
 
@@ -354,6 +356,12 @@ def main():
                 "**Gemini 3 Flash** is the default and recommended model for most use cases. "
                 "Use **Pro** only when you need deeper reasoning or higher quality output. "
                 "Pro has significantly higher latency and cost, please use it mindfully."
+            )
+        elif selected_model.startswith("claude-"):
+            st.info(
+                "**Claude models** run via Google Vertex AI "
+                "Opus is best for complex architectural analysis; "
+                "Sonnet is a good balance of quality and speed. Claude Models have higher cost, please use them mindfully."
             )
 
         # API test

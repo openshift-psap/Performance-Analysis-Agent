@@ -7,6 +7,7 @@ including initialization, configuration, and agent creation utilities.
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -20,6 +21,28 @@ from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
 logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
+
+
+def _is_claude_model(model_name: str) -> bool:
+    return model_name.startswith("claude-")
+
+
+def _create_claude_model(model_name: str) -> BaseChatModel:
+    """Create a ChatAnthropicVertex model for Claude via Vertex AI."""
+    from langchain_google_vertexai.model_garden import ChatAnthropicVertex
+
+    if not settings.ANTHROPIC_VERTEX_PROJECT_ID:
+        raise AppException(
+            "ANTHROPIC_VERTEX_PROJECT_ID must be set to use Claude models",
+            AppExceptionCode.CONFIGURATION_VALIDATION_ERROR,
+        )
+
+    return ChatAnthropicVertex(
+        model_name=model_name,
+        project=settings.ANTHROPIC_VERTEX_PROJECT_ID,
+        location=settings.CLOUD_ML_REGION,
+        temperature=0.3,
+    )
 
 
 @asynccontextmanager
@@ -82,9 +105,11 @@ async def get_psap_agent(
     logger.info(f"🤖 Using model: {effective_model}")
 
     # Initialize the language model
-    # Note: Gemini API doesn't support cached_content with tools/system_instruction
-    # So we disable caching when tools are present
-    if settings.ENABLE_PROMPT_CACHING and not tools:
+    if _is_claude_model(effective_model):
+        logger.info("Using Claude model via Vertex AI")
+        model = _create_claude_model(effective_model)
+    elif settings.ENABLE_PROMPT_CACHING and not tools:
+        # Gemini-specific: cached_content not supported with tools/system_instruction
         try:
             cache_manager = get_cache_manager()
             cache = await cache_manager.create_or_get_cache(ttl_hours=settings.CACHE_TTL_HOURS)
@@ -93,7 +118,6 @@ async def get_psap_agent(
             logger.info(f"✅ Caching enabled: {cache_stats.get('token_count', 0)} tokens cached")
             logger.info(f"💰 Cache expires in: {cache_stats.get('time_remaining_human', 'unknown')}")
             
-            # Note: model must match the cache model (gemini-2.5-flash)
             model = ChatGoogleGenerativeAI(
                 model=effective_model,
                 temperature=0.3,

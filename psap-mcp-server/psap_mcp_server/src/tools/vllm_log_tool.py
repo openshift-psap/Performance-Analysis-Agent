@@ -362,6 +362,33 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
             result["engine_config"]["tp_rank"] = int(m.group(1))
             result["engine_config"]["ep_rank"] = int(m.group(2))
 
+        # --- Dependency versions (PyTorch, Triton, CUDA, etc.) ---
+        m = re.search(r"(?:torch|pytorch)\s+version[:\s]+(\S+)", line, re.IGNORECASE)
+        if m:
+            result.setdefault("dependencies", {})["torch_version"] = m.group(1).rstrip(",")
+
+        m = re.search(r"triton\s+version[:\s]+(\S+)", line, re.IGNORECASE)
+        if m:
+            result.setdefault("dependencies", {})["triton_version"] = m.group(1).rstrip(",")
+
+        m = re.search(r"CUDA\s+version[:\s]+(\S+)", line, re.IGNORECASE)
+        if m and ("dependencies" not in result or "cuda_version" not in result.get("dependencies", {})):
+            result.setdefault("dependencies", {})["cuda_version"] = m.group(1).rstrip(",")
+
+        m = re.search(r"(?:transformers)\s+version[:\s]+(\S+)", line, re.IGNORECASE)
+        if m:
+            result.setdefault("dependencies", {})["transformers_version"] = m.group(1).rstrip(",")
+
+        m = re.search(r"(?:flash.?attn|flash.?attention)\s+version[:\s]+(\S+)", line, re.IGNORECASE)
+        if m:
+            result.setdefault("dependencies", {})["flash_attn_version"] = m.group(1).rstrip(",")
+
+        # Catch "Using torch.xyz" or "torch xyz" version patterns common in vLLM logs
+        if "torch" in line.lower() and not result.get("dependencies", {}).get("torch_version"):
+            m = re.search(r"torch==(\S+)", line)
+            if m:
+                result.setdefault("dependencies", {})["torch_version"] = m.group(1)
+
         # --- Warnings and errors ---
         if "WARNING" in line or "ERROR" in line:
             cleaned = line.strip()
@@ -370,6 +397,80 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
 
     # Remove empty sections
     return {k: v for k, v in result.items() if v}
+
+
+# ===================================================================== #
+#  Dependency version enrichment                                         #
+# ===================================================================== #
+
+def _extract_vllm_tag_from_version(version: str) -> Optional[str]:
+    """Try to derive a vLLM GitHub tag from a version string.
+
+    Handles formats like "vLLM-0.16.0", "v0.16.0", "0.16.0".
+    Returns e.g. "v0.16.0" or None if unparseable.
+    """
+    v = version.strip()
+    for prefix in ("vLLM-", "vllm-", "vLLM ", "vllm "):
+        if v.startswith(prefix):
+            v = v[len(prefix):]
+            break
+    v = v.lstrip("v")
+    if re.match(r"^\d+\.\d+", v):
+        return f"v{v}"
+    return None
+
+
+def _parse_requirements(text: str) -> Dict[str, str]:
+    """Parse a requirements.txt-style file into {package: version_spec}."""
+    deps: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for sep in ("==", ">=", "<=", "~=", "!="):
+            if sep in line:
+                pkg, ver = line.split(sep, 1)
+                deps[pkg.strip().lower()] = ver.strip()
+                break
+    return deps
+
+
+async def _enrich_dependency_versions(
+    parsed: Dict[str, Any],
+    version: str,
+) -> None:
+    """Enrich parsed log data with all pinned dependency versions from GitHub.
+
+    Fetches ``requirements/cuda.txt`` from the vLLM repo at the corresponding
+    tag, parses every pinned package, and stores the full set under
+    ``parsed["pinned_dependencies"]``.  Any versions already extracted from
+    the log text (under ``parsed["dependencies"]``) are preserved and take
+    precedence over the requirements file.
+
+    Modifies *parsed* in place.
+    """
+    tag = _extract_vllm_tag_from_version(version)
+    if not tag:
+        return
+
+    try:
+        from psap_mcp_server.src.tools.kernel_code_mapper_tool import fetch_vllm_source
+
+        result = await fetch_vllm_source("requirements/cuda.txt", tag)
+        if result.get("status") != "success" or result.get("type") != "file":
+            return
+
+        reqs = _parse_requirements(result.get("content", ""))
+        if not reqs:
+            return
+
+        pinned = parsed.setdefault("pinned_dependencies", {})
+        pinned["_source"] = f"requirements/cuda.txt @ {tag}"
+        for pkg, ver in sorted(reqs.items()):
+            pinned[pkg] = ver
+
+    except Exception as exc:
+        logger.debug(f"Could not enrich dependency versions for {version}: {exc}")
 
 
 # ===================================================================== #
@@ -455,12 +556,19 @@ async def compare_vllm_logs(
     rather than code changes -- e.g., different quantization backends, attention
     backends, CUDA graph capture sizes, or memory allocation strategies.
 
+    **Automatic dependency enrichment**: This tool automatically fetches
+    ``requirements/cuda.txt`` from the vLLM GitHub repo for each version and
+    includes ALL pinned dependency versions in the comparison under a
+    ``pinned_dependencies`` section. This surfaces PyTorch, Triton, flash-attn,
+    xformers, and every other pinned package — even when the server logs don't
+    print them.
+
     TOOL_NAME=compare_vllm_logs
     DISPLAY_NAME=Compare vLLM Logs
-    USECASE=Compare engine configurations between two vLLM versions. Use this to find config differences (quantization, attention backend, CUDA graphs, memory) that explain performance changes not visible in kernel profiling.
-    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model, accelerator, tp, and profile, 3. Returns only the fields that differ between versions plus full parsed data for both
+    USECASE=Compare engine configurations AND all pinned dependency versions between two vLLM versions. Automatically enriches with every dependency from requirements/cuda.txt. Use this to find config and dependency differences that explain performance changes.
+    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model, accelerator, tp, and profile, 3. Returns only the fields that differ between versions plus full parsed data for both, 4. Check the 'pinned_dependencies' section for ALL dependency version changes (PyTorch, Triton, flash-attn, xformers, etc.)
     INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile e.g. "1k/1k"
-    OUTPUT_DESCRIPTION=Dictionary with config_differences (only changed fields), plus full parsed logs for both versions
+    OUTPUT_DESCRIPTION=Dictionary with config_differences (only changed fields including all pinned dependency versions), plus full parsed logs for both versions
     EXAMPLES=compare_vllm_logs("vLLM-0.16.0", "vLLM-0.17.1", model="gpt-oss-120b", accelerator="H200", tp=4, profile="1k/1k")
     PREREQUISITES=Benchmark CSV must contain uuid column; log files must exist in S3 for both versions
     RELATED_TOOLS=fetch_vllm_logs, compare_pytorch_profiles, analyze_performance_insights
@@ -494,6 +602,13 @@ async def compare_vllm_logs(
 
         parsed1 = _parse_vllm_log(raw1)
         parsed2 = _parse_vllm_log(raw2)
+
+        # Enrich with dependency versions from requirements/cuda.txt if not
+        # already extracted from the logs.  This ensures the comparison always
+        # surfaces PyTorch/Triton/CUDA version changes even when the log
+        # format doesn't print them.
+        await _enrich_dependency_versions(parsed1, version1)
+        await _enrich_dependency_versions(parsed2, version2)
 
         # Build diff: only fields that changed
         differences: Dict[str, Dict[str, Any]] = {}

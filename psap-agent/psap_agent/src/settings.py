@@ -90,6 +90,14 @@ class Settings(BaseSettings):
         default="gemini-3-flash-preview", json_schema_extra={"env": "GEMINI_MODEL"}
     )
 
+    # Anthropic Vertex AI Configuration (for Claude models)
+    ANTHROPIC_VERTEX_PROJECT_ID: Optional[str] = Field(
+        default=None, json_schema_extra={"env": "ANTHROPIC_VERTEX_PROJECT_ID"}
+    )
+    CLOUD_ML_REGION: str = Field(
+        default="us-east5", json_schema_extra={"env": "CLOUD_ML_REGION"}
+    )
+
     # Context Caching Configuration
     ENABLE_PROMPT_CACHING: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_PROMPT_CACHING"}

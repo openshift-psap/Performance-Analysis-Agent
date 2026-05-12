@@ -325,19 +325,21 @@ build_images() {
     build_streamlit
 }
 
-# Map user-facing component names to build/start functions and container names
+# Map user-facing component names to build/start functions and container names.
+# Base names (mcp, agent, streamlit) resolve to BOTH main and staging.
+# Use -staging suffix to target staging only.
 resolve_component() {
     case "$1" in
-        mcp|mcp-server)           echo "mcp" ;;
-        agent)                    echo "agent" ;;
-        streamlit|ui)             echo "streamlit" ;;
+        mcp|mcp-server)           echo "mcp mcp-staging" ;;
+        agent)                    echo "agent agent-staging" ;;
+        streamlit|ui)             echo "streamlit streamlit-staging" ;;
         mcp-staging)              echo "mcp-staging" ;;
         agent-staging)            echo "agent-staging" ;;
         streamlit-staging|ui-staging) echo "streamlit-staging" ;;
         *)
             log_error "Unknown component: $1"
-            echo "  Valid components: mcp, agent, streamlit (or: ui)"
-            echo "  Staging:          mcp-staging, agent-staging, streamlit-staging (or: ui-staging)"
+            echo "  Valid components: mcp, agent, streamlit (or: ui)        → main + staging"
+            echo "  Staging only:     mcp-staging, agent-staging, streamlit-staging (or: ui-staging)"
             exit 1
             ;;
     esac
@@ -645,7 +647,15 @@ start_agent() {
     fi
     echo ""
     
-    podman run -d \
+    # Mount GCP credentials for Vertex AI (Claude models)
+    GCP_ADC_MOUNT=""
+    GCP_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
+    if [ -f "$GCP_ADC_FILE" ]; then
+        GCP_ADC_MOUNT="-v $GCP_ADC_FILE:/tmp/gcloud_adc.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json"
+        log_info "GCP credentials found — Claude models available via Vertex AI"
+    fi
+
+    eval podman run -d \
       --name psap-agent \
       --network $NETWORK_NAME \
       -e AGENT_PORT=5002 \
@@ -656,6 +666,8 @@ start_agent() {
       -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
       -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
       -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
+      -e ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-}" \
+      -e CLOUD_ML_REGION="${CLOUD_ML_REGION:-us-east5}" \
       -e MCP_SERVER_URL="http://psap-mcp-server:5001/mcp/" \
       -e ENABLE_PROMPT_CACHING=true \
       -e CACHE_TTL_HOURS=4 \
@@ -663,6 +675,7 @@ start_agent() {
       -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
       -e LANGFUSE_HOST="http://langfuse-web:3000" \
       -e LANGFUSE_TRACING_ENVIRONMENT="production" \
+      $GCP_ADC_MOUNT \
       -p 5002:5002 \
       psap-agent:local
     
@@ -752,7 +765,14 @@ start_mcp_server_staging() {
 start_agent_staging() {
     log_info "Starting PSAP Agent (Staging)..."
 
-    podman run -d \
+    # Mount GCP credentials for Vertex AI (Claude models)
+    GCP_ADC_MOUNT=""
+    GCP_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
+    if [ -f "$GCP_ADC_FILE" ]; then
+        GCP_ADC_MOUNT="-v $GCP_ADC_FILE:/tmp/gcloud_adc.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json"
+    fi
+
+    eval podman run -d \
       --name psap-agent-staging \
       --network $NETWORK_NAME \
       -e AGENT_PORT=5002 \
@@ -763,6 +783,8 @@ start_agent_staging() {
       -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
       -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
       -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
+      -e ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-}" \
+      -e CLOUD_ML_REGION="${CLOUD_ML_REGION:-us-east5}" \
       -e MCP_SERVER_URL="http://psap-mcp-server-staging:5001/mcp/" \
       -e ENABLE_PROMPT_CACHING=true \
       -e CACHE_TTL_HOURS=4 \
@@ -770,6 +792,7 @@ start_agent_staging() {
       -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
       -e LANGFUSE_HOST="http://langfuse-web:3000" \
       -e LANGFUSE_TRACING_ENVIRONMENT="staging" \
+      $GCP_ADC_MOUNT \
       -p 5004:5002 \
       psap-agent:local
 
@@ -950,7 +973,7 @@ Components (for rebuild / restart):
 Examples:
   ./test-local-containers.sh rebuild                    # Rebuild all images
   ./test-local-containers.sh rebuild streamlit          # Rebuild Streamlit only
-  ./test-local-containers.sh restart agent              # Restart Agent only
+  ./test-local-containers.sh restart agent              # Restart Agent (main + staging)
   ./test-local-containers.sh restart agent-staging      # Restart Staging Agent only
   ./test-local-containers.sh rebuild ui && ./test-local-containers.sh restart ui
 
@@ -990,8 +1013,9 @@ case "${1:-}" in
         ;;
     rebuild)
         if [ -n "${2:-}" ]; then
-            comp=$(resolve_component "$2")
-            build_component "$comp"
+            for comp in $(resolve_component "$2"); do
+                build_component "$comp"
+            done
         else
             log_info "Rebuilding all images..."
             build_images
@@ -1006,14 +1030,15 @@ case "${1:-}" in
         fi
 
         if [ -n "${2:-}" ]; then
-            comp=$(resolve_component "$2")
-            cname=$(component_container_name "$comp")
-            log_info "Restarting $cname..."
-            if podman ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
-                podman stop "$cname" 2>/dev/null || true
-                podman rm "$cname" 2>/dev/null || true
-            fi
-            start_component "$comp"
+            for comp in $(resolve_component "$2"); do
+                cname=$(component_container_name "$comp")
+                log_info "Restarting $cname..."
+                if podman ps -a --format '{{.Names}}' | grep -q "^${cname}$"; then
+                    podman stop "$cname" 2>/dev/null || true
+                    podman rm "$cname" 2>/dev/null || true
+                fi
+                start_component "$comp"
+            done
         else
             log_info "Restarting all app containers (keeping PostgreSQL & Langfuse)..."
             for container in streamlit-ui-staging psap-agent-staging psap-mcp-server-staging streamlit-ui psap-agent psap-mcp-server; do

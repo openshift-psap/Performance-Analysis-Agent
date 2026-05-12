@@ -67,6 +67,22 @@ spec:
           value: "http://langfuse:3000"
         - name: LANGFUSE_TRACING_ENVIRONMENT
           value: "production"
+        - name: ANTHROPIC_VERTEX_PROJECT_ID
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: ANTHROPIC_VERTEX_PROJECT_ID
+        - name: CLOUD_ML_REGION
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: CLOUD_ML_REGION
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/var/secrets/gcp/sa-key.json"
+        volumeMounts:
+        - name: gcp-vertex-sa
+          mountPath: /var/secrets/gcp
+          readOnly: true
         resources:
           requests:
             memory: "1Gi"
@@ -86,6 +102,10 @@ spec:
             port: 5002
           initialDelaySeconds: 10
           periodSeconds: 10
+      volumes:
+      - name: gcp-vertex-sa
+        secret:
+          secretName: gcp-vertex-sa
 
 ---
 apiVersion: v1

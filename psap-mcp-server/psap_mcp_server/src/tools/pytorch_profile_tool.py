@@ -13,6 +13,7 @@ the expected folder structure and the agent will find them.
 import json
 import os
 import re
+import statistics
 import time as _time
 from collections import defaultdict
 from pathlib import Path
@@ -712,6 +713,471 @@ def _get_category_breakdown(stats: Dict[str, Dict]) -> Dict[str, Dict]:
         }
 
     return result
+
+
+# ===================================================================== #
+#  Trace-structure analysis (block segmentation, streams, overhead)       #
+# ===================================================================== #
+
+def _extract_raw_events(trace: dict) -> List[Dict[str, Any]]:
+    """Extract duration events from a Chrome trace, preserving temporal/stream info.
+
+    Returns a list of dicts sorted by start time (ts), each with:
+    name, cat, ts (start µs), dur (µs), end (µs), tid (stream/thread id), pid.
+    Only includes complete duration events (ph == "X") with dur > 0.
+    """
+    events = []
+    for ev in trace.get("traceEvents", []):
+        if ev.get("ph") == "X" and ev.get("dur", 0) > 0:
+            ts = ev["ts"]
+            dur = ev["dur"]
+            events.append({
+                "name": ev.get("name", "unknown"),
+                "cat": ev.get("cat", ""),
+                "ts": ts,
+                "dur": dur,
+                "end": ts + dur,
+                "tid": ev.get("tid", 0),
+                "pid": ev.get("pid", 0),
+            })
+    events.sort(key=lambda e: e["ts"])
+    return events
+
+
+def _classify_kernel(name: str) -> str:
+    """Classify a kernel name into a functional pipeline using FUNCTIONAL_PIPELINES."""
+    nl = name.lower()
+    for pipe_name, pipe_cfg in FUNCTIONAL_PIPELINES.items():
+        if any(pat in nl for pat in pipe_cfg["patterns"]):
+            return pipe_name
+    return "other"
+
+
+def _build_kernel_signature(events: List[Dict], cat_filter: str = "kernel") -> List[str]:
+    """Build an ordered sequence of pipeline labels from kernel events.
+
+    Only considers events whose ``cat`` matches *cat_filter*. Each kernel is
+    mapped to its pipeline label via ``_classify_kernel``.  This produces a
+    compact "signature" string per kernel that is used for block-boundary
+    detection (e.g. ["attention", "moe_execution", "communication", ...]).
+    """
+    return [_classify_kernel(ev["name"]) for ev in events if ev.get("cat") == cat_filter]
+
+
+def _detect_blocks(events: List[Dict], min_kernels: int = 20) -> List[Dict[str, Any]]:
+    """Detect repeating transformer block boundaries in a kernel event stream.
+
+    Strategy:
+    1. Extract only GPU kernel events (cat == "kernel"), preserving order.
+    2. Build a pipeline-label signature for each kernel.
+    3. Use a sliding-window approach: find the most common *anchor pattern*
+       (the first few pipeline labels of a block) and use it to split the
+       kernel stream into blocks.
+    4. For each block, record start/end timestamps and constituent events.
+
+    Returns a list of block dicts, each with:
+      block_index, start_ts, end_ts, wall_time_us, gpu_active_us,
+      kernel_count, events (list), pipeline_sequence (list of labels).
+    """
+    kernels = [ev for ev in events if ev.get("cat") == "kernel"]
+    if len(kernels) < min_kernels:
+        return []
+
+    labels = [_classify_kernel(k["name"]) for k in kernels]
+
+    # Find a repeating anchor: look for the most common 3-label prefix
+    # that repeats at roughly regular intervals.
+    anchor_len = 3
+    if len(labels) < anchor_len * 2:
+        return []
+
+    prefix_counts: Dict[str, List[int]] = defaultdict(list)
+    for i in range(len(labels) - anchor_len + 1):
+        key = "|".join(labels[i:i + anchor_len])
+        prefix_counts[key].append(i)
+
+    # Pick the anchor that appears most often and has reasonable spacing.
+    best_anchor = None
+    best_count = 0
+    for key, positions in prefix_counts.items():
+        if len(positions) > best_count and len(positions) >= 3:
+            # Check that the median gap between occurrences is ≥ min_kernels
+            gaps = [positions[j + 1] - positions[j] for j in range(len(positions) - 1)]
+            if gaps and statistics.median(gaps) >= min_kernels:
+                best_anchor = key
+                best_count = len(positions)
+
+    if best_anchor is None:
+        return []
+
+    anchor_positions = prefix_counts[best_anchor]
+
+    blocks: List[Dict[str, Any]] = []
+    for idx, start_pos in enumerate(anchor_positions):
+        end_pos = (anchor_positions[idx + 1] if idx + 1 < len(anchor_positions) else len(kernels))
+        block_kernels = kernels[start_pos:end_pos]
+        if not block_kernels:
+            continue
+
+        block_start = block_kernels[0]["ts"]
+        block_end = max(k["end"] for k in block_kernels)
+        gpu_active = sum(k["dur"] for k in block_kernels)
+
+        blocks.append({
+            "block_index": idx,
+            "start_ts": block_start,
+            "end_ts": block_end,
+            "wall_time_us": block_end - block_start,
+            "gpu_active_us": gpu_active,
+            "idle_us": (block_end - block_start) - gpu_active,
+            "kernel_count": len(block_kernels),
+            "events": block_kernels,
+            "pipeline_sequence": [_classify_kernel(k["name"]) for k in block_kernels],
+        })
+
+    return blocks
+
+
+def _select_median_block(blocks: List[Dict]) -> Optional[Dict]:
+    """Select the block closest to median wall time among all detected blocks.
+
+    Skips the first and last blocks (potential warmup/cooldown).  If fewer
+    than 3 blocks remain after trimming, uses all blocks.
+    """
+    if not blocks:
+        return None
+
+    candidates = blocks[1:-1] if len(blocks) > 3 else blocks
+    if not candidates:
+        return blocks[0]
+
+    wall_times = [b["wall_time_us"] for b in candidates]
+    median_wt = statistics.median(wall_times)
+
+    return min(candidates, key=lambda b: abs(b["wall_time_us"] - median_wt))
+
+
+def _analyze_streams(events: List[Dict]) -> Dict[str, Any]:
+    """Analyse GPU stream utilization and overlap within a set of events.
+
+    Groups events by ``tid`` (stream ID) and computes:
+    - Per-stream: total active time, event count, time range
+    - Cross-stream overlap (time intervals where ≥2 streams are active)
+    - Wall-clock span and critical-path estimate
+    """
+    if not events:
+        return {"streams": {}, "wall_time_us": 0, "overlap_us": 0, "critical_path_us": 0}
+
+    by_stream: Dict[int, List[Dict]] = defaultdict(list)
+    for ev in events:
+        by_stream[ev["tid"]].append(ev)
+
+    stream_summaries: Dict[str, Dict] = {}
+    for tid, stream_events in sorted(by_stream.items()):
+        active = sum(e["dur"] for e in stream_events)
+        stream_summaries[str(tid)] = {
+            "event_count": len(stream_events),
+            "active_time_us": active,
+            "start_ts": min(e["ts"] for e in stream_events),
+            "end_ts": max(e["end"] for e in stream_events),
+        }
+
+    global_start = min(ev["ts"] for ev in events)
+    global_end = max(ev["end"] for ev in events)
+    wall_time = global_end - global_start
+
+    # Compute overlap: merge all event intervals per stream, then find
+    # total time where ≥2 streams have concurrent activity.
+    # Use a sweep-line approach for efficiency.
+    timeline_events: List[Tuple[float, int]] = []  # (time, +1 for start / -1 for end)
+    for ev in events:
+        timeline_events.append((ev["ts"], 1))
+        timeline_events.append((ev["end"], -1))
+    timeline_events.sort(key=lambda x: (x[0], x[1]))
+
+    overlap_us = 0.0
+    active_count = 0
+    prev_time = global_start
+    for t, delta in timeline_events:
+        if active_count >= 2 and t > prev_time:
+            overlap_us += t - prev_time
+        active_count += delta
+        prev_time = t
+
+    # Critical path: wall time minus overlap gives the serialised path
+    # through the streams.  This is a rough upper bound.
+    critical_path = wall_time - overlap_us if overlap_us < wall_time else wall_time
+
+    return {
+        "streams": stream_summaries,
+        "stream_count": len(by_stream),
+        "wall_time_us": wall_time,
+        "total_active_us": sum(s["active_time_us"] for s in stream_summaries.values()),
+        "overlap_us": round(overlap_us),
+        "critical_path_us": round(critical_path),
+    }
+
+
+def _build_ordered_pipeline_breakdown(events: List[Dict]) -> List[Dict[str, Any]]:
+    """Build an ordered pipeline breakdown preserving execution sequence.
+
+    Instead of just totals-per-pipeline, this groups *consecutive* kernel
+    events that belong to the same pipeline into *segments*, preserving
+    the order in which pipelines execute within a block.
+
+    Returns a list of segments, each with:
+      pipeline, description, start_ts, end_ts, wall_time_us,
+      gpu_time_us, kernel_count, kernels (list of per-kernel summaries).
+    """
+    kernels = [ev for ev in events if ev.get("cat") == "kernel"]
+    if not kernels:
+        return []
+
+    segments: List[Dict[str, Any]] = []
+    current_pipe = None
+    current_kernels: List[Dict] = []
+
+    def _flush():
+        if not current_kernels:
+            return
+        desc = FUNCTIONAL_PIPELINES.get(current_pipe, {}).get("description", "Other kernels")
+        seg_start = current_kernels[0]["ts"]
+        seg_end = max(k["end"] for k in current_kernels)
+        gpu_time = sum(k["dur"] for k in current_kernels)
+
+        kernel_summaries = []
+        for k in current_kernels:
+            kernel_summaries.append({
+                "name": k["name"][:80],
+                "dur_us": k["dur"],
+                "stream": k["tid"],
+            })
+
+        segments.append({
+            "pipeline": current_pipe,
+            "description": desc,
+            "start_ts": seg_start,
+            "end_ts": seg_end,
+            "wall_time_us": seg_end - seg_start,
+            "gpu_time_us": gpu_time,
+            "kernel_count": len(current_kernels),
+            "kernels": kernel_summaries,
+        })
+
+    for k in kernels:
+        pipe = _classify_kernel(k["name"])
+        if pipe != current_pipe:
+            _flush()
+            current_pipe = pipe
+            current_kernels = [k]
+        else:
+            current_kernels.append(k)
+    _flush()
+
+    return segments
+
+
+def _compute_overhead(blocks: List[Dict], all_events: List[Dict]) -> Dict[str, Any]:
+    """Compute inter-block and intra-block overhead metrics.
+
+    - Inter-block gap: wall time between consecutive blocks (CPU dispatch,
+      scheduling, memory allocation overhead).
+    - Intra-block idle: per-block wall time minus GPU active time (stream
+      idle gaps, sync waits within a block).
+    """
+    if not blocks:
+        return {"inter_block_gaps": [], "avg_inter_block_us": 0, "avg_intra_block_idle_us": 0}
+
+    inter_gaps: List[Dict] = []
+    for i in range(len(blocks) - 1):
+        gap = blocks[i + 1]["start_ts"] - blocks[i]["end_ts"]
+        inter_gaps.append({
+            "between": f"block_{blocks[i]['block_index']}_to_{blocks[i + 1]['block_index']}",
+            "gap_us": max(0, gap),
+        })
+
+    intra_idles = [b.get("idle_us", 0) for b in blocks]
+
+    gap_values = [g["gap_us"] for g in inter_gaps]
+    avg_inter = statistics.mean(gap_values) if gap_values else 0
+    median_inter = statistics.median(gap_values) if gap_values else 0
+    avg_intra = statistics.mean(intra_idles) if intra_idles else 0
+
+    total_wall = 0.0
+    if len(blocks) >= 2:
+        total_wall = blocks[-1]["end_ts"] - blocks[0]["start_ts"]
+    total_gpu = sum(b["gpu_active_us"] for b in blocks)
+    total_inter = sum(gap_values)
+    total_intra = sum(intra_idles)
+
+    return {
+        "block_count": len(blocks),
+        "total_wall_time_us": round(total_wall),
+        "total_gpu_active_us": round(total_gpu),
+        "total_inter_block_gap_us": round(total_inter),
+        "total_intra_block_idle_us": round(total_intra),
+        "avg_inter_block_gap_us": round(avg_inter),
+        "median_inter_block_gap_us": round(median_inter),
+        "avg_intra_block_idle_us": round(avg_intra),
+        "inter_block_gaps": inter_gaps[:20],
+        "overhead_pct": round((total_inter + total_intra) / total_wall * 100, 1) if total_wall > 0 else 0,
+    }
+
+
+def _build_structured_root_causes(
+    pipeline_breakdown_v1: List[Dict],
+    pipeline_breakdown_v2: List[Dict],
+    stats1: Dict[str, Dict],
+    stats2: Dict[str, Dict],
+) -> List[Dict[str, Any]]:
+    """Build structured root-cause objects from two pipeline breakdowns.
+
+    For each pipeline where the delta is significant (>5% or >1ms), produces
+    a root-cause dict with per-kernel evidence, suggested source files, and
+    investigation hints.
+    """
+    from psap_mcp_server.src.tools.kernel_code_mapper_tool import KERNEL_MAPPINGS
+
+    # Build pipeline -> segment map for each version
+    def _pipe_total(segments: List[Dict]) -> Dict[str, Dict]:
+        totals: Dict[str, Dict] = defaultdict(lambda: {"gpu_us": 0, "kernels": []})
+        for seg in segments:
+            pipe = seg["pipeline"]
+            totals[pipe]["gpu_us"] += seg["gpu_time_us"]
+            for k in seg.get("kernels", []):
+                totals[pipe]["kernels"].append(k)
+        return dict(totals)
+
+    v1_pipes = _pipe_total(pipeline_breakdown_v1)
+    v2_pipes = _pipe_total(pipeline_breakdown_v2)
+
+    all_pipes = set(v1_pipes.keys()) | set(v2_pipes.keys())
+    root_causes: List[Dict[str, Any]] = []
+
+    for pipe in sorted(all_pipes):
+        v1 = v1_pipes.get(pipe, {"gpu_us": 0, "kernels": []})
+        v2 = v2_pipes.get(pipe, {"gpu_us": 0, "kernels": []})
+
+        delta_us = v2["gpu_us"] - v1["gpu_us"]
+        delta_pct = ((delta_us / v1["gpu_us"]) * 100) if v1["gpu_us"] > 0 else (100.0 if v2["gpu_us"] > 0 else 0.0)
+
+        if abs(delta_us) < 1000 and abs(delta_pct) < 5:
+            continue
+
+        # Aggregate kernels per name for each version
+        def _agg_kernels(kernel_list: List[Dict]) -> List[Dict]:
+            by_name: Dict[str, Dict] = defaultdict(lambda: {"total_us": 0, "count": 0})
+            for k in kernel_list:
+                by_name[k["name"]]["total_us"] += k["dur_us"]
+                by_name[k["name"]]["count"] += 1
+            return sorted(
+                [{"name": n, "total_us": d["total_us"], "count": d["count"]} for n, d in by_name.items()],
+                key=lambda x: x["total_us"],
+                reverse=True,
+            )[:10]
+
+        v1_kernels = _agg_kernels(v1["kernels"])
+        v2_kernels = _agg_kernels(v2["kernels"])
+
+        # Determine investigation hint
+        v1_names = {k["name"] for k in v1["kernels"]}
+        v2_names = {k["name"] for k in v2["kernels"]}
+        new_names = v2_names - v1_names
+        removed_names = v1_names - v2_names
+        v1_total_calls = sum(k.get("count", 1) for k in v1_kernels)
+        v2_total_calls = sum(k.get("count", 1) for k in v2_kernels)
+
+        hints = []
+        if new_names and removed_names:
+            hints.append(f"Kernel replacement detected: {len(removed_names)} removed, {len(new_names)} new")
+        if v2_total_calls < v1_total_calls * 0.8:
+            hints.append(f"Kernel call count reduced ({v1_total_calls} -> {v2_total_calls}), suggesting fusion")
+        if v2_total_calls > v1_total_calls * 1.2:
+            hints.append(f"Kernel call count increased ({v1_total_calls} -> {v2_total_calls}), possible decomposition")
+        if delta_us < 0:
+            hints.append(f"Pipeline improved by {_format_duration(abs(delta_us))}")
+        else:
+            hints.append(f"Pipeline regressed by {_format_duration(delta_us)}")
+
+        # Suggest source files based on kernel names in this pipeline
+        suggested_files = set()
+        all_kernel_names = v1_names | v2_names
+        for kname in all_kernel_names:
+            for pattern, mappings in KERNEL_MAPPINGS:
+                if re.search(pattern, kname, re.IGNORECASE):
+                    for m in mappings:
+                        if isinstance(m, dict):
+                            suggested_files.add(m.get("path", ""))
+                        elif isinstance(m, (list, tuple)) and len(m) >= 1:
+                            suggested_files.add(m[0] if isinstance(m[0], str) else str(m[0]))
+                    break
+        suggested_files.discard("")
+
+        direction = "improvement" if delta_us < 0 else "regression"
+        desc = FUNCTIONAL_PIPELINES.get(pipe, {}).get("description", pipe)
+
+        root_causes.append({
+            "root_cause_id": f"{pipe}_{direction}",
+            "pipeline": pipe,
+            "description": desc,
+            "direction": direction,
+            "evidence": {
+                "v1_gpu_us": round(v1["gpu_us"]),
+                "v2_gpu_us": round(v2["gpu_us"]),
+                "delta_us": round(delta_us),
+                "delta_pct": round(delta_pct, 1),
+                "v1_kernels": v1_kernels,
+                "v2_kernels": v2_kernels,
+            },
+            "suggested_source_files": sorted(suggested_files)[:5],
+            "investigation_hints": hints,
+        })
+
+    root_causes.sort(key=lambda rc: abs(rc["evidence"]["delta_us"]), reverse=True)
+    return root_causes
+
+
+# ---------------------------------------------------------------------------
+# Raw-event loading (parallel to stats loading, preserves temporal info)
+# ---------------------------------------------------------------------------
+
+_raw_events_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+_RAW_EVENTS_CACHE_TTL: int = 300
+
+
+def _load_raw_events(
+    model: str,
+    version: str,
+    rank: int,
+) -> Optional[List[Dict]]:
+    """Load raw Chrome trace events for a model/version/rank.
+
+    Checks the in-memory cache first.  Falls back to loading the trace
+    JSON from S3 or local storage.
+    """
+    cache_key = f"raw:{model}/{version}/rank{rank}"
+    if cache_key in _raw_events_cache:
+        ts, evts = _raw_events_cache[cache_key]
+        if (_time.time() - ts) < _RAW_EVENTS_CACHE_TTL:
+            return evts
+        del _raw_events_cache[cache_key]
+
+    index = _discover_profiles()
+    entry = index.get(model, {}).get(version, {}).get(rank)
+    if entry is None:
+        return None
+
+    if entry["source"] == "s3":
+        trace = _load_trace_from_s3(entry["key"])
+    else:
+        trace = _load_trace_from_local(entry["path"])
+
+    if not trace:
+        return None
+
+    evts = _extract_raw_events(trace)
+    _raw_events_cache[cache_key] = (_time.time(), evts)
+    return evts
 
 
 # ===================================================================== #
@@ -1760,3 +2226,274 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
     except Exception as exc:
         logger.error(f"Error checking profile status: {exc}")
         return {"status": "error", "message": f"Failed to check status: {exc}"}
+
+
+async def analyze_trace_structure(
+    version: str,
+    rank: int = 0,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Analyze the temporal structure of a PyTorch profiler trace with transformer block segmentation.
+
+    Goes beyond flat kernel aggregation by detecting repeating transformer
+    block boundaries, selecting a representative median block, analysing GPU
+    stream utilisation and overlap, and computing overhead metrics.
+
+    TOOL_NAME=analyze_trace_structure
+    DISPLAY_NAME=Analyze Trace Structure
+    USECASE=Perform block-level structural analysis of a PyTorch profiler trace. Use this to understand the temporal structure of inference: how many transformer blocks were captured, what a single representative block looks like (operations in order, per-stream), and where overhead lives (inter-block gaps, intra-block idle).
+    INSTRUCTIONS=1. Specify a vLLM version and optionally a model, 2. The tool detects transformer block boundaries automatically, 3. It picks a median-wall-time block as representative, 4. It returns ordered pipeline breakdown, stream analysis, and overhead accounting
+    INPUT_DESCRIPTION=version (str): vLLM version like "v0.13.0"; model (str, optional): Model name; rank (int): GPU rank (default 0)
+    OUTPUT_DESCRIPTION=Dictionary with block segmentation, median block detail, stream analysis, ordered pipeline breakdown, and overhead metrics
+    EXAMPLES=analyze_trace_structure("v0.13.0"), analyze_trace_structure("v0.11.2", model="gpt-oss")
+    PREREQUISITES=Profile traces must exist in S3 or local directory
+    RELATED_TOOLS=compare_trace_structures, compare_pytorch_profiles, analyze_performance_insights
+
+    Args:
+        version: vLLM version (e.g., "v0.13.0")
+        rank: GPU rank to analyze (default: 0)
+        model: Model name (e.g., "deepseek", "gpt-oss")
+
+    Returns:
+        Dictionary with block segmentation, median block, stream analysis,
+        ordered pipeline breakdown, and overhead accounting.
+    """
+    try:
+        model_key, matched_version, error, index = _resolve_model_and_version(model, version)
+        if error:
+            return {"status": "error", "message": error}
+        assert model_key is not None and matched_version is not None
+
+        display_name = _get_display_name(model_key)
+
+        raw_events = _load_raw_events(model_key, matched_version, rank)
+        if not raw_events:
+            return {
+                "status": "error",
+                "message": f"No trace found for {display_name} {matched_version} rank {rank}",
+            }
+
+        # Block segmentation
+        blocks = _detect_blocks(raw_events)
+        median_block = _select_median_block(blocks)
+
+        # Build results
+        block_summary = []
+        for b in blocks:
+            block_summary.append({
+                "block_index": b["block_index"],
+                "wall_time_us": b["wall_time_us"],
+                "gpu_active_us": b["gpu_active_us"],
+                "idle_us": b["idle_us"],
+                "kernel_count": b["kernel_count"],
+            })
+
+        median_detail = None
+        stream_analysis = None
+        ordered_pipeline = None
+        if median_block:
+            median_events = median_block["events"]
+
+            stream_analysis = _analyze_streams(median_events)
+            ordered_pipeline = _build_ordered_pipeline_breakdown(median_events)
+
+            # Compact kernel list for the median block
+            median_kernels = []
+            for k in median_events[:200]:
+                median_kernels.append({
+                    "name": k["name"][:80],
+                    "pipeline": _classify_kernel(k["name"]),
+                    "dur_us": k["dur"],
+                    "stream": k["tid"],
+                })
+
+            median_detail = {
+                "block_index": median_block["block_index"],
+                "wall_time_us": median_block["wall_time_us"],
+                "gpu_active_us": median_block["gpu_active_us"],
+                "idle_us": median_block["idle_us"],
+                "kernel_count": median_block["kernel_count"],
+                "kernels": median_kernels,
+            }
+
+        overhead = _compute_overhead(blocks, raw_events)
+
+        return {
+            "status": "success",
+            "version": matched_version,
+            "model": display_name,
+            "rank": rank,
+            "total_events": len(raw_events),
+            "block_segmentation": {
+                "blocks_detected": len(blocks),
+                "blocks": block_summary,
+            },
+            "median_block": median_detail,
+            "stream_analysis": stream_analysis,
+            "ordered_pipeline_breakdown": ordered_pipeline,
+            "overhead": overhead,
+            "message": (
+                f"Analyzed {display_name} {matched_version} rank {rank}: "
+                f"{len(blocks)} transformer blocks detected, "
+                f"median block has {median_block['kernel_count'] if median_block else 0} kernels"
+            ),
+        }
+
+    except Exception as exc:
+        logger.error(f"Error in trace structure analysis: {exc}")
+        return {"status": "error", "message": f"Failed to analyze trace structure: {exc}"}
+
+
+async def compare_trace_structures(
+    version1: str,
+    version2: str,
+    rank: int = 0,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compare trace structure between two vLLM versions at the transformer block level.
+
+    Runs block segmentation on both versions, selects median blocks, then
+    compares them: ordered pipeline breakdowns, stream utilisation, overhead
+    metrics, and structured root-cause objects.
+
+    TOOL_NAME=compare_trace_structures
+    DISPLAY_NAME=Compare Trace Structures
+    USECASE=Compare the temporal structure of two vLLM versions at the transformer block level. Use this for deep root-cause analysis: it compares median blocks operation-by-operation (preserving execution order), analyses stream overlap changes, computes overhead deltas, and produces structured root-cause objects with per-kernel evidence and suggested source files.
+    INSTRUCTIONS=1. Specify two vLLM versions, 2. Optionally specify model, 3. The tool segments both traces into blocks, picks median blocks, and compares them structurally
+    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; rank (int): GPU rank (default 0)
+    OUTPUT_DESCRIPTION=Dictionary with per-version median block details, ordered pipeline comparison, stream analysis diff, overhead comparison, and structured root causes
+    EXAMPLES=compare_trace_structures("v0.11.2", "v0.13.0"), compare_trace_structures("v0.11.2", "v0.13.0", model="gpt-oss")
+    PREREQUISITES=Profile traces must exist for both versions
+    RELATED_TOOLS=analyze_trace_structure, compare_pytorch_profiles, analyze_performance_insights
+
+    Args:
+        version1: Baseline vLLM version
+        version2: Comparison vLLM version
+        rank: GPU rank (default: 0)
+        model: Model name
+
+    Returns:
+        Dictionary with structural comparison of median blocks including
+        root causes, pipeline breakdowns, stream analysis, and overhead.
+    """
+    try:
+        # Resolve model and both versions
+        index = _discover_profiles()
+        if not index:
+            return {"status": "error", "message": "No profile data available."}
+
+        available_models = sorted(index.keys())
+        matches = _match_all_models(model, available_models)
+        if not matches:
+            return {"status": "error", "message": f"Model '{model}' not found. Available: {available_models}"}
+        if len(matches) > 1:
+            return {"status": "error", "message": f"Multiple models match '{model}': {', '.join(matches)}. Please specify."}
+        model_key = matches[0]
+        display_name = _get_display_name(model_key)
+
+        available_versions = sorted(index[model_key].keys())
+        mv1 = _match_version(version1, available_versions)
+        mv2 = _match_version(version2, available_versions)
+        if mv1 is None:
+            return {"status": "error", "message": f"Version '{version1}' not found. Available: {available_versions}"}
+        if mv2 is None:
+            return {"status": "error", "message": f"Version '{version2}' not found. Available: {available_versions}"}
+
+        # Load raw events for both versions
+        raw1 = _load_raw_events(model_key, mv1, rank)
+        raw2 = _load_raw_events(model_key, mv2, rank)
+        if not raw1:
+            return {"status": "error", "message": f"No trace found for {display_name} {mv1} rank {rank}"}
+        if not raw2:
+            return {"status": "error", "message": f"No trace found for {display_name} {mv2} rank {rank}"}
+
+        # Block segmentation + median selection
+        blocks1 = _detect_blocks(raw1)
+        blocks2 = _detect_blocks(raw2)
+        median1 = _select_median_block(blocks1)
+        median2 = _select_median_block(blocks2)
+
+        # Analyse each median block
+        def _analyze_median(median_block: Optional[Dict]) -> Dict[str, Any]:
+            if not median_block:
+                return {"available": False}
+            evts = median_block["events"]
+            return {
+                "available": True,
+                "wall_time_us": median_block["wall_time_us"],
+                "gpu_active_us": median_block["gpu_active_us"],
+                "idle_us": median_block["idle_us"],
+                "kernel_count": median_block["kernel_count"],
+                "stream_analysis": _analyze_streams(evts),
+                "ordered_pipeline": _build_ordered_pipeline_breakdown(evts),
+            }
+
+        detail1 = _analyze_median(median1)
+        detail2 = _analyze_median(median2)
+
+        # Overhead comparison
+        overhead1 = _compute_overhead(blocks1, raw1)
+        overhead2 = _compute_overhead(blocks2, raw2)
+
+        overhead_comparison = {}
+        for key in ("avg_inter_block_gap_us", "median_inter_block_gap_us", "avg_intra_block_idle_us", "overhead_pct"):
+            v1_val = overhead1.get(key, 0)
+            v2_val = overhead2.get(key, 0)
+            delta = v2_val - v1_val
+            pct = ((delta / v1_val) * 100) if v1_val else 0
+            overhead_comparison[key] = {
+                "v1": v1_val,
+                "v2": v2_val,
+                "delta": round(delta, 1),
+                "change_pct": round(pct, 1),
+            }
+
+        # Build structured root causes from median block pipelines
+        root_causes = []
+        if detail1.get("available") and detail2.get("available"):
+            root_causes = _build_structured_root_causes(
+                detail1["ordered_pipeline"],
+                detail2["ordered_pipeline"],
+                {}, {},  # stats dicts not needed for pipeline-level root causes
+            )
+
+        # Median block wall time comparison
+        wt1 = detail1.get("wall_time_us", 0)
+        wt2 = detail2.get("wall_time_us", 0)
+        wt_delta = wt2 - wt1
+        wt_pct = ((wt_delta / wt1) * 100) if wt1 else 0
+
+        return {
+            "status": "success",
+            "model": display_name,
+            "comparison": {"version1": mv1, "version2": mv2, "rank": rank},
+            "block_counts": {
+                "v1": len(blocks1),
+                "v2": len(blocks2),
+            },
+            "median_block_comparison": {
+                "wall_time": {
+                    "v1_us": wt1,
+                    "v2_us": wt2,
+                    "delta_us": round(wt_delta),
+                    "change_pct": round(wt_pct, 1),
+                    "direction": "slower" if wt_delta > 0 else "faster",
+                },
+                "v1": detail1,
+                "v2": detail2,
+            },
+            "overhead_comparison": overhead_comparison,
+            "overhead_v1": overhead1,
+            "overhead_v2": overhead2,
+            "root_causes": root_causes,
+            "message": (
+                f"{display_name}: Median block {mv2} is "
+                f"{abs(wt_pct):.1f}% {'slower' if wt_delta > 0 else 'faster'} "
+                f"than {mv1} ({_format_duration(abs(wt_delta))} delta). "
+                f"Found {len(root_causes)} root cause(s)."
+            ),
+        }
+
+    except Exception as exc:
+        logger.error(f"Error comparing trace structures: {exc}")
+        return {"status": "error", "message": f"Failed to compare trace structures: {exc}"}
