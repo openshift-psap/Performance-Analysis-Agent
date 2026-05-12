@@ -2,7 +2,7 @@
 .env
 langfuse-keys.txt
 consolidated_dashboard.csv
-
+sa-key.json
 # macOS
 .DS_Store
 
@@ -10,3 +10,4 @@ consolidated_dashboard.csv
 performance-dashboard/
 openshift-manifests-haumesh/
 docs/
+ai_auto_perf_analysis/

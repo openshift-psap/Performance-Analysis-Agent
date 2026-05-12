@@ -211,10 +211,10 @@ spec:
               key: REDIS_AUTH
         resources:
           requests:
-            memory: "128Mi"
+            memory: "512Mi"
             cpu: "100m"
           limits:
-            memory: "512Mi"
+            memory: "2Gi"
             cpu: "500m"
         livenessProbe:
           tcpSocket:
@@ -336,6 +336,9 @@ metadata:
   namespace: psap-ai-agent
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: langfuse-worker
@@ -475,6 +478,9 @@ metadata:
   namespace: psap-ai-agent
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: langfuse-web
@@ -616,7 +622,7 @@ spec:
             memory: "512Mi"
             cpu: "250m"
           limits:
-            memory: "2Gi"
+            memory: "4Gi"
             cpu: "1000m"
         livenessProbe:
           httpGet:

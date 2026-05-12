@@ -55,6 +55,8 @@ from psap_mcp_server.src.tools.pytorch_profile_tool import (
     list_available_profiles,
     check_profile_status,
     analyze_performance_insights,
+    analyze_trace_structure,
+    compare_trace_structures,
 )
 from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     map_kernel_to_vllm_code,
@@ -127,13 +129,15 @@ class PSAPMCPServer:
         - analyze_pytorch_profile: Analyze PyTorch profiler traces for kernel-level performance
         - compare_pytorch_profiles: Compare profiler traces between vLLM versions
         - list_available_profiles: List available PyTorch profile traces
+        - analyze_trace_structure: Block-level structural analysis with median block, streams, overhead
+        - compare_trace_structures: Compare trace structures between versions with root-cause detection
         - map_kernel_to_vllm_code: Map kernel names to vLLM source code locations
         - get_kernel_categories: Get information about kernel categories
         - correlate_kernel_with_changes: Correlate kernel performance with code changes
-        - fetch_vllm_source: Fetch actual vLLM source code from GitHub at a specific version
+        - fetch_vllm_source: Fetch source code from any public GitHub repo (defaults to vLLM) at a specific version
         - get_vllm_code_diff: Fetch code diff between two vLLM versions for specific files
         - fetch_vllm_logs: Fetch and parse vLLM server logs for a specific version
-        - compare_vllm_logs: Compare vLLM server logs between two versions
+        - compare_vllm_logs: Compare vLLM server logs between two versions (auto-enriches with ALL pinned dependency versions from requirements/cuda.txt)
         - get_vllm_performance_triage_guide: Retrieve vLLM performance triage guidance (5-step diagnostic workflow)
         """
         # Register performance analysis tools
@@ -160,6 +164,9 @@ class PSAPMCPServer:
         self.mcp.tool()(list_available_profiles)
         self.mcp.tool()(check_profile_status)
         self.mcp.tool()(analyze_performance_insights)
+        # Register trace structure analysis tools (block segmentation, median block, streams, overhead)
+        self.mcp.tool()(analyze_trace_structure)
+        self.mcp.tool()(compare_trace_structures)
         # Register kernel-to-code mapping tools
         self.mcp.tool()(map_kernel_to_vllm_code)
         self.mcp.tool()(get_kernel_categories)
