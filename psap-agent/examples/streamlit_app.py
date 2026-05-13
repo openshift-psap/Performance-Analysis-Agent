@@ -12,6 +12,7 @@ Make sure the RHAIIS Performance Analysis Agent server is running on http://loca
 import base64
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List
@@ -53,6 +54,269 @@ def initialize_session_state():
 
     if "pending_negative_feedback" not in st.session_state:
         st.session_state.pending_negative_feedback = None
+
+    if "last_message_time" not in st.session_state:
+        st.session_state.last_message_time = None
+
+    if "inactivity_dismissed" not in st.session_state:
+        st.session_state.inactivity_dismissed = False
+
+    if "dark_mode" not in st.session_state:
+        st.session_state.dark_mode = False
+
+
+def apply_custom_css():
+    """Inject custom CSS for button styling and optional dark mode."""
+    dark = st.session_state.get("dark_mode", False)
+
+    # Button styling (applies in both themes)
+    button_css = """
+    /* Style primary buttons (New Conversation) */
+    button[kind="primary"] {
+        border-radius: 1.5rem;
+        font-weight: 600;
+        padding: 0.4rem 1.2rem;
+        transition: all 0.2s ease;
+    }
+    button[kind="primary"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(204, 0, 0, 0.3);
+    }
+    /* Animated turn hint */
+    @keyframes turnHintPulse {
+        0%, 100% { opacity: 0.6; }
+        50% { opacity: 1; }
+    }
+    @keyframes turnHintSlide {
+        0% { transform: translateX(0); }
+        50% { transform: translateX(4px); }
+        100% { transform: translateX(0); }
+    }
+    .turn-hint {
+        animation: turnHintPulse 2.5s ease-in-out infinite;
+        font-size: 0.85rem;
+        color: #cc0000;
+        font-weight: 500;
+        text-align: right;
+        padding-top: 0.5rem;
+    }
+    .turn-hint .arrow {
+        display: inline-block;
+        animation: turnHintSlide 1.5s ease-in-out infinite;
+    }
+    """
+
+    # Force-override system/browser dark mode when light is selected
+    if dark:
+        theme_css = """
+        .stApp {
+            background-color: #0e1117 !important;
+            color: #fafafa !important;
+        }
+        [data-testid="stSidebar"] {
+            background-color: #262730 !important;
+        }
+        [data-testid="stHeader"] {
+            background-color: #0e1117 !important;
+        }
+        .stChatMessage {
+            background-color: #1a1c23 !important;
+        }
+        .stTextInput > div > div > input,
+        .stSelectbox > div > div {
+            background-color: #262730 !important;
+            color: #fafafa !important;
+        }
+        [data-testid="stChatInput"] textarea {
+            background-color: #262730 !important;
+            color: #fafafa !important;
+        }
+        .stMarkdown, .stText, .stCaption, p, span, label, h1, h2, h3, h4 {
+            color: #fafafa !important;
+        }
+        [data-testid="stExpander"] {
+            background-color: #1a1c23 !important;
+            border-color: #3a3c47 !important;
+        }
+        button[kind="secondary"] {
+            color: #fafafa !important;
+            border-color: #3a3c47 !important;
+        }
+        """
+    else:
+        # Explicit light mode — overrides browser/system dark mode preference
+        theme_css = """
+        /* Root overrides to defeat prefers-color-scheme: dark */
+        :root {
+            color-scheme: light !important;
+        }
+
+        .stApp, [data-testid="stAppViewContainer"],
+        [data-testid="stAppViewBlockContainer"] {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+        }
+        [data-testid="stSidebar"],
+        [data-testid="stSidebar"] > div,
+        [data-testid="stSidebarContent"] {
+            background-color: #f0f2f6 !important;
+            color: #31333F !important;
+        }
+        [data-testid="stHeader"] {
+            background-color: #ffffff !important;
+        }
+        [data-testid="stBottom"],
+        [data-testid="stBottom"] > div {
+            background-color: #ffffff !important;
+        }
+
+        /* Text everywhere */
+        .stMarkdown, .stText, .stCaption,
+        p, span, label, li,
+        h1, h2, h3, h4, h5, h6,
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {
+            color: #31333F !important;
+        }
+
+        /* Text inputs */
+        .stTextInput > div > div > input,
+        .stTextInput input {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+            border-color: #d6d8de !important;
+            caret-color: #31333F !important;
+        }
+        .stSelectbox > div > div,
+        .stSelectbox [data-baseweb="select"],
+        .stSelectbox [data-baseweb="select"] > div {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+        }
+        /* Dropdown popover / menu list */
+        [data-baseweb="popover"],
+        [data-baseweb="popover"] > div,
+        [data-baseweb="menu"],
+        [data-baseweb="menu"] ul,
+        [data-baseweb="menu"] li,
+        [role="listbox"],
+        [role="listbox"] li,
+        [role="option"] {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+        }
+        [data-baseweb="menu"] li:hover,
+        [role="option"]:hover,
+        [role="option"][aria-selected="true"] {
+            background-color: #f0f2f6 !important;
+        }
+
+        /* Chat input bar */
+        [data-testid="stChatInput"],
+        [data-testid="stChatInput"] > div {
+            background-color: #ffffff !important;
+            border-color: #d6d8de !important;
+        }
+        [data-testid="stChatInput"] textarea {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+            border-color: #d6d8de !important;
+            caret-color: #31333F !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder {
+            color: #9ca3af !important;
+        }
+        /* Chat input send button */
+        [data-testid="stChatInput"] button,
+        [data-testid="stChatInputSubmitButton"],
+        [data-testid="stChatInput"] button[kind="secondary"],
+        [data-testid="stChatInput"] button svg {
+            color: #cc0000 !important;
+            fill: #cc0000 !important;
+            background-color: transparent !important;
+            opacity: 1 !important;
+        }
+
+        /* Buttons — secondary (all normal buttons) */
+        button[kind="secondary"],
+        [data-testid="stSidebar"] button[kind="secondary"] {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+            border-color: #d6d8de !important;
+        }
+        button[kind="secondary"]:hover {
+            background-color: #f0f2f6 !important;
+            border-color: #b0b3ba !important;
+        }
+
+        /* Chat messages */
+        .stChatMessage,
+        [data-testid="stChatMessage"] {
+            background-color: #f9f9fb !important;
+        }
+
+        /* Expanders */
+        [data-testid="stExpander"],
+        [data-testid="stExpander"] details,
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] div,
+        [data-testid="stExpander"] pre,
+        [data-testid="stExpander"] code {
+            background-color: #f9f9fb !important;
+            border-color: #e0e2e8 !important;
+            color: #31333F !important;
+        }
+        /* JSON viewer inside expanders */
+        [data-testid="stJson"],
+        [data-testid="stJson"] > div {
+            background-color: #f9f9fb !important;
+        }
+
+        /* Containers, alerts, info boxes */
+        .stAlert, [data-testid="stAlert"] {
+            background-color: #f0f7ff !important;
+            color: #31333F !important;
+        }
+
+        /* Scrollable containers (example queries) */
+        [data-testid="stVerticalBlockBorderWrapper"],
+        [data-testid="stVerticalBlockBorderWrapper"] > div {
+            border-color: #e0e2e8 !important;
+        }
+
+        /* Checkbox */
+        .stCheckbox label span {
+            color: #31333F !important;
+        }
+
+        /* Code blocks and syntax highlighting */
+        pre, code,
+        .stMarkdown pre, .stMarkdown code,
+        [data-testid="stChatMessage"] pre,
+        [data-testid="stChatMessage"] code,
+        .stCodeBlock, [data-testid="stCodeBlock"],
+        .stCodeBlock > div, [data-testid="stCodeBlock"] > div,
+        [data-testid="stCode"], [data-testid="stCode"] > div {
+            background-color: #f5f5f5 !important;
+            color: #31333F !important;
+            border-color: #e0e2e8 !important;
+        }
+        /* Copy button inside code blocks */
+        .stCodeBlock button, [data-testid="stCodeBlock"] button {
+            color: #31333F !important;
+        }
+
+        /* Dividers */
+        hr {
+            border-color: #e0e2e8 !important;
+        }
+        """
+
+    st.markdown(f"<style>{button_css}{theme_css}</style>", unsafe_allow_html=True)
 
 
 def show_login_screen():
@@ -276,18 +540,36 @@ def main():
     app_title = os.getenv("APP_TITLE", "RHAIIS Performance Analysis Agent")
     st.set_page_config(page_title=app_title, page_icon="📊", layout="wide")
 
-    # Display title with Red Hat logo
+    # Initialize session state (before any UI so dark_mode is available)
+    initialize_session_state()
+
+    # Display title with theme toggle in top-right corner
     logo_base64 = get_logo_base64()
-    if logo_base64:
-        logo_html = f'<img src="data:image/png;base64,{logo_base64}" style="height: 40px; vertical-align: middle; margin-right: 10px;">'
-        st.markdown(f'{logo_html}<span style="font-size: 2.0rem; font-weight: 600;">{app_title}</span>', unsafe_allow_html=True)
-    else:
-        st.title(f"📊 {app_title}")
-    
+    title_col, toggle_col = st.columns([8, 1])
+    with title_col:
+        if logo_base64:
+            logo_html = f'<img src="data:image/png;base64,{logo_base64}" style="height: 40px; vertical-align: middle; margin-right: 10px;">'
+            st.markdown(f'{logo_html}<span style="font-size: 2.0rem; font-weight: 600;">{app_title}</span>', unsafe_allow_html=True)
+        else:
+            st.title(f"📊 {app_title}")
+    with toggle_col:
+        theme_label = "☀️ Light" if st.session_state.dark_mode else "🌙 Dark"
+        if st.session_state.dark_mode:
+            btn_style = "background-color: #ffffff; color: #31333F; border: 1px solid #d6d8de;"
+        else:
+            btn_style = "background-color: #1a1c23; color: #ffffff; border: 1px solid #1a1c23;"
+        st.markdown(
+            f'<style>div[data-testid="column"]:last-child .stButton button '
+            f'{{ {btn_style} border-radius: 0.5rem !important; font-weight: 600 !important; }}</style>',
+            unsafe_allow_html=True,
+        )
+        if st.button(theme_label, key="theme_toggle", use_container_width=True):
+            st.session_state.dark_mode = not st.session_state.dark_mode
+            st.rerun()
+
     st.markdown("**AI-powered performance analysis for RHAIIS benchmarking data** • Compare models, versions, and accelerators with intelligent insights")
 
-    # Initialize session state
-    initialize_session_state()
+    apply_custom_css()
 
     # Try to load stored email from localStorage on first load
     if not st.session_state.user_email and "email_check_done" not in st.session_state:
@@ -325,10 +607,8 @@ def main():
         
         # Logout button
         if st.button("🚪 Sign Out", use_container_width=True):
-            # Clear session state and query params to log out
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
-            # Clear email from query params
             st.query_params.clear()
             st.rerun()
         
@@ -418,9 +698,11 @@ def main():
         st.text(f"Session ID: {st.session_state.session_id[:8]}...")
         st.text(f"User ID: {st.session_state.user_email}")
 
-        if st.button("New Conversation"):
+        if st.button("🔄 New Conversation", use_container_width=True, key="new_conv_sidebar", type="primary"):
             st.session_state.messages = []
             st.session_state.thread_id = str(uuid.uuid4())
+            st.session_state.last_message_time = None
+            st.session_state.inactivity_dismissed = False
             st.rerun()
 
         st.divider()
@@ -461,8 +743,8 @@ def main():
 
     # Main chat interface
     st.subheader("Chat")
-    
-    # Add helpful info banner at the top of chat
+
+    # Add helpful info banner for empty chat
     if len(st.session_state.messages) == 0:
         st.info("""
         **🎯 What can I help you with?**
@@ -556,9 +838,52 @@ def main():
                             }
                             st.rerun()
 
+                st.caption("Your responses are used to improve our Performance Agent.")
+
+    # Turn count and new conversation button above the input
+    turn_count = len([m for m in st.session_state.messages if m["role"] == "user"])
+    if turn_count > 0:
+        tc_col1, tc_col2, tc_col3 = st.columns([3, 5, 3])
+        with tc_col2:
+            st.markdown(
+                f'<div class="turn-hint">Turn {turn_count} · Switching topics? Start a new conversation <span class="arrow">→</span></div>',
+                unsafe_allow_html=True,
+            )
+        with tc_col3:
+            if st.button("🔄 New Conversation", key="new_conv_main", use_container_width=True, type="primary"):
+                st.session_state.messages = []
+                st.session_state.thread_id = str(uuid.uuid4())
+                st.session_state.last_message_time = None
+                st.session_state.inactivity_dismissed = False
+                st.rerun()
+
+    # Inactivity prompt - show if returning after 10+ minutes of silence
+    if (turn_count > 0
+            and st.session_state.last_message_time is not None
+            and not st.session_state.inactivity_dismissed):
+        elapsed = time.time() - st.session_state.last_message_time
+        if elapsed > 600:
+            minutes = int(elapsed // 60)
+            with st.container(border=True):
+                st.markdown(
+                    f"**Welcome back!** It's been **{minutes} minutes** since your last message. "
+                    "Continue this conversation or start a new one?"
+                )
+                c1, c2, _ = st.columns([1, 1, 4])
+                with c1:
+                    if st.button("Continue", key="continue_conv", use_container_width=True):
+                        st.session_state.inactivity_dismissed = True
+                        st.rerun()
+                with c2:
+                    if st.button("Start Fresh", key="start_fresh", use_container_width=True, type="primary"):
+                        st.session_state.messages = []
+                        st.session_state.thread_id = str(uuid.uuid4())
+                        st.session_state.last_message_time = None
+                        st.session_state.inactivity_dismissed = False
+                        st.rerun()
+
     # Always show chat input
     prompt = st.chat_input("Ask about RHAIIS performance, models, or configurations...")
-    st.caption("Your responses are used to improve our Performance Agent.")
 
     # Check if an example query was clicked (takes priority over chat input)
     example_query = st.session_state.get("example_query")
@@ -570,6 +895,8 @@ def main():
     if prompt:
         # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.last_message_time = time.time()
+        st.session_state.inactivity_dismissed = False
 
         # Display user message
         with st.chat_message("user"):

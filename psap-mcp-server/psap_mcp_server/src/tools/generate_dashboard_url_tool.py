@@ -36,7 +36,7 @@ VALID_PP_Y_VALUES = [
     "Error Rate (% Failed requests)",
 ]
 
-VALID_SECTIONS = ["cost_analysis", "performance_plots", "compare_versions"]
+VALID_SECTIONS = ["cost_analysis", "performance_plots", "compare_versions", "runtime_configs", "view_logs"]
 
 
 VALID_FULL_PROFILES = set(PROFILE_MAPPING.values())
@@ -95,10 +95,12 @@ async def generate_dashboard_url(
     This tool creates direct links to the dashboard with pre-applied filters,
     allowing users to visualize the exact data being analyzed.
     
-    Supports three dashboard sections via the 'section' parameter:
+    Supports four dashboard sections via the 'section' parameter:
     - "cost_analysis": Cost per million tokens view
     - "performance_plots": Charts of metrics vs concurrency (use pp_* params)
     - "compare_versions": Structured delta-table between two versions (use cv_* params)
+    - "runtime_configs": vLLM runtime configurations and deployment parameters
+    - "view_logs": vLLM server logs for a benchmark run
     
     Args:
         view: Dashboard view ("RHAIIS Dashboard", "MLPerf Dashboard", or "LLM-D Dashboard")
@@ -107,7 +109,7 @@ async def generate_dashboard_url(
         versions: List of versions (e.g., ["RHAIIS-3.2.3", "RHAIIS-3.2.2"])
         profile: Sidebar profile filter in shorthand (e.g., "1k/1k") or full format
         tp_sizes: List of tensor parallelism sizes (e.g., [8])
-        section: Dashboard section ("cost_analysis", "performance_plots", or "compare_versions")
+        section: Dashboard section ("cost_analysis", "performance_plots", "compare_versions", "runtime_configs", or "view_logs")
         pp_x: Performance plots X-axis. Only valid value: "Concurrency"
         pp_y: Performance plots Y-axis metric (e.g., "Throughput (Output tokens/second generated)").
             Valid values: "Throughput (Output tokens/second generated)", "Efficiency (Output tokens/sec per TP unit)",
@@ -160,8 +162,40 @@ async def generate_dashboard_url(
         ...     section="cost_analysis",
         ... )
     """
-    if base_url is None:
-        base_url = os.environ.get("DASHBOARD_BASE_URL", "https://aidash.app.intlab.redhat.com")
+    # Always use the configured base URL — ignore any base_url the caller passes,
+    base_url = os.environ.get("DASHBOARD_BASE_URL", "https://aidash.app.intlab.redhat.com")
+
+    def _clean_list(val):
+        """Sanitize list params — LLMs sometimes pass stringified arrays like '["H200"]'."""
+        if val is None:
+            return None
+        if isinstance(val, str):
+            val = val.strip()
+            if val.startswith("["):
+                import ast
+                try:
+                    val = ast.literal_eval(val)
+                except (ValueError, SyntaxError):
+                    val = val.strip("[]").replace('"', '').replace("'", "")
+                    val = [v.strip() for v in val.split(",") if v.strip()]
+            else:
+                val = [v.strip() for v in val.split(",") if v.strip()]
+        cleaned = []
+        for item in val:
+            s = str(item).strip().strip('"').strip("'").strip("[").strip("]")
+            if s:
+                cleaned.append(s)
+        return cleaned if cleaned else None
+
+    accelerators = _clean_list(accelerators)
+    models = _clean_list(models)
+    versions = _clean_list(versions)
+    if tp_sizes is not None:
+        tp_cleaned = _clean_list(tp_sizes)
+        tp_sizes = [int(x) for x in tp_cleaned] if tp_cleaned else None
+    if cv_conc is not None:
+        cv_cleaned = _clean_list(cv_conc)
+        cv_conc = [int(x) for x in cv_cleaned] if cv_cleaned else None
 
     valid_views = ["RHAIIS Dashboard", "MLPerf Dashboard", "LLM-D Dashboard"]
     if view not in valid_views:
