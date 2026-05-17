@@ -95,8 +95,8 @@ prompt_for_credentials() {
     # Google API Key
     if [ -z "$GOOGLE_API_KEY" ]; then
         # Try to load from psap-agent/.env
-        if [ -f psap-agent/.env ] && grep -q "GOOGLE_API_KEY" psap-agent/.env; then
-            GOOGLE_API_KEY=$(grep "GOOGLE_API_KEY" psap-agent/.env | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        if [ -f psap-agent/.env ] && grep -q "^GOOGLE_API_KEY=" psap-agent/.env; then
+            GOOGLE_API_KEY=$(grep "^GOOGLE_API_KEY=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
             log_success "Google API Key loaded from psap-agent/.env"
         else
             log_warning "Google API Key not found"
@@ -116,8 +116,8 @@ prompt_for_credentials() {
 
     # Gemini Model
     if [ -z "$GEMINI_MODEL" ]; then
-        if [ -f psap-agent/.env ] && grep -q "GEMINI_MODEL" psap-agent/.env; then
-            GEMINI_MODEL=$(grep "GEMINI_MODEL" psap-agent/.env | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        if [ -f psap-agent/.env ] && grep -q "^GEMINI_MODEL=" psap-agent/.env; then
+            GEMINI_MODEL=$(grep "^GEMINI_MODEL=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
             log_success "Gemini model loaded from psap-agent/.env: $GEMINI_MODEL"
         fi
     else
@@ -497,7 +497,9 @@ start_langfuse() {
       -e LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE=true \
       -e LANGFUSE_S3_MEDIA_UPLOAD_PREFIX=media/ \
       -e LANGFUSE_S3_BATCH_EXPORT_ENABLED=false \
-      -e LANGFUSE_USE_AZURE_BLOB=false"
+      -e LANGFUSE_USE_AZURE_BLOB=false \
+      -e NODE_OPTIONS=--max-old-space-size=3072 \
+      -e LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES=15000000"
     
     # 4. Start Langfuse Worker
     log_info "Starting Langfuse Worker..."
@@ -505,7 +507,7 @@ start_langfuse() {
       --name langfuse-worker \
       --network $NETWORK_NAME \
       $LANGFUSE_COMMON_ENV \
-      docker.io/langfuse/langfuse-worker:3
+      docker.io/langfuse/langfuse-worker:3.172.0
     
     # 5. Start Langfuse Web
     log_info "Starting Langfuse Web..."
@@ -516,7 +518,7 @@ start_langfuse() {
       -e NEXTAUTH_SECRET=$NEXTAUTH_SECRET \
       -e HOSTNAME=0.0.0.0 \
       -p 3000:3000 \
-      docker.io/langfuse/langfuse:3
+      docker.io/langfuse/langfuse:3.172.0
     
     log_info "Waiting for Langfuse v3 to initialize (migrations take ~30-60 seconds)..."
     sleep 40
@@ -615,21 +617,24 @@ start_agent() {
     log_info "Starting PSAP Agent..."
     echo ""
     
-    # Always prompt for Langfuse keys before starting the agent
+    # Langfuse keys: use env vars if set, otherwise prompt interactively.
+    # To skip prompts: export LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-...
     log_info "🔍 Langfuse Configuration"
-    
-    # Check if Langfuse is running
-    if curl -s -f http://localhost:3000/api/public/health &> /dev/null; then
+
+    if [ -n "$LANGFUSE_PUBLIC_KEY" ] && [ -n "$LANGFUSE_SECRET_KEY" ]; then
+        log_success "Langfuse API keys detected from environment — skipping prompt"
+    elif curl -s -f http://localhost:3000/api/public/health &> /dev/null; then
         log_success "Langfuse is running at http://localhost:3000"
         echo ""
         log_info "Please enter your Langfuse API keys:"
         echo "  (If you don't have keys yet, open http://localhost:3000 → Settings → API Keys)"
         echo "  (Press Enter to skip - agent will start without Langfuse)"
+        echo "  TIP: export LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY to skip this prompt"
         echo ""
-        
+
         read -p "LANGFUSE_PUBLIC_KEY (pk-lf-...): " LANGFUSE_PUBLIC_KEY
         read -p "LANGFUSE_SECRET_KEY (sk-lf-...): " LANGFUSE_SECRET_KEY
-        
+
         if [ -n "$LANGFUSE_PUBLIC_KEY" ] && [ -n "$LANGFUSE_SECRET_KEY" ]; then
             export LANGFUSE_PUBLIC_KEY
             export LANGFUSE_SECRET_KEY
@@ -647,37 +652,54 @@ start_agent() {
     fi
     echo ""
     
+    # Build podman run command as an array (avoids eval pitfalls)
+    local cmd=(podman run -d
+      --name psap-agent
+      --network "$NETWORK_NAME"
+      -e "AGENT_PORT=5002"
+      -e "POSTGRES_HOST=psap-postgres"
+      -e "POSTGRES_PORT=5432"
+      -e "POSTGRES_DB=psap"
+      -e "POSTGRES_USER=psap_user"
+      -e "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
+      -e "GOOGLE_API_KEY=$GOOGLE_API_KEY"
+      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-flash-preview}"
+      -e "ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}"
+      -e "CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}"
+      -e "MCP_SERVER_URL=http://psap-mcp-server:5001/mcp/"
+      -e "ENABLE_PROMPT_CACHING=true"
+      -e "CACHE_TTL_HOURS=4"
+      -e "LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}"
+      -e "LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}"
+      -e "LANGFUSE_HOST=http://langfuse-web:3000"
+      -e "LANGFUSE_TRACING_ENVIRONMENT=production"
+      -e "ENABLE_LLM_JUDGE=${ENABLE_LLM_JUDGE:-true}"
+      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
+      -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
+      -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
+      -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
+      -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
+      -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"
+    )
+
+    if [ -n "${MEM0_API_KEY:-}" ]; then
+        cmd+=(-e "MEM0_API_KEY=$MEM0_API_KEY")
+    fi
+
+    # Persist Mem0 Qdrant data across restarts
+    mkdir -p "$HOME/.psap-agent/qdrant"
+    cmd+=(-v "$HOME/.psap-agent/qdrant:/app/qdrant_data:Z")
+
     # Mount GCP credentials for Vertex AI (Claude models)
-    GCP_ADC_MOUNT=""
     GCP_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
     if [ -f "$GCP_ADC_FILE" ]; then
-        GCP_ADC_MOUNT="-v $GCP_ADC_FILE:/tmp/gcloud_adc.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json"
+        cmd+=(-v "$GCP_ADC_FILE:/tmp/gcloud_adc.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json")
         log_info "GCP credentials found — Claude models available via Vertex AI"
     fi
 
-    eval podman run -d \
-      --name psap-agent \
-      --network $NETWORK_NAME \
-      -e AGENT_PORT=5002 \
-      -e POSTGRES_HOST=psap-postgres \
-      -e POSTGRES_PORT=5432 \
-      -e POSTGRES_DB=psap \
-      -e POSTGRES_USER=psap_user \
-      -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
-      -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
-      -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
-      -e ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-}" \
-      -e CLOUD_ML_REGION="${CLOUD_ML_REGION:-us-east5}" \
-      -e MCP_SERVER_URL="http://psap-mcp-server:5001/mcp/" \
-      -e ENABLE_PROMPT_CACHING=true \
-      -e CACHE_TTL_HOURS=4 \
-      -e LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" \
-      -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
-      -e LANGFUSE_HOST="http://langfuse-web:3000" \
-      -e LANGFUSE_TRACING_ENVIRONMENT="production" \
-      $GCP_ADC_MOUNT \
-      -p 5002:5002 \
-      psap-agent:local
+    cmd+=(-p 5002:5002 psap-agent:local)
+
+    "${cmd[@]}"
     
     log_info "Waiting for Agent to be ready..."
     sleep 10
@@ -765,36 +787,51 @@ start_mcp_server_staging() {
 start_agent_staging() {
     log_info "Starting PSAP Agent (Staging)..."
 
-    # Mount GCP credentials for Vertex AI (Claude models)
-    GCP_ADC_MOUNT=""
-    GCP_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
-    if [ -f "$GCP_ADC_FILE" ]; then
-        GCP_ADC_MOUNT="-v $GCP_ADC_FILE:/tmp/gcloud_adc.json:ro -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json"
+    local cmd=(podman run -d
+      --name psap-agent-staging
+      --network "$NETWORK_NAME"
+      -e "AGENT_PORT=5002"
+      -e "POSTGRES_HOST=psap-postgres"
+      -e "POSTGRES_PORT=5432"
+      -e "POSTGRES_DB=psap"
+      -e "POSTGRES_USER=psap_user"
+      -e "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
+      -e "GOOGLE_API_KEY=$GOOGLE_API_KEY"
+      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-flash-preview}"
+      -e "ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}"
+      -e "CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}"
+      -e "MCP_SERVER_URL=http://psap-mcp-server-staging:5001/mcp/"
+      -e "ENABLE_PROMPT_CACHING=true"
+      -e "CACHE_TTL_HOURS=4"
+      -e "LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}"
+      -e "LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}"
+      -e "LANGFUSE_HOST=http://langfuse-web:3000"
+      -e "LANGFUSE_TRACING_ENVIRONMENT=staging"
+      -e "ENABLE_LLM_JUDGE=${ENABLE_LLM_JUDGE:-true}"
+      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
+      -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
+      -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
+      -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
+      -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
+      -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"
+    )
+
+    if [ -n "${MEM0_API_KEY:-}" ]; then
+        cmd+=(-e "MEM0_API_KEY=$MEM0_API_KEY")
     fi
 
-    eval podman run -d \
-      --name psap-agent-staging \
-      --network $NETWORK_NAME \
-      -e AGENT_PORT=5002 \
-      -e POSTGRES_HOST=psap-postgres \
-      -e POSTGRES_PORT=5432 \
-      -e POSTGRES_DB=psap \
-      -e POSTGRES_USER=psap_user \
-      -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
-      -e GOOGLE_API_KEY="$GOOGLE_API_KEY" \
-      -e GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-flash-preview}" \
-      -e ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-}" \
-      -e CLOUD_ML_REGION="${CLOUD_ML_REGION:-us-east5}" \
-      -e MCP_SERVER_URL="http://psap-mcp-server-staging:5001/mcp/" \
-      -e ENABLE_PROMPT_CACHING=true \
-      -e CACHE_TTL_HOURS=4 \
-      -e LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" \
-      -e LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" \
-      -e LANGFUSE_HOST="http://langfuse-web:3000" \
-      -e LANGFUSE_TRACING_ENVIRONMENT="staging" \
-      $GCP_ADC_MOUNT \
-      -p 5004:5002 \
-      psap-agent:local
+    # Persist Mem0 Qdrant data across restarts
+    mkdir -p "$HOME/.psap-agent/qdrant-staging"
+    cmd+=(-v "$HOME/.psap-agent/qdrant-staging:/app/qdrant_data:Z")
+
+    GCP_ADC_FILE="$HOME/.config/gcloud/application_default_credentials.json"
+    if [ -f "$GCP_ADC_FILE" ]; then
+        cmd+=(-v "$GCP_ADC_FILE:/tmp/gcloud_adc.json:ro" -e "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud_adc.json")
+    fi
+
+    cmd+=(-p 5004:5002 psap-agent:local)
+
+    "${cmd[@]}"
 
     log_info "Waiting for Agent (Staging) to be ready..."
     sleep 10
@@ -958,6 +995,7 @@ Commands:
                          Optionally restart a single component.
   rebuild [component]    Rebuild app images only — does not touch PostgreSQL
                          or Langfuse (all or a single component).
+  clear-memory [env]     Clear the Mem0 Qdrant vector database (all, prod, staging)
   cleanup                Stop and remove all containers and the Podman network
   logs                   Tail live logs from all app containers (Ctrl+C to exit)
   help                   Show this help message
@@ -976,6 +1014,8 @@ Examples:
   ./test-local-containers.sh restart agent              # Restart Agent (main + staging)
   ./test-local-containers.sh restart agent-staging      # Restart Staging Agent only
   ./test-local-containers.sh rebuild ui && ./test-local-containers.sh restart ui
+  ./test-local-containers.sh clear-memory                 # Clear all Qdrant data
+  ./test-local-containers.sh clear-memory staging         # Clear staging only
 
 Credentials:
   Google API Key     – loaded from GOOGLE_API_KEY env var or psap-agent/.env
@@ -1055,6 +1095,34 @@ case "${1:-}" in
             start_streamlit_staging
         fi
         show_status
+        ;;
+    clear-memory)
+        target="${2:-all}"
+        case "$target" in
+            prod)
+                log_info "Clearing production Qdrant data..."
+                rm -rf "$HOME/.psap-agent/qdrant/"
+                mkdir -p "$HOME/.psap-agent/qdrant"
+                log_success "Production Qdrant data cleared. Restart the agent to take effect."
+                ;;
+            staging)
+                log_info "Clearing staging Qdrant data..."
+                rm -rf "$HOME/.psap-agent/qdrant-staging/"
+                mkdir -p "$HOME/.psap-agent/qdrant-staging"
+                log_success "Staging Qdrant data cleared. Restart the agent to take effect."
+                ;;
+            all)
+                log_info "Clearing all Qdrant data (prod + staging)..."
+                rm -rf "$HOME/.psap-agent/qdrant/"
+                rm -rf "$HOME/.psap-agent/qdrant-staging/"
+                mkdir -p "$HOME/.psap-agent/qdrant" "$HOME/.psap-agent/qdrant-staging"
+                log_success "All Qdrant data cleared. Restart the agents to take effect."
+                ;;
+            *)
+                log_error "Unknown target: $target (use: all, prod, staging)"
+                exit 1
+                ;;
+        esac
         ;;
     logs)
         view_logs

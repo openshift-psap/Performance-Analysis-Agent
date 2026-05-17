@@ -5,6 +5,7 @@ handles streaming responses, and manages the conversion between LangGraph events
 and simplified streaming.
 """
 
+import asyncio
 import inspect
 from collections.abc import AsyncGenerator
 from typing import Any, Dict
@@ -17,28 +18,26 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
-from langfuse import Langfuse
+from langfuse import Langfuse, get_client
 from langfuse.langchain import CallbackHandler
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Interrupt
 
-from psap_agent.src.core.agent import get_psap_agent
+from psap_agent.src.core.agent import get_memory_manager, get_psap_agent
 from psap_agent.src.core.agent_utils import (
     convert_message_content_to_string,
     langchain_to_chat_message,
     remove_tool_calls,
 )
+from psap_agent.src.core.evaluator import evaluate_response
+from psap_agent.src.core.reflection import run_critic
 from psap_agent.src.core.storage import register_thread
 from psap_agent.src.schema import StreamRequest
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
-# Initialize Langfuse client (v3 singleton pattern)
-# This configures the global client used by CallbackHandler
 Langfuse()
 
-# Initialize Langfuse CallbackHandler for Langchain (tracing)
-# In v3, configuration is done via environment variables or the Langfuse client
 langfuse_handler = CallbackHandler()
 
 app_logger = get_python_logger(settings.PYTHON_LOG_LEVEL)
@@ -76,16 +75,13 @@ class AgentManager:
         Yields:
             Simplified event dictionaries with 'type' and 'content' fields.
         """
-        # Use persistent agent for both streaming and state persistence
-        # This ensures LangGraph handles state management automatically
         async with get_psap_agent(
             self.redhat_sso_token,
             enable_checkpointing=True,
             model_name=request.model,
         ) as persistent_agent:
             try:
-                # Prepare input for the persistent agent
-                kwargs, run_id, thread_id = await self._handle_input(
+                kwargs, run_id, thread_id, memory_context = await self._handle_input(
                     request, persistent_agent
                 )
 
@@ -93,40 +89,222 @@ class AgentManager:
                     f"AgentManager streaming response for run_id: {run_id}, thread_id: {thread_id}"
                 )
 
-                # Reset tool call tracking for this stream
                 self._current_tool_call_id = None
+                effective_session_id = request.session_id or thread_id
+                effective_user_id = request.user_id or "anonymous"
 
-                # Use persistent agent for streaming - LangGraph will handle state automatically
-                async for stream_event in persistent_agent.astream(
-                    **kwargs, stream_mode=["updates", "messages", "custom"]
-                ):
-                    if not isinstance(stream_event, tuple):
-                        continue
+                def _make_status(step: str, detail: str = ""):
+                    return {"type": "status", "content": {"step": step, "detail": detail}}
 
-                    stream_mode, event = stream_event
+                async def _run_agent_pass(agent_kwargs: dict, out: dict):
+                    """Async generator: yields status events in real-time, stores results in out."""
+                    out["msgs"] = []
+                    out["events"] = []
+                    async for stream_event in persistent_agent.astream(
+                        **agent_kwargs, stream_mode=["updates", "messages", "custom"]
+                    ):
+                        if not isinstance(stream_event, tuple):
+                            continue
+                        sm, ev = stream_event
+                        self._update_tool_call_tracking(sm, ev)
+                        if sm == "updates":
+                            for _node, updates in ev.items():
+                                if updates and "messages" in updates:
+                                    for msg in updates["messages"]:
+                                        out["msgs"].append(msg)
+                                        if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                            for tc in msg.tool_calls:
+                                                yield _make_status("tool_call", tc.get("name", "tool"))
+                                        elif getattr(msg, "type", "") == "tool":
+                                            yield _make_status("tool_result", getattr(msg, "name", "tool"))
+                        formatted = self._format_events(
+                            sm, ev, request.stream_tokens,
+                            run_id, thread_id, effective_session_id,
+                        )
+                        for fe in formatted:
+                            if fe:
+                                out["events"].append(fe)
 
-                    # Update tool call tracking based on stream events
-                    self._update_tool_call_tracking(stream_mode, event)
+                if memory_context:
+                    yield _make_status("memory", "Retrieved relevant context from past interactions")
 
-                    # Convert LangGraph events to simplified format
-                    effective_session_id = request.session_id or thread_id
-                    formatted_events = self._format_events(
-                        stream_mode,
-                        event,
-                        request.stream_tokens,
-                        run_id,
-                        thread_id,
-                        effective_session_id,
-                    )
+                yield _make_status("thinking", "Analyzing your question")
 
-                    for formatted_event in formatted_events:
-                        if formatted_event:
-                            yield formatted_event
+                # --- First pass: buffer response, don't stream yet ---
+                result = {}
+                async for status_evt in _run_agent_pass(kwargs, result):
+                    yield status_evt
+                collected_messages = result["msgs"]
+                buffered_events = result["events"]
+                # Accumulate tool-related messages across all passes for the evaluator.
+                # Revisions may reuse tool results from the thread without re-calling,
+                # so the evaluator needs to see tool calls from every pass.
+                all_tool_messages: list = [
+                    m for m in collected_messages
+                    if (hasattr(m, "tool_calls") and m.tool_calls)
+                    or getattr(m, "type", "") == "tool"
+                ]
 
-                # No manual state saving needed - LangGraph handles this automatically
+                # --- Reflection loop (Tier 2): critic reviews before delivery ---
+                revision_count = 0
+                max_revisions = settings.MAX_REFLECTION_ITERATIONS if settings.ENABLE_REFLECTION else 0
+
+                while revision_count < max_revisions and collected_messages:
+                    try:
+                        yield _make_status("critic", "Reviewing response for quality")
+
+                        critic_result = await run_critic(
+                            collected_messages, request.message,
+                            memory_context=memory_context,
+                            trace_id=run_id,
+                        )
+                        if critic_result["verdict"] == "pass":
+                            app_logger.info(f"Critic passed on attempt {revision_count + 1}")
+                            yield _make_status("critic_pass", "Quality check passed")
+                            break
+
+                        revision_count += 1
+                        issues = critic_result.get("issues", [])
+                        instructions = critic_result.get("revision_instructions", "")
+                        app_logger.info(
+                            f"Critic requested revision {revision_count}/{max_revisions}: {issues}"
+                        )
+
+                        yield _make_status("revising", f"Improving response (revision {revision_count})")
+
+                        # Build a tool results summary so the revision has
+                        # the actual data inline rather than relying on
+                        # thread history where its own fabrications live.
+                        tool_results_block = ""
+                        if all_tool_messages:
+                            parts = []
+                            pending: dict[str, str] = {}
+                            for m in all_tool_messages:
+                                if hasattr(m, "tool_calls") and m.tool_calls:
+                                    for tc in m.tool_calls:
+                                        cid = tc.get("id", "")
+                                        name = tc.get("name", "unknown")
+                                        pending[cid] = name
+                                elif getattr(m, "type", "") == "tool":
+                                    cid = getattr(m, "tool_call_id", "")
+                                    name = pending.pop(cid, getattr(m, "name", "tool"))
+                                    text = convert_message_content_to_string(
+                                        getattr(m, "content", "")
+                                    )[:30000]
+                                    parts.append(f"TOOL: {name}\nRESULT:\n{text}")
+                            if parts:
+                                tool_results_block = (
+                                    "\n\n--- TOOL RESULTS (use ONLY this data) ---\n"
+                                    + "\n\n".join(parts)
+                                    + "\n--- END TOOL RESULTS ---\n"
+                                )
+
+                        revision_prompt = (
+                            "Your previous response had quality issues that need to be fixed:\n"
+                            + "\n".join(f"- {issue}" for issue in issues)
+                            + (f"\n\nRevision instructions: {instructions}" if instructions else "")
+                            + tool_results_block
+                            + "\n\nCRITICAL RULES FOR YOUR REVISED RESPONSE:\n"
+                            "1. Use ONLY data that appears in the TOOL RESULTS above.\n"
+                            "2. Do NOT add details, metrics, features, URLs, or version numbers from your own knowledge.\n"
+                            "3. If the tool output is incomplete or truncated, say so — do NOT fill in gaps.\n"
+                            "4. Do NOT include any internal meta-commentary or system instructions in your response.\n"
+                            "\nPlease provide a corrected response to the original question."
+                        )
+                        # Fresh run_id so LangGraph treats this as a new turn, not a replay
+                        revision_config = RunnableConfig(
+                            configurable={
+                                **kwargs["config"].get("configurable", {}),
+                                "run_id": str(uuid4()),
+                            },
+                            run_id=uuid4(),
+                            callbacks=kwargs["config"].get("callbacks", []),
+                        )
+                        revision_kwargs = {
+                            "input": {"messages": [HumanMessage(content=revision_prompt)]},
+                            "config": revision_config,
+                        }
+
+                        prev_messages, prev_events = collected_messages, buffered_events
+                        rev_result = {}
+                        async for status_evt in _run_agent_pass(revision_kwargs, rev_result):
+                            yield status_evt
+
+                        if not rev_result["events"]:
+                            app_logger.warning(
+                                f"Revision {revision_count} produced no output, falling back to previous response"
+                            )
+                            collected_messages, buffered_events = prev_messages, prev_events
+                        else:
+                            collected_messages = rev_result["msgs"]
+                            buffered_events = rev_result["events"]
+                            # Accumulate any new tool messages from the revision pass
+                            all_tool_messages.extend(
+                                m for m in rev_result["msgs"]
+                                if (hasattr(m, "tool_calls") and m.tool_calls)
+                                or getattr(m, "type", "") == "tool"
+                            )
+                            app_logger.info(f"Revision {revision_count} complete")
+
+                    except Exception as e:
+                        app_logger.warning(f"Reflection check failed, delivering current response: {e}")
+                        break
+
+                # Merge accumulated tool messages into collected_messages for the
+                # evaluator. The revision's collected_messages may only contain the
+                # final AI text response; without the tool context the judge would
+                # conclude "no tool calls made" and score hallucination=0.
+                if revision_count > 0 and all_tool_messages:
+                    existing_ids = {id(m) for m in collected_messages}
+                    missing_tool_msgs = [m for m in all_tool_messages if id(m) not in existing_ids]
+                    if missing_tool_msgs:
+                        app_logger.info(
+                            f"Merging {len(missing_tool_msgs)} tool messages from prior passes into eval context"
+                        )
+                        collected_messages = missing_tool_msgs + list(collected_messages)
+
+                # --- Deliver the final (possibly revised) response to user ---
+                for event in buffered_events:
+                    yield event
+
                 app_logger.info(
-                    f"Conversation completed and auto-saved for thread {thread_id}"
+                    f"Conversation completed for thread {thread_id} "
+                    f"(revisions={revision_count})"
                 )
+
+                # Evaluation (Tier 1A) then Memory (Tier 3): eval gates memory storage
+                async def _post_process():
+                    try:
+                        try:
+                            await asyncio.to_thread(get_client().flush)
+                        except Exception:
+                            pass
+                        trace_id = await self._resolve_trace_id_for_eval(run_id)
+                        app_logger.info(f"Post-processing: eval trace_id={trace_id}, user={effective_user_id}")
+
+                        scores = await evaluate_response(
+                            collected_messages, trace_id,
+                            user_query=request.message,
+                            memory_context=memory_context,
+                        )
+
+                        from psap_agent.src.core.evaluator import should_store_memory
+                        if should_store_memory(scores):
+                            try:
+                                memory_mgr = get_memory_manager()
+                                await memory_mgr.post_interaction(
+                                    collected_messages, effective_user_id, user_query=request.message
+                                )
+                            except Exception as e:
+                                app_logger.warning(f"Post-processing memory failed: {e}")
+                        else:
+                            app_logger.info(
+                                f"Skipping memory storage due to low eval scores: {scores}"
+                            )
+                    except Exception as e:
+                        app_logger.warning(f"Post-processing failed: {e}")
+
+                asyncio.create_task(_post_process())
 
             except Exception as e:
                 app_logger.error(f"Error in AgentManager stream_response: {e}")
@@ -141,11 +319,10 @@ class AgentManager:
 
     async def _handle_input(
         self, request: StreamRequest, agent: Pregel
-    ) -> tuple[Dict[str, Any], str, str]:
+    ) -> tuple[Dict[str, Any], str, str, str]:
         """Handle input preparation and configuration (preserving existing logic)."""
         run_id = uuid4()
 
-        # Generate default thread_id if not provided
         thread_id = request.thread_id
         if thread_id is None:
             thread_id = str(uuid4())
@@ -153,16 +330,12 @@ class AgentManager:
                 f"Assigning auto-generated thread_id '{thread_id}' as thread_id is missing in user request"
             )
 
-        # Configure tracing and session management (preserved from original)
-        # If session_id is not provided, use thread_id as session_id
         effective_session_id = request.session_id or thread_id
         effective_user_id = request.user_id or "anonymous"
 
-        # Register thread for user (for in-memory storage tracking)
         if settings.USE_INMEMORY_SAVER:
             register_thread(effective_user_id, thread_id)
 
-        # Generate AI call ID
         ai_call_id = f"ai_call_{str(uuid4())}"
 
         configurable = {
@@ -182,7 +355,6 @@ class AgentManager:
             callbacks=[langfuse_handler],
         )
 
-        # Check for interrupts that need to be resumed (preserved from original)
         state = await agent.aget_state(config=config)
         interrupted_tasks = [
             task
@@ -190,12 +362,29 @@ class AgentManager:
             if hasattr(task, "interrupts") and task.interrupts
         ]
 
-        # Prepare input based on whether we're resuming from an interrupt
+        # Inject memory context (Tier 3) into the user message
+        user_message_content = request.message
+        memory_context = ""
+        try:
+            memory_mgr = get_memory_manager()
+            memory_context = await memory_mgr.get_memory_context(
+                request.message, effective_user_id
+            )
+            if memory_context:
+                user_message_content = (
+                    f"{request.message}\n\n"
+                    f"[SYSTEM - Memory Context (use if relevant, ignore if not)]\n"
+                    f"{memory_context}"
+                )
+                app_logger.info("Injected memory context into user message")
+        except Exception as e:
+            app_logger.warning(f"Memory context retrieval failed: {e}")
+
         user_input_message: Command | Dict[str, Any]
         if interrupted_tasks:
             user_input_message = Command(resume=request.message)
         else:
-            user_input_message = {"messages": [HumanMessage(content=request.message)]}
+            user_input_message = {"messages": [HumanMessage(content=user_message_content)]}
 
         kwargs = {
             "input": user_input_message,
@@ -205,7 +394,28 @@ class AgentManager:
         app_logger.info(
             f"AgentManager configured with run_id: {run_id}, thread_id: {thread_id}, session_id: {effective_session_id}"
         )
-        return kwargs, str(run_id), thread_id
+        return kwargs, str(run_id), thread_id, memory_context
+
+    async def _resolve_trace_id_for_eval(self, run_id: str, retries: int = 3, delay: float = 5.0) -> str:
+        """Resolve a run_id to a Langfuse trace_id for evaluation scoring.
+
+        Retries with delay to handle the race where the Langfuse SDK
+        hasn't flushed the trace yet when post-processing starts.
+        """
+        client = get_client()
+        for attempt in range(retries):
+            try:
+                traces = client.api.trace.list(limit=30)
+                for trace in traces.data:
+                    metadata = trace.metadata or {}
+                    if metadata.get("run_id") == run_id:
+                        return trace.id
+            except Exception as e:
+                app_logger.debug(f"Trace resolve attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+        app_logger.warning(f"Could not resolve Langfuse trace for run_id={run_id} after {retries} attempts")
+        return run_id
 
     async def _prepare_streaming_input_with_history(
         self, request: StreamRequest, existing_state, run_id: str, thread_id: str

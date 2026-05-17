@@ -64,6 +64,12 @@ def initialize_session_state():
     if "dark_mode" not in st.session_state:
         st.session_state.dark_mode = False
 
+    if "pending_prompt" not in st.session_state:
+        st.session_state.pending_prompt = None
+
+    if "is_streaming" not in st.session_state:
+        st.session_state.is_streaming = False
+
 
 def apply_custom_css():
     """Inject custom CSS for button styling and optional dark mode."""
@@ -141,6 +147,22 @@ def apply_custom_css():
         button[kind="secondary"] {
             color: #fafafa !important;
             border-color: #3a3c47 !important;
+        }
+        /* Form submit buttons (login "Continue") */
+        button[kind="secondaryFormSubmit"],
+        [data-testid="stFormSubmitButton"] button,
+        .stForm button {
+            background-color: #cc0000 !important;
+            color: #ffffff !important;
+            border-color: #cc0000 !important;
+            border-radius: 0.5rem !important;
+            font-weight: 600 !important;
+        }
+        button[kind="secondaryFormSubmit"]:hover,
+        [data-testid="stFormSubmitButton"] button:hover,
+        .stForm button:hover {
+            background-color: #a30000 !important;
+            border-color: #a30000 !important;
         }
         """
     else:
@@ -252,6 +274,22 @@ def apply_custom_css():
             background-color: #f0f2f6 !important;
             border-color: #b0b3ba !important;
         }
+        /* Form submit buttons (login "Continue") */
+        button[kind="secondaryFormSubmit"],
+        [data-testid="stFormSubmitButton"] button,
+        .stForm button {
+            background-color: #cc0000 !important;
+            color: #ffffff !important;
+            border-color: #cc0000 !important;
+            border-radius: 0.5rem !important;
+            font-weight: 600 !important;
+        }
+        button[kind="secondaryFormSubmit"]:hover,
+        [data-testid="stFormSubmitButton"] button:hover,
+        .stForm button:hover {
+            background-color: #a30000 !important;
+            border-color: #a30000 !important;
+        }
 
         /* Chat messages */
         .stChatMessage,
@@ -314,6 +352,21 @@ def apply_custom_css():
         hr {
             border-color: #e0e2e8 !important;
         }
+
+        /* Tooltips */
+        [data-testid="stTooltipContent"],
+        [data-testid="stTooltipContent"] p,
+        [data-testid="stTooltipContent"] span,
+        div[data-baseweb="tooltip"] > div,
+        div[data-baseweb="tooltip"] > div > div {
+            background-color: #ffffff !important;
+            color: #31333F !important;
+            border: 1px solid #d6d8de !important;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+        }
+        div[data-baseweb="tooltip"] [data-popper-arrow] {
+            display: none !important;
+        }
         """
 
     st.markdown(f"<style>{button_css}{theme_css}</style>", unsafe_allow_html=True)
@@ -374,6 +427,7 @@ def stream_agent_response(
     stream_tokens: bool = True,
     api_url: str = "http://localhost:8081",
     model: str | None = None,
+    status_callback=None,
 ) -> tuple[str, List[Dict[str, Any]]]:
     """Stream response from the PSAP Agent using the simplified API.
 
@@ -385,6 +439,7 @@ def stream_agent_response(
         stream_tokens: Whether to stream individual tokens
         api_url: Base URL of the PSAP Agent API
         model: Optional Gemini model override
+        status_callback: Optional callback(content_dict) called on each status event
 
     Returns:
         Tuple of (final_response, all_messages)
@@ -402,6 +457,7 @@ def stream_agent_response(
 
     full_response = ""
     all_messages = []
+    status_updates = []
 
     try:
         # Make streaming request to the simplified API
@@ -430,16 +486,17 @@ def stream_agent_response(
                 content = event.get("content")
 
                 if event_type == "token" and isinstance(content, str):
-                    # Accumulate tokens for real-time display
                     full_response += content
 
+                elif event_type == "status" and isinstance(content, dict):
+                    status_updates.append(content)
+                    if status_callback:
+                        status_callback(content)
+
                 elif event_type == "message" and isinstance(content, dict):
-                    # Store complete messages
                     all_messages.append(content)
 
-                    # If this is the final AI message, use it as the response
                     if content.get("type") == "ai" and content.get("content"):
-                        # If we haven't accumulated tokens, use the message content
                         if not full_response:
                             full_response = content["content"]
 
@@ -563,7 +620,7 @@ def main():
             f'{{ {btn_style} border-radius: 0.5rem !important; font-weight: 600 !important; }}</style>',
             unsafe_allow_html=True,
         )
-        if st.button(theme_label, key="theme_toggle", use_container_width=True):
+        if st.button(theme_label, key="theme_toggle", use_container_width=True, disabled=st.session_state.is_streaming):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
 
@@ -606,7 +663,7 @@ def main():
             st.info(f"**{st.session_state.user_email}**")
         
         # Logout button
-        if st.button("🚪 Sign Out", use_container_width=True):
+        if st.button("🚪 Sign Out", use_container_width=True, disabled=st.session_state.is_streaming):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.query_params.clear()
@@ -618,13 +675,13 @@ def main():
         default_api_url = os.getenv("AGENT_API_URL", "http://localhost:5002")
 
         model_options = {
-            "Gemini 3 Flash (default)": "gemini-3-flash-preview",
-            "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
-            "Claude Opus 4.6 (Vertex AI)": "claude-opus-4-6",
-            "Claude Sonnet 4.6 (Vertex AI)": "claude-sonnet-4-6",
+            "⚡ Gemini 3 Flash (default) ▾": "gemini-3-flash-preview",
+            "🧠 Gemini 3.1 Pro ▾": "gemini-3.1-pro-preview",
+            "🟣 Claude Opus 4.6 (Vertex AI) ▾": "claude-opus-4-6",
+            "🔵 Claude Sonnet 4.6 (Vertex AI) ▾": "claude-sonnet-4-6",
         }
         selected_label = st.selectbox(
-            "LLM Model",
+            "🤖 LLM Model",
             options=list(model_options.keys()),
             index=0,
             help="Select the LLM model. Claude models require Vertex AI credentials.",
@@ -644,15 +701,26 @@ def main():
                 "Sonnet is a good balance of quality and speed. Claude Models have higher cost, please use them mindfully."
             )
 
-        # API test
-        try:
-            health_response = requests.get(f"{default_api_url}/health", timeout=5)
-            if health_response.status_code == 200:
-                st.success("API Status: ✅ Connected")
-            else:
-                st.error(f"API Status: ❌ Error {health_response.status_code}")
-        except Exception as e:
-            st.error(f"API Status: ❌ Unreachable")
+        # API status (cached to avoid flaky checks on every Streamlit re-render)
+        def _check_api_health(url: str) -> bool:
+            try:
+                return requests.get(f"{url}/health", timeout=5).status_code == 200
+            except Exception:
+                return False
+
+        cache_key = "_api_health_cache"
+        now = time.time()
+        cached = st.session_state.get(cache_key, {})
+        if now - cached.get("ts", 0) > 15 or cached.get("url") != default_api_url:
+            healthy = _check_api_health(default_api_url)
+            st.session_state[cache_key] = {"ts": now, "url": default_api_url, "ok": healthy}
+        else:
+            healthy = cached["ok"]
+
+        if healthy:
+            st.success("API Status: ✅ Connected")
+        else:
+            st.error("API Status: ❌ Unreachable")
 
         st.divider()
         
@@ -673,7 +741,7 @@ def main():
         with st.container(height=380):
             for i, query in enumerate(example_queries, 1):
                 # Show the actual query text in the button
-                if st.button(query, key=f"example_{i}", use_container_width=True):
+                if st.button(query, key=f"example_{i}", use_container_width=True, disabled=st.session_state.is_streaming):
                     st.session_state.example_query = query
         
         st.divider()
@@ -698,11 +766,12 @@ def main():
         st.text(f"Session ID: {st.session_state.session_id[:8]}...")
         st.text(f"User ID: {st.session_state.user_email}")
 
-        if st.button("🔄 New Conversation", use_container_width=True, key="new_conv_sidebar", type="primary"):
-            st.session_state.messages = []
+        if st.button("🔄 New Conversation", use_container_width=True, key="new_conv_sidebar", type="primary", disabled=st.session_state.is_streaming):
+            if st.session_state.messages:
+                st.session_state.messages.append({"role": "divider"})
             st.session_state.thread_id = str(uuid.uuid4())
             st.session_state.last_message_time = None
-            st.session_state.inactivity_dismissed = False
+            st.session_state.inactivity_dismissed = True
             st.rerun()
 
         st.divider()
@@ -724,7 +793,7 @@ def main():
                 st.json(st.session_state.messages[-1])
 
             # Export conversation
-            if st.button("Export Conversation", use_container_width=True):
+            if st.button("Export Conversation", use_container_width=True, disabled=st.session_state.is_streaming):
                 conversation_data =                 {
                     "thread_id": st.session_state.thread_id,
                     "session_id": st.session_state.session_id,
@@ -759,9 +828,16 @@ def main():
 
     # Display chat history
     for idx, message in enumerate(st.session_state.messages):
+        if message["role"] == "divider":
+            st.divider()
+            st.caption("New conversation started")
+            continue
         if message["role"] == "user":
             with st.chat_message("user"):
                 st.write(message["content"])
+        elif isinstance(message.get("content"), dict) and message["content"].get("type") == "error":
+            with st.chat_message("assistant"):
+                st.error(message["content"]["content"])
         else:
             # For agent messages, display the structured content
             with st.chat_message("assistant"):
@@ -790,7 +866,7 @@ def main():
                         )
                         c1, c2, _ = st.columns([1, 1, 6])
                         with c1:
-                            if st.button("Submit", key=f"submit_fb_{idx}", use_container_width=True):
+                            if st.button("Submit", key=f"submit_fb_{idx}", use_container_width=True, disabled=st.session_state.is_streaming):
                                 send_feedback(
                                     pending["run_id"], 0.0,
                                     pending["user_query"],
@@ -802,7 +878,7 @@ def main():
                                 st.session_state.pending_negative_feedback = None
                                 st.rerun()
                         with c2:
-                            if st.button("Skip", key=f"skip_fb_{idx}", use_container_width=True):
+                            if st.button("Skip", key=f"skip_fb_{idx}", use_container_width=True, disabled=st.session_state.is_streaming):
                                 send_feedback(
                                     pending["run_id"], 0.0,
                                     pending["user_query"],
@@ -816,9 +892,9 @@ def main():
                     else:
                         col1, col2, col3 = st.columns([1, 1, 10])
                         with col1:
-                            thumbs_up = st.button("👍", key=f"thumbs_up_{idx}", help="Good response")
+                            thumbs_up = st.button("👍", key=f"thumbs_up_{idx}", help="Good response", disabled=st.session_state.is_streaming)
                         with col2:
-                            thumbs_down = st.button("👎", key=f"thumbs_down_{idx}", help="Poor response")
+                            thumbs_down = st.button("👎", key=f"thumbs_down_{idx}", help="Poor response", disabled=st.session_state.is_streaming)
 
                         if thumbs_up:
                             user_query = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
@@ -846,28 +922,31 @@ def main():
         tc_col1, tc_col2, tc_col3 = st.columns([3, 5, 3])
         with tc_col2:
             st.markdown(
-                f'<div class="turn-hint">Turn {turn_count} · Switching topics? Start a new conversation <span class="arrow">→</span></div>',
+                f'<div class="turn-hint">Turn {turn_count} · Switching topics? A new conversation gives the agent fresh context for more accurate answers <span class="arrow">→</span></div>',
                 unsafe_allow_html=True,
             )
         with tc_col3:
-            if st.button("🔄 New Conversation", key="new_conv_main", use_container_width=True, type="primary"):
-                st.session_state.messages = []
+            if st.button("🔄 New Conversation", key="new_conv_main", use_container_width=True, type="primary", disabled=st.session_state.is_streaming):
+                if st.session_state.messages:
+                    st.session_state.messages.append({"role": "divider"})
                 st.session_state.thread_id = str(uuid.uuid4())
                 st.session_state.last_message_time = None
-                st.session_state.inactivity_dismissed = False
+                st.session_state.inactivity_dismissed = True
                 st.rerun()
 
     # Inactivity prompt - show if returning after 10+ minutes of silence
+    inactivity_blocking = False
     if (turn_count > 0
             and st.session_state.last_message_time is not None
             and not st.session_state.inactivity_dismissed):
         elapsed = time.time() - st.session_state.last_message_time
         if elapsed > 600:
+            inactivity_blocking = True
             minutes = int(elapsed // 60)
             with st.container(border=True):
                 st.markdown(
                     f"**Welcome back!** It's been **{minutes} minutes** since your last message. "
-                    "Continue this conversation or start a new one?"
+                    "Starting fresh gives the agent clean context for more accurate answers."
                 )
                 c1, c2, _ = st.columns([1, 1, 4])
                 with c1:
@@ -876,77 +955,125 @@ def main():
                         st.rerun()
                 with c2:
                     if st.button("Start Fresh", key="start_fresh", use_container_width=True, type="primary"):
-                        st.session_state.messages = []
+                        if st.session_state.messages:
+                            st.session_state.messages.append({"role": "divider"})
                         st.session_state.thread_id = str(uuid.uuid4())
                         st.session_state.last_message_time = None
-                        st.session_state.inactivity_dismissed = False
+                        st.session_state.inactivity_dismissed = True
                         st.rerun()
 
-    # Always show chat input
-    prompt = st.chat_input("Ask about RHAIIS performance, models, or configurations...")
+    # Always show chat input (disabled while agent is working)
+    prompt = st.chat_input(
+        "Ask about RHAIIS performance, models, or configurations...",
+        disabled=st.session_state.is_streaming,
+    )
 
     # Check if an example query was clicked (takes priority over chat input)
     example_query = st.session_state.get("example_query")
     if example_query:
-        st.session_state.example_query = None  # Clear it
-        prompt = example_query  # Override prompt with example query
+        st.session_state.example_query = None
+        prompt = example_query
 
-    # Process the prompt (whether from example or chat input)
-    if prompt:
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    # Block message processing while inactivity prompt is showing — save prompt so it survives the rerun
+    if inactivity_blocking and prompt:
+        st.session_state.pending_prompt = prompt
+        st.info("Please choose **Continue** or **Start Fresh** above. Your message will be sent after.")
+        st.stop()
+
+    # New prompt OR saved prompt from inactivity block: set streaming flag, rerun
+    active_new_prompt = prompt or (st.session_state.pending_prompt if not st.session_state.is_streaming else None)
+    if active_new_prompt and not st.session_state.is_streaming:
+        if not st.session_state.pending_prompt:
+            st.session_state.pending_prompt = active_new_prompt
+        if not st.session_state.messages or st.session_state.messages[-1].get("content") != active_new_prompt or st.session_state.messages[-1].get("role") != "user":
+            st.session_state.messages.append({"role": "user", "content": active_new_prompt})
         st.session_state.last_message_time = time.time()
         st.session_state.inactivity_dismissed = False
+        st.session_state.is_streaming = True
+        st.rerun()
 
-        # Display user message
-        with st.chat_message("user"):
-            st.write(prompt)
+    # Streaming run: buttons are already disabled, safe to do the blocking call
+    if st.session_state.is_streaming and st.session_state.pending_prompt:
+        active_prompt = st.session_state.pending_prompt
 
-        # Stream agent response
+        _STATUS_LABELS = {
+            "memory": ("🧠", "Recalling past interactions"),
+            "thinking": ("🔍", "Analyzing your question"),
+            "tool_call": ("🔧", "Calling tool: {detail}"),
+            "tool_result": ("📊", "Received results from: {detail}"),
+            "critic": ("🔎", "Quality check — reviewing response"),
+            "critic_pass": ("✅", "Quality check passed"),
+            "revising": ("✏️", "Improving response — {detail}"),
+        }
+
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
+            status_placeholder = st.empty()
 
-            # Show loading spinner
-            with st.spinner("🔍 Analyzing performance data..."):
-                # Stream the response
-                full_response, all_messages = stream_agent_response(
-                    message=prompt,
-                    thread_id=st.session_state.thread_id,
-                    session_id=st.session_state.session_id,
-                    user_id=st.session_state.user_email,
-                    stream_tokens=stream_tokens,
-                    api_url=api_url,
-                    model=selected_model,
+            def _on_status(content: dict):
+                step = content.get("step", "")
+                detail = content.get("detail", "")
+                icon, template = _STATUS_LABELS.get(step, ("⏳", step))
+                label = template.format(detail=detail) if detail else template.replace(" — {detail}", "").replace(": {detail}", "")
+                status_placeholder.markdown(
+                    f'<div style="display: flex; align-items: center; gap: 10px; padding: 8px 0;">'
+                    f'<div class="red-spinner"></div>'
+                    f'<span style="color: #555; font-size: 1.05em; font-weight: 500;">{icon} {label}</span>'
+                    f'</div>'
+                    f'<style>'
+                    f'@keyframes red-spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}'
+                    f'.red-spinner {{ width: 18px; height: 18px; border: 3px solid #f0f0f0; '
+                    f'border-top: 3px solid #cc0000; border-radius: 50%; '
+                    f'animation: red-spin 0.8s linear infinite; flex-shrink: 0; }}'
+                    f'</style>',
+                    unsafe_allow_html=True,
                 )
 
-            # Display the final response
+            _on_status({"step": "thinking"})
+
+            full_response, all_messages = stream_agent_response(
+                message=active_prompt,
+                thread_id=st.session_state.thread_id,
+                session_id=st.session_state.session_id,
+                user_id=st.session_state.user_email,
+                stream_tokens=stream_tokens,
+                api_url=api_url,
+                model=selected_model,
+                status_callback=_on_status,
+            )
+
+            status_placeholder.empty()
+
             if full_response:
                 response_placeholder.write(full_response)
 
-                # Extract run_id from the last AI message
                 run_id = None
                 for msg in reversed(all_messages):
                     if msg.get("type") == "ai" and msg.get("run_id"):
                         run_id = msg["run_id"]
                         break
 
-                # Add to chat history
                 st.session_state.messages.append(
                     {
                         "role": "assistant",
                         "content": {
                             "type": "ai",
                             "content": full_response,
-                            "run_id": run_id,  # Store run_id for feedback
-                            "messages": all_messages,  # Store all messages for debugging
+                            "run_id": run_id,
+                            "messages": all_messages,
                         },
                     }
                 )
-                
-                # Force a rerun to display feedback buttons via chat history
-                st.rerun()
-            else:
-                response_placeholder.error("No response received from agent")
+
+            st.session_state.pending_prompt = None
+            st.session_state.is_streaming = False
+
+            if not full_response:
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": {"type": "error", "content": "No response received from agent"}}
+                )
+
+            st.rerun()
 
 
 if __name__ == "__main__":

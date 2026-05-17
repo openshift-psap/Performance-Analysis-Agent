@@ -529,9 +529,9 @@ async def query_grafana_metrics(
                             summary = {"message": "No data points found"}
                         
                         results[metric_name] = {
-                            "data": metric_data[:100],  # Limit to 100 points for display
-                            "total_points": len(metric_data),
                             "summary": summary,
+                            "total_points": len(metric_data),
+                            "sample_points": metric_data[:5],
                         }
                     else:
                         errors.append(f"{metric_name}: No data found")

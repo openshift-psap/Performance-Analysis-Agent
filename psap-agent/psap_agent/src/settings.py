@@ -120,6 +120,35 @@ class Settings(BaseSettings):
         default="development", json_schema_extra={"env": "LANGFUSE_TRACING_ENVIRONMENT"}
     )
 
+    # Self-Improvement Configuration
+    ENABLE_LLM_JUDGE: bool = Field(
+        default=True, json_schema_extra={"env": "ENABLE_LLM_JUDGE"}
+    )
+    LLM_JUDGE_MODEL: str = Field(
+        default="gemini-3-flash-preview", json_schema_extra={"env": "LLM_JUDGE_MODEL"}
+    )
+    ENABLE_REFLECTION: bool = Field(
+        default=True, json_schema_extra={"env": "ENABLE_REFLECTION"}
+    )
+    MAX_REFLECTION_ITERATIONS: int = Field(
+        default=2, json_schema_extra={"env": "MAX_REFLECTION_ITERATIONS"}
+    )
+    ENABLE_MEM0: bool = Field(
+        default=True, json_schema_extra={"env": "ENABLE_MEM0"}
+    )
+    MEM0_API_KEY: Optional[str] = Field(
+        default=None, json_schema_extra={"env": "MEM0_API_KEY"}
+    )
+    MEM0_QDRANT_PATH: str = Field(
+        default="/app/qdrant_data", json_schema_extra={"env": "MEM0_QDRANT_PATH"}
+    )
+    ENABLE_SKILL_DOCUMENTS: bool = Field(
+        default=True, json_schema_extra={"env": "ENABLE_SKILL_DOCUMENTS"}
+    )
+    SKILL_GENERATION_THRESHOLD: int = Field(
+        default=5, json_schema_extra={"env": "SKILL_GENERATION_THRESHOLD"}
+    )
+
     # Snowflake Configuration
     SNOWFLAKE_ACCOUNT: Optional[str] = Field(
         default=None, json_schema_extra={"env": "SNOWFLAKE_ACCOUNT"}

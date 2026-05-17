@@ -79,10 +79,14 @@ spec:
               key: CLOUD_ML_REGION
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: "/var/secrets/gcp/sa-key.json"
+        - name: MEM0_QDRANT_PATH
+          value: "/app/qdrant_data"
         volumeMounts:
         - name: gcp-vertex-sa
           mountPath: /var/secrets/gcp
           readOnly: true
+        - name: mem0-data
+          mountPath: /app/qdrant_data
         resources:
           requests:
             memory: "1Gi"
@@ -106,6 +110,21 @@ spec:
       - name: gcp-vertex-sa
         secret:
           secretName: gcp-vertex-sa
+      - name: mem0-data
+        persistentVolumeClaim:
+          claimName: mem0-qdrant-data-staging
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mem0-qdrant-data-staging
+  namespace: psap-ai-agent
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
 
 ---
 apiVersion: v1

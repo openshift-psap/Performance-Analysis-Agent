@@ -349,7 +349,7 @@ spec:
     spec:
       containers:
       - name: langfuse-worker
-        image: langfuse/langfuse-worker:3
+        image: langfuse/langfuse-worker:3.172.0
         env:
         # --- PostgreSQL ---
         - name: DATABASE_URL
@@ -460,6 +460,8 @@ spec:
           value: "false"
         - name: NODE_OPTIONS
           value: "--max-old-space-size=3072"
+        - name: LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES
+          value: "15000000"
         resources:
           requests:
             memory: "512Mi"
@@ -491,7 +493,7 @@ spec:
     spec:
       containers:
       - name: langfuse-web
-        image: langfuse/langfuse:3
+        image: langfuse/langfuse:3.172.0
         ports:
         - containerPort: 3000
           name: http
@@ -617,6 +619,10 @@ spec:
           value: "false"
         - name: LANGFUSE_USE_AZURE_BLOB
           value: "false"
+        - name: NODE_OPTIONS
+          value: "--max-old-space-size=3072"
+        - name: LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES
+          value: "15000000"
         resources:
           requests:
             memory: "512Mi"
