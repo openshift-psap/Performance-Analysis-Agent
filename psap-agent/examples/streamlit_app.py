@@ -70,6 +70,9 @@ def initialize_session_state():
     if "is_streaming" not in st.session_state:
         st.session_state.is_streaming = False
 
+    if "stop_requested" not in st.session_state:
+        st.session_state.stop_requested = False
+
 
 def apply_custom_css():
     """Inject custom CSS for button styling and optional dark mode."""
@@ -109,6 +112,10 @@ def apply_custom_css():
     .turn-hint .arrow {
         display: inline-block;
         animation: turnHintSlide 1.5s ease-in-out infinite;
+    }
+    /* Stop button */
+    button[data-testid="stBaseButton-secondary"]:has(> div > p:only-child) {
+        transition: all 0.15s ease;
     }
     """
 
@@ -465,7 +472,7 @@ def stream_agent_response(
             f"{api_url}/v1/stream",
             json=request_data,
             stream=True,
-            timeout=300,
+            timeout=660,
             headers={"Accept": "text/event-stream"},
         )
         response.raise_for_status()
@@ -994,6 +1001,16 @@ def main():
 
     # Streaming run: buttons are already disabled, safe to do the blocking call
     if st.session_state.is_streaming and st.session_state.pending_prompt:
+        # Handle stop: user clicked Stop on a previous run, clean up
+        if st.session_state.stop_requested:
+            st.session_state.stop_requested = False
+            st.session_state.is_streaming = False
+            st.session_state.pending_prompt = None
+            st.session_state.messages.append(
+                {"role": "assistant", "content": {"type": "error", "content": "⏹ Response stopped by user"}}
+            )
+            st.rerun()
+
         active_prompt = st.session_state.pending_prompt
 
         _STATUS_LABELS = {
@@ -1004,7 +1021,20 @@ def main():
             "critic": ("🔎", "Quality check — reviewing response"),
             "critic_pass": ("✅", "Quality check passed"),
             "revising": ("✏️", "Improving response — {detail}"),
+            "warning": ("⚠️", "{detail}"),
         }
+
+        # Stop button — rendered before the blocking call so it's visible to the user.
+        # on_click fires before re-run, setting the flag for the next iteration.
+        _, stop_col, _ = st.columns([4, 2, 4])
+        with stop_col:
+            st.button(
+                "⏹ Stop generating",
+                key="stop_btn",
+                on_click=lambda: setattr(st.session_state, "stop_requested", True),
+                use_container_width=True,
+                type="secondary",
+            )
 
         with st.chat_message("assistant"):
             response_placeholder = st.empty()

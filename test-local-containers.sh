@@ -498,7 +498,8 @@ start_langfuse() {
       -e LANGFUSE_S3_MEDIA_UPLOAD_PREFIX=media/ \
       -e LANGFUSE_S3_BATCH_EXPORT_ENABLED=false \
       -e LANGFUSE_USE_AZURE_BLOB=false \
-      -e NODE_OPTIONS=--max-old-space-size=3072 \
+      -e NODE_OPTIONS=--max-old-space-size=4096 \
+      -e LANGFUSE_INGESTION_BUFFER_MAX_EVENT_SIZE=1000000 \
       -e LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES=15000000"
     
     # 4. Start Langfuse Worker
@@ -506,6 +507,7 @@ start_langfuse() {
     eval podman run -d \
       --name langfuse-worker \
       --network $NETWORK_NAME \
+      --restart on-failure:3 \
       $LANGFUSE_COMMON_ENV \
       docker.io/langfuse/langfuse-worker:3.172.0
     
@@ -514,6 +516,7 @@ start_langfuse() {
     eval podman run -d \
       --name langfuse-web \
       --network $NETWORK_NAME \
+      --restart on-failure:3 \
       $LANGFUSE_COMMON_ENV \
       -e NEXTAUTH_SECRET=$NEXTAUTH_SECRET \
       -e HOSTNAME=0.0.0.0 \
@@ -677,6 +680,7 @@ start_agent() {
       -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
+      -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"
       -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
       -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
       -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"
@@ -811,6 +815,7 @@ start_agent_staging() {
       -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
+      -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"
       -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
       -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
       -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"

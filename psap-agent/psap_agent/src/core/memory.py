@@ -160,10 +160,17 @@ Create a skill document in this EXACT JSON format:
 {{
   "title": "Short descriptive title (e.g., 'Deep Profiling Investigation')",
   "trigger": "When should this skill be used? (e.g., 'User asks to profile latency for a specific model')",
-  "tool_sequence": ["ordered", "list", "of", "tool", "names"],
+  "prerequisites": ["discovery/listing tools needed to gather IDs or context before the core workflow"],
+  "tool_sequence": ["ordered", "list", "of", "core", "workflow", "tool", "names"],
   "notes": "Important observations about order, prerequisites, or edge cases",
   "tags": ["searchable", "tags"]
 }}
+
+IMPORTANT: Separate discovery/setup tools from the core workflow.
+- "prerequisites": Tools that gather IDs, list available items, or resolve names into identifiers \
+(e.g., discover_configurations, list_models). A consumer starting from scratch will need these first.
+- "tool_sequence": The core analysis/action tools that do the real work once IDs are known.
+If the interaction did not use any discovery tools, set "prerequisites" to an empty list.
 
 Only extract genuinely reusable patterns. If this interaction is too specific to generalize, respond with: {{"skip": true}}"""
 
@@ -172,81 +179,135 @@ class SkillDocumentStore:
     """Manages Hermes-style skill documents using LangGraph BaseStore."""
 
     def __init__(self, store=None):
-        self._store = store
         self._local_skills: list[dict] = []
+        self._store = store
 
-    async def retrieve_skills(self, query: str, limit: int = 3) -> str:
+    @staticmethod
+    def _render_skill(skill: dict) -> list[str]:
+        """Render a single skill document into human-readable lines."""
+        lines = [f"\n## {skill.get('title', 'Untitled Skill')}"]
+        lines.append(f"Trigger: {skill.get('trigger', 'N/A')}")
+        prereqs = skill.get("prerequisites", [])
+        if prereqs:
+            lines.append("Prerequisites (run first if starting from scratch):")
+            for i, tool in enumerate(prereqs, 1):
+                lines.append(f"  {i}. {tool}")
+        seq = skill.get("tool_sequence", [])
+        if seq:
+            label = "Core Tool Sequence:" if prereqs else "Tool Sequence:"
+            lines.append(label)
+            for i, tool in enumerate(seq, 1):
+                lines.append(f"  {i}. {tool}")
+        notes = skill.get("notes", "")
+        if notes:
+            lines.append(f"Notes: {notes}")
+        return lines
+
+    _SKILL_RELEVANCE_THRESHOLD = 0.5
+
+    @staticmethod
+    def _skill_text(skill: dict) -> str:
+        """Build a single string representing a skill for embedding."""
+        parts = [
+            skill.get("title", ""),
+            skill.get("trigger", ""),
+            " ".join(skill.get("tags", [])),
+        ]
+        return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    async def _rank_skills(
+        self, query: str, skills: list[dict], limit: int
+    ) -> list[tuple[dict, float]]:
+        """Rank skills by cosine similarity to the query using Gemini embeddings."""
+        if not skills:
+            return []
+        try:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            embedder = GoogleGenerativeAIEmbeddings(
+                model="models/gemini-embedding-001",
+            )
+            texts = [self._skill_text(s) for s in skills]
+            all_texts = [query] + texts
+            embeddings = await asyncio.to_thread(embedder.embed_documents, all_texts)
+            query_emb = embeddings[0]
+            scored = []
+            for i, skill in enumerate(skills):
+                score = self._cosine_similarity(query_emb, embeddings[i + 1])
+                scored.append((skill, score))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored[:limit]
+        except Exception as e:
+            logger.warning(f"Skill embedding ranking failed: {e}")
+            return [(s, 1.0) for s in skills[:limit]]
+
+    async def retrieve_skills(self, query: str, limit: int = 1) -> str:
         """Retrieve relevant skill documents for the current query."""
         try:
+            all_skills: list[dict] = []
+
             if self._store and hasattr(self._store, "asearch"):
                 results = await self._store.asearch(
-                    ("skills", "global"), query=query, limit=limit
+                    ("skills", "global"), query=query, limit=50
                 )
-                if results:
-                    lines = ["Relevant skill recipes from past successful investigations:"]
-                    for item in results:
-                        skill = item.value if hasattr(item, "value") else item
-                        if isinstance(skill, dict):
-                            lines.append(f"\n## {skill.get('title', 'Untitled Skill')}")
-                            lines.append(f"Trigger: {skill.get('trigger', 'N/A')}")
-                            seq = skill.get("tool_sequence", [])
-                            if seq:
-                                lines.append("Tool Sequence:")
-                                for i, tool in enumerate(seq, 1):
-                                    lines.append(f"  {i}. {tool}")
-                            notes = skill.get("notes", "")
-                            if notes:
-                                lines.append(f"Notes: {notes}")
-                    return "\n".join(lines)
+                for item in results:
+                    skill = item.value if hasattr(item, "value") else item
+                    if isinstance(skill, dict):
+                        all_skills.append(skill)
 
-            if self._local_skills:
-                query_lower = query.lower()
-                matched = []
-                for skill in self._local_skills:
-                    tags = " ".join(skill.get("tags", []))
-                    trigger = skill.get("trigger", "")
-                    if any(
-                        word in tags.lower() or word in trigger.lower()
-                        for word in query_lower.split()
-                        if len(word) > 3
-                    ):
-                        matched.append(skill)
+            all_skills.extend(self._local_skills)
 
-                if matched:
-                    lines = ["Relevant skill recipes from past successful investigations:"]
-                    for skill in matched[:limit]:
-                        lines.append(f"\n## {skill.get('title', 'Untitled Skill')}")
-                        lines.append(f"Trigger: {skill.get('trigger', 'N/A')}")
-                        seq = skill.get("tool_sequence", [])
-                        if seq:
-                            lines.append("Tool Sequence:")
-                            for i, tool in enumerate(seq, 1):
-                                lines.append(f"  {i}. {tool}")
-                        notes = skill.get("notes", "")
-                        if notes:
-                            lines.append(f"Notes: {notes}")
-                    return "\n".join(lines)
+            if not all_skills:
+                return ""
 
-            return ""
+            ranked = await self._rank_skills(query, all_skills, limit)
+            lines = ["Relevant skill recipes from past successful investigations:"]
+            kept = 0
+            for skill, score in ranked:
+                if score < self._SKILL_RELEVANCE_THRESHOLD:
+                    logger.debug(
+                        f"Skill retrieval: skipping '{skill.get('title', '?')}' "
+                        f"(score={score:.2f} < {self._SKILL_RELEVANCE_THRESHOLD})"
+                    )
+                    continue
+                logger.info(
+                    f"Skill retrieval: using '{skill.get('title', '?')}' "
+                    f"(score={score:.2f})"
+                )
+                lines.extend(self._render_skill(skill))
+                kept += 1
+
+            return "\n".join(lines) if kept > 0 else ""
 
         except Exception as e:
             logger.warning(f"Skill retrieval failed: {e}")
             return ""
 
-    async def maybe_generate_skill(self, messages: list[BaseMessage]) -> None:
+    async def maybe_generate_skill(
+        self, messages: list[BaseMessage], *, user_query: str = ""
+    ) -> None:
         """Generate a skill document if the interaction was complex enough."""
         if not settings.ENABLE_SKILL_DOCUMENTS:
             return
 
         try:
             tool_calls = []
-            user_query = ""
             agent_response = ""
             had_error_recovery = False
+            tool_error_count = 0
+            tool_success_count = 0
 
             for msg in messages:
                 msg_type = getattr(msg, "type", "")
-                if msg_type == "human":
+                if msg_type == "human" and not user_query:
                     user_query = str(getattr(msg, "content", ""))
                 elif isinstance(msg, AIMessage):
                     if msg.content:
@@ -255,16 +316,33 @@ class SkillDocumentStore:
                         for tc in msg.tool_calls:
                             tool_calls.append(tc.get("name", "unknown"))
                 elif msg_type == "tool":
-                    content = str(getattr(msg, "content", ""))
-                    if "error" in content.lower():
-                        had_error_recovery = True
+                    content = str(getattr(msg, "content", ""))[:500].lower()
+                    if '"status":"error"' in content or '"status": "error"' in content:
+                        tool_error_count += 1
+                    else:
+                        tool_success_count += 1
+
+            # Error recovery: agent hit errors but also had successful calls
+            # after them, indicating it adapted its approach.
+            had_error_recovery = tool_error_count > 0 and tool_success_count > 0
 
             is_complex = (
                 len(tool_calls) >= settings.SKILL_GENERATION_THRESHOLD
-                or had_error_recovery
+                or (had_error_recovery and len(tool_calls) >= 4)
             )
 
-            if not is_complex or not user_query or not agent_response:
+            if not is_complex:
+                logger.debug(
+                    f"Skill generation: not complex enough "
+                    f"(tool_calls={len(tool_calls)}, threshold={settings.SKILL_GENERATION_THRESHOLD}, "
+                    f"error_recovery={had_error_recovery})"
+                )
+                return
+            if not user_query or not agent_response:
+                logger.info(
+                    f"Skill generation: skipped — missing user_query={bool(user_query)}, "
+                    f"agent_response={bool(agent_response)}"
+                )
                 return
 
             logger.info(
@@ -278,8 +356,15 @@ class SkillDocumentStore:
                 model=settings.LLM_JUDGE_MODEL, temperature=0.0
             )
 
+            deduped: list[tuple[str, int]] = []
+            for name in tool_calls:
+                if deduped and deduped[-1][0] == name:
+                    deduped[-1] = (name, deduped[-1][1] + 1)
+                else:
+                    deduped.append((name, 1))
             tool_sequence_text = "\n".join(
-                f"  {i}. {name}" for i, name in enumerate(tool_calls, 1)
+                f"  {i}. {name}" if count == 1 else f"  {i}. {name} (x{count} parallel)"
+                for i, (name, count) in enumerate(deduped, 1)
             )
 
             prompt = SKILL_EXTRACTION_PROMPT.format(
@@ -378,8 +463,6 @@ class MemoryManager:
             effective_query = user_query or extracted_query
             if self._mem0 and effective_query and agent_response:
                 await self._mem0.store_interaction(effective_query, agent_response, user_id)
-
-            await self._skills.maybe_generate_skill(messages)
 
         except Exception as e:
             logger.warning(f"Post-interaction memory processing failed: {e}")

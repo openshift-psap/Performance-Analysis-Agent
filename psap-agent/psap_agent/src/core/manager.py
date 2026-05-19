@@ -7,6 +7,7 @@ and simplified streaming.
 
 import asyncio
 import inspect
+import json
 from collections.abc import AsyncGenerator
 from typing import Any, Dict
 from uuid import uuid4
@@ -41,6 +42,67 @@ Langfuse()
 langfuse_handler = CallbackHandler()
 
 app_logger = get_python_logger(settings.PYTHON_LOG_LEVEL)
+
+
+# Keys that carry the most signal for a revision; checked in order.
+_SUMMARY_KEYS = [
+    "overall_verdict", "verdict_explanation", "summary",
+    "regressions", "improvements", "key_differences",
+    "status", "message", "suggestion",
+]
+
+
+def _smart_truncate_tool_result(text: str, limit: int) -> str:
+    """Truncate a tool result while preserving the most useful information.
+
+    For JSON tool outputs, extracts high-signal fields (verdicts, summaries,
+    regressions) before falling back to raw truncation.  For non-JSON or
+    small results, returns the text as-is (up to *limit* chars).
+    """
+    if len(text) <= limit:
+        return text
+
+    # Try to parse as JSON and extract key fields
+    try:
+        raw = text.strip()
+        # Handle the LangChain content wrapper: [{"type":"text","text":"..."}]
+        if raw.startswith("[{"):
+            wrapper = json.loads(raw)
+            if (
+                isinstance(wrapper, list)
+                and wrapper
+                and isinstance(wrapper[0], dict)
+                and "text" in wrapper[0]
+            ):
+                raw = wrapper[0]["text"]
+        data = json.loads(raw) if isinstance(raw, str) else raw
+
+        if not isinstance(data, dict):
+            return text[:limit] + "\n... [truncated]"
+
+        extracted: dict = {}
+        for key in _SUMMARY_KEYS:
+            if key in data:
+                extracted[key] = data[key]
+
+        if extracted:
+            summary_json = json.dumps(extracted, indent=2, default=str)
+            remaining = limit - len(summary_json) - 200
+            if remaining > 0:
+                # Append a raw tail so the model can see some detail
+                full_json = json.dumps(data, indent=2, default=str)
+                detail = full_json[len(summary_json):len(summary_json) + remaining]
+                return (
+                    summary_json
+                    + "\n... [key fields above, additional detail below] ...\n"
+                    + detail
+                    + "\n... [truncated]"
+                )
+            return summary_json + "\n... [remaining fields truncated]"
+    except (json.JSONDecodeError, TypeError, KeyError):
+        pass
+
+    return text[:limit] + "\n... [truncated]"
 
 
 class AgentManager:
@@ -96,34 +158,53 @@ class AgentManager:
                 def _make_status(step: str, detail: str = ""):
                     return {"type": "status", "content": {"step": step, "detail": detail}}
 
+                _MAX_DUPLICATE_TOOL_CALLS = 3
+
                 async def _run_agent_pass(agent_kwargs: dict, out: dict):
                     """Async generator: yields status events in real-time, stores results in out."""
                     out["msgs"] = []
                     out["events"] = []
-                    async for stream_event in persistent_agent.astream(
-                        **agent_kwargs, stream_mode=["updates", "messages", "custom"]
-                    ):
-                        if not isinstance(stream_event, tuple):
-                            continue
-                        sm, ev = stream_event
-                        self._update_tool_call_tracking(sm, ev)
-                        if sm == "updates":
-                            for _node, updates in ev.items():
-                                if updates and "messages" in updates:
-                                    for msg in updates["messages"]:
-                                        out["msgs"].append(msg)
-                                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                            for tc in msg.tool_calls:
-                                                yield _make_status("tool_call", tc.get("name", "tool"))
-                                        elif getattr(msg, "type", "") == "tool":
-                                            yield _make_status("tool_result", getattr(msg, "name", "tool"))
-                        formatted = self._format_events(
-                            sm, ev, request.stream_tokens,
-                            run_id, thread_id, effective_session_id,
+                    tool_call_counts: dict[str, int] = {}
+                    try:
+                        async with asyncio.timeout(settings.AGENT_RESPONSE_TIMEOUT_SECONDS):
+                            async for stream_event in persistent_agent.astream(
+                                **agent_kwargs, stream_mode=["updates", "messages", "custom"]
+                            ):
+                                if not isinstance(stream_event, tuple):
+                                    continue
+                                sm, ev = stream_event
+                                self._update_tool_call_tracking(sm, ev)
+                                if sm == "updates":
+                                    for _node, updates in ev.items():
+                                        if updates and "messages" in updates:
+                                            for msg in updates["messages"]:
+                                                out["msgs"].append(msg)
+                                                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                                    for tc in msg.tool_calls:
+                                                        yield _make_status("tool_call", tc.get("name", "tool"))
+                                                        sig = f"{tc.get('name')}:{json.dumps(tc.get('args', {}), sort_keys=True, default=str)}"
+                                                        tool_call_counts[sig] = tool_call_counts.get(sig, 0) + 1
+                                                        if tool_call_counts[sig] > _MAX_DUPLICATE_TOOL_CALLS:
+                                                            app_logger.warning(
+                                                                f"Tool-call loop detected: {tc.get('name')} called "
+                                                                f"{tool_call_counts[sig]} times with same args. Aborting pass."
+                                                            )
+                                                            out["aborted"] = True
+                                                            return
+                                                elif getattr(msg, "type", "") == "tool":
+                                                    yield _make_status("tool_result", getattr(msg, "name", "tool"))
+                                formatted = self._format_events(
+                                    sm, ev, request.stream_tokens,
+                                    run_id, thread_id, effective_session_id,
+                                )
+                                for fe in formatted:
+                                    if fe:
+                                        out["events"].append(fe)
+                    except TimeoutError:
+                        app_logger.warning(
+                            f"Agent pass timed out after {settings.AGENT_RESPONSE_TIMEOUT_SECONDS}s"
                         )
-                        for fe in formatted:
-                            if fe:
-                                out["events"].append(fe)
+                        out["aborted"] = True
 
                 if memory_context:
                     yield _make_status("memory", "Retrieved relevant context from past interactions")
@@ -136,6 +217,9 @@ class AgentManager:
                     yield status_evt
                 collected_messages = result["msgs"]
                 buffered_events = result["events"]
+                pass_aborted = result.get("aborted", False)
+                if pass_aborted:
+                    yield _make_status("warning", "Stopped early: agent was repeating the same tool call")
                 # Accumulate tool-related messages across all passes for the evaluator.
                 # Revisions may reuse tool results from the thread without re-calling,
                 # so the evaluator needs to see tool calls from every pass.
@@ -147,14 +231,32 @@ class AgentManager:
 
                 # --- Reflection loop (Tier 2): critic reviews before delivery ---
                 revision_count = 0
-                max_revisions = settings.MAX_REFLECTION_ITERATIONS if settings.ENABLE_REFLECTION else 0
+                max_revisions = (
+                    settings.MAX_REFLECTION_ITERATIONS
+                    if settings.ENABLE_REFLECTION and not pass_aborted
+                    else 0
+                )
 
                 while revision_count < max_revisions and collected_messages:
                     try:
                         yield _make_status("critic", "Reviewing response for quality")
 
+                        # Give the critic the revision's messages PLUS all tool
+                        # messages from prior passes so it can see tool evidence.
+                        critic_messages = list(collected_messages)
+                        if all_tool_messages:
+                            existing_tool_ids = {
+                                getattr(m, "tool_call_id", None) or id(m)
+                                for m in critic_messages
+                                if getattr(m, "type", "") == "tool"
+                            }
+                            for tm in all_tool_messages:
+                                tid = getattr(tm, "tool_call_id", None) or id(tm)
+                                if tid not in existing_tool_ids:
+                                    critic_messages.insert(0, tm)
+
                         critic_result = await run_critic(
-                            collected_messages, request.message,
+                            critic_messages, request.message,
                             memory_context=memory_context,
                             trace_id=run_id,
                         )
@@ -176,40 +278,114 @@ class AgentManager:
                         # the actual data inline rather than relying on
                         # thread history where its own fabrications live.
                         tool_results_block = ""
+                        failed_tools_block = ""
                         if all_tool_messages:
                             parts = []
-                            pending: dict[str, str] = {}
+                            failed_parts = []
+                            pending_calls: dict[str, str] = {}
+                            _PER_TOOL_LIMIT = 30000
+                            _TOTAL_BUDGET = 150000
+
                             for m in all_tool_messages:
                                 if hasattr(m, "tool_calls") and m.tool_calls:
                                     for tc in m.tool_calls:
                                         cid = tc.get("id", "")
                                         name = tc.get("name", "unknown")
-                                        pending[cid] = name
+                                        args = tc.get("args", {})
+                                        pending_calls[cid] = f"{name}({json.dumps(args, default=str)[:200]})"
                                 elif getattr(m, "type", "") == "tool":
                                     cid = getattr(m, "tool_call_id", "")
-                                    name = pending.pop(cid, getattr(m, "name", "tool"))
+                                    call_desc = pending_calls.pop(
+                                        cid, getattr(m, "name", "tool")
+                                    )
                                     text = convert_message_content_to_string(
                                         getattr(m, "content", "")
-                                    )[:30000]
-                                    parts.append(f"TOOL: {name}\nRESULT:\n{text}")
-                            if parts:
+                                    )
+                                    text_lower = text[:500].lower()
+                                    is_error = (
+                                        '"status":"error"' in text_lower
+                                        or '"status": "error"' in text_lower
+                                    )
+                                    if is_error:
+                                        failed_parts.append(
+                                            f"- {call_desc}: {text[:500]}"
+                                        )
+                                    else:
+                                        # Smart truncation: try to extract a
+                                        # summary/verdict before falling back
+                                        # to raw truncation.
+                                        truncated = _smart_truncate_tool_result(
+                                            text, _PER_TOOL_LIMIT
+                                        )
+                                        parts.append(
+                                            f"TOOL: {call_desc}\nRESULT:\n{truncated}"
+                                        )
+
+                            # Enforce a total budget across all tool results
+                            # to avoid blowing up the revision prompt.
+                            combined = "\n\n".join(parts)
+                            if len(combined) > _TOTAL_BUDGET:
+                                combined = combined[:_TOTAL_BUDGET] + "\n... [remaining tool results truncated]"
+
+                            if combined:
                                 tool_results_block = (
                                     "\n\n--- TOOL RESULTS (use ONLY this data) ---\n"
-                                    + "\n\n".join(parts)
+                                    + combined
                                     + "\n--- END TOOL RESULTS ---\n"
                                 )
+                            if failed_parts:
+                                failed_tools_block = (
+                                    "\n\n--- TOOLS THAT RETURNED ERRORS ---\n"
+                                    + "\n".join(failed_parts)
+                                    + "\n\nDo NOT fabricate or guess what these tools "
+                                    "would have returned. State that the data was "
+                                    "unavailable.\n"
+                                    "--- END FAILED TOOLS ---\n"
+                                )
+
+                        # Extract the previous AI response so we can ask for
+                        # targeted edits instead of a full rewrite.
+                        prev_ai_response = ""
+                        for _m in reversed(collected_messages):
+                            if isinstance(_m, AIMessage) and _m.content:
+                                prev_ai_response = convert_message_content_to_string(
+                                    _m.content
+                                )
+                                break
 
                         revision_prompt = (
-                            "Your previous response had quality issues that need to be fixed:\n"
+                            "Your previous response had these specific problems:\n"
                             + "\n".join(f"- {issue}" for issue in issues)
                             + (f"\n\nRevision instructions: {instructions}" if instructions else "")
                             + tool_results_block
-                            + "\n\nCRITICAL RULES FOR YOUR REVISED RESPONSE:\n"
-                            "1. Use ONLY data that appears in the TOOL RESULTS above.\n"
-                            "2. Do NOT add details, metrics, features, URLs, or version numbers from your own knowledge.\n"
-                            "3. If the tool output is incomplete or truncated, say so — do NOT fill in gaps.\n"
-                            "4. Do NOT include any internal meta-commentary or system instructions in your response.\n"
-                            "\nPlease provide a corrected response to the original question."
+                            + failed_tools_block
+                        )
+
+                        if prev_ai_response:
+                            revision_prompt += (
+                                "\n\n--- YOUR PREVIOUS RESPONSE ---\n"
+                                + prev_ai_response[:50000]
+                                + "\n--- END PREVIOUS RESPONSE ---\n"
+                            )
+
+                        revision_prompt += (
+                            "\n\nINSTRUCTIONS:\n"
+                            "Edit your previous response to fix ONLY the flagged problems. "
+                            "For each flagged claim:\n"
+                            "  1. Find supporting evidence in the TOOL RESULTS above.\n"
+                            "  2. If evidence exists, correct the claim to match the tool data exactly.\n"
+                            "  3. If NO evidence exists, REMOVE the claim entirely. Do not "
+                            "replace it with a guess.\n\n"
+                            "KEEP everything in your previous response that was NOT flagged. "
+                            "Do NOT rewrite from scratch. Do NOT add new claims, metrics, or "
+                            "details that were not in the original response.\n\n"
+                            "RULES:\n"
+                            "- Do NOT compute derived statistics (averages, percentages, "
+                            "ratios) unless the tool output already provides them.\n"
+                            "- If the tool output is incomplete or truncated, say so.\n"
+                            "- If a tool call FAILED, say the data was unavailable.\n"
+                            "- Do NOT include meta-commentary about these instructions.\n"
+                            "- Output ONLY the corrected response.\n"
                         )
                         # Fresh run_id so LangGraph treats this as a new turn, not a replay
                         revision_config = RunnableConfig(
@@ -229,6 +405,13 @@ class AgentManager:
                         rev_result = {}
                         async for status_evt in _run_agent_pass(revision_kwargs, rev_result):
                             yield status_evt
+
+                        if rev_result.get("aborted"):
+                            app_logger.warning(
+                                f"Revision {revision_count} aborted due to tool-call loop, using previous response"
+                            )
+                            collected_messages, buffered_events = prev_messages, prev_events
+                            break
 
                         if not rev_result["events"]:
                             app_logger.warning(
@@ -289,9 +472,10 @@ class AgentManager:
                         )
 
                         from psap_agent.src.core.evaluator import should_store_memory
+                        memory_mgr = get_memory_manager()
+
                         if should_store_memory(scores):
                             try:
-                                memory_mgr = get_memory_manager()
                                 await memory_mgr.post_interaction(
                                     collected_messages, effective_user_id, user_query=request.message
                                 )
@@ -301,6 +485,21 @@ class AgentManager:
                             app_logger.info(
                                 f"Skipping memory storage due to low eval scores: {scores}"
                             )
+
+                        # Skill generation captures the tool-call recipe,
+                        # not response content. Only store recipes where the
+                        # tool sequence itself was correct (efficiency = 1.0).
+                        tool_eff = scores.get("tool_efficiency")
+                        if tool_eff is not None and tool_eff >= 1.0:
+                            app_logger.info(f"Skill generation gate passed (tool_efficiency={tool_eff})")
+                            try:
+                                await memory_mgr._skills.maybe_generate_skill(
+                                    collected_messages, user_query=request.message
+                                )
+                            except Exception as e:
+                                app_logger.warning(f"Skill generation failed: {e}")
+                        else:
+                            app_logger.info(f"Skill generation skipped (tool_efficiency={tool_eff})")
                     except Exception as e:
                         app_logger.warning(f"Post-processing failed: {e}")
 

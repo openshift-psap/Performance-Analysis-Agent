@@ -47,6 +47,9 @@ EVAL_CRITERIA = {
         "description": "Did the agent use the minimum number of tools needed?",
         "rubric": (
             "Score 1.0: Used only necessary tools, no redundant calls. "
+            "Discovery/listing calls (e.g., discover_configurations, list_models) "
+            "to find IDs or resolve names needed by subsequent tools count as "
+            "necessary, not redundant. "
             "Score 0.5: One or two unnecessary tool calls. "
             "Score 0.0: Many redundant tool calls or used wrong tools entirely."
         ),

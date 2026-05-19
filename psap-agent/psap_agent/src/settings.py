@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     MAX_REFLECTION_ITERATIONS: int = Field(
         default=2, json_schema_extra={"env": "MAX_REFLECTION_ITERATIONS"}
     )
+    AGENT_RESPONSE_TIMEOUT_SECONDS: int = Field(
+        default=600, json_schema_extra={"env": "AGENT_RESPONSE_TIMEOUT_SECONDS"}
+    )
     ENABLE_MEM0: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_MEM0"}
     )

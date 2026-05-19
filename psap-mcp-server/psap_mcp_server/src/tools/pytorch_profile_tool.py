@@ -256,7 +256,12 @@ def _get_display_name(model_key: str) -> str:
 
 
 def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
-    """Build a model info dict from known metadata + discovered data."""
+    """Build a model info dict from known metadata + discovered data.
+
+    ``num_ranks`` is the number of rank trace files found in storage,
+    NOT necessarily the tensor-parallelism used during the benchmark.
+    Only rank-0 traces may be stored even for multi-GPU (TP>1) runs.
+    """
     bare = _bare_model(model_key)
     accel = _key_accelerator(model_key)
     known = KNOWN_MODELS.get(bare, {})
@@ -264,8 +269,12 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
         "display_name": known.get("display_name", bare),
         "model_id": known.get("model_id", bare),
         "gpus": accel,
-        "tensor_parallelism": num_ranks,
-        "num_ranks": num_ranks,
+        "ranks_stored": num_ranks,
+        "note": (
+            "ranks_stored is the number of trace files available, not the "
+            "tensor-parallelism used in the benchmark. Only rank-0 traces "
+            "may be stored for multi-GPU runs."
+        ),
     }
 
 
@@ -1384,7 +1393,8 @@ async def analyze_pytorch_profile(
             "profile_info": {
                 "model": model_info["model_id"],
                 "gpus": model_info["gpus"],
-                "tensor_parallelism": model_info["tensor_parallelism"],
+                "ranks_stored": model_info["ranks_stored"],
+                "note": model_info["note"],
             },
         }
 
@@ -1629,10 +1639,6 @@ async def compare_pytorch_profiles(
                 "scope": scope1 if scope1 == scope2 else f"{mv1}: {scope1}, {mv2}: {scope2}",
                 "category_filter": category or "all",
             },
-            "regressions": regressions,
-            "improvements": improvements,
-            "new_kernels": new_kernels,
-            "removed_kernels": removed_kernels,
             "summary": {
                 "total_time1_us": total_time1,
                 "total_time1_human": _format_duration(total_time1),
@@ -1650,12 +1656,17 @@ async def compare_pytorch_profiles(
                 "regression_impact_human": _format_duration(regression_impact),
                 "improvement_impact_us": improvement_impact,
                 "improvement_impact_human": _format_duration(improvement_impact),
+                "note": "Use these pre-computed statistics. Do NOT re-count or re-calculate from the arrays below.",
             },
             "message": (
                 f"{display_name}: {mv2} is {abs(total_diff_pct):.1f}% "
                 f"{'slower' if total_diff > 0 else 'faster'} than {mv1}. "
                 f"Found {len(regressions)} regressions and {len(improvements)} improvements."
             ),
+            "regressions": regressions,
+            "improvements": improvements,
+            "new_kernels": new_kernels,
+            "removed_kernels": removed_kernels,
             "pipeline_breakdown": pipeline_breakdown,
             "event_counts": {
                 "v1": event_counts_v1,
@@ -1664,7 +1675,8 @@ async def compare_pytorch_profiles(
             "profile_info": {
                 "model": model_info["model_id"],
                 "gpus": model_info["gpus"],
-                "tensor_parallelism": model_info["tensor_parallelism"],
+                "ranks_stored": model_info["ranks_stored"],
+                "note": model_info["note"],
             },
             "next_steps": [
                 "Use map_kernel_to_vllm_code to find source files for top regressions",
@@ -2131,7 +2143,8 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                 "profiles": profiles_list,
                 "profile_info": {
                     "gpus": model_info["gpus"],
-                    "tensor_parallelism": model_info["tensor_parallelism"],
+                    "ranks_stored": model_info["ranks_stored"],
+                    "note": model_info["note"],
                 },
             }
 

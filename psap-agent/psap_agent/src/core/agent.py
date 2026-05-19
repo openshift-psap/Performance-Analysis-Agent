@@ -13,6 +13,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.prebuilt import create_react_agent
+from langgraph.store.postgres import AsyncPostgresStore
 
 from psap_agent.src.core.cache_manager import get_cache_manager
 from psap_agent.src.core.exceptions.exceptions import AppException, AppExceptionCode
@@ -21,6 +22,11 @@ from psap_agent.src.core.prompt import get_system_prompt
 from psap_agent.src.core.storage import get_global_checkpoint
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
+
+# Each LangGraph "step" is one node invocation (LLM call or tool execution).
+# A single tool-use round-trip = 2 steps (LLM decides + tool runs).
+# 50 steps ≈ 25 tool calls max, which is generous for any legitimate query.
+_RECURSION_LIMIT = 50
 
 logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
 
@@ -54,7 +60,7 @@ def _create_claude_model(model_name: str) -> BaseChatModel:
         model_name=model_name,
         project=settings.ANTHROPIC_VERTEX_PROJECT_ID,
         location=settings.CLOUD_ML_REGION,
-        temperature=0.1,
+        temperature=0.0,
         max_tokens=16384,
     )
 
@@ -165,20 +171,22 @@ async def get_psap_agent(
             model=model,
             prompt=get_system_prompt(),
             tools=tools,
-        )
+        ).with_config(recursion_limit=_RECURSION_LIMIT)
         logger.info("PSAP agent initialized successfully without checkpointing")
         yield agent_redhat
     elif settings.USE_INMEMORY_SAVER:
         logger.info("Using single global checkpoint for local development")
+        from langgraph.store.memory import InMemoryStore
         checkpoint = get_global_checkpoint()
-        get_memory_manager(store=checkpoint)
+        skill_store = InMemoryStore()
+        get_memory_manager(store=skill_store)
         agent_redhat = create_react_agent(
             model=model,
             prompt=get_system_prompt(),
             tools=tools,
             checkpointer=checkpoint,
-            store=checkpoint,
-        )
+            store=skill_store,
+        ).with_config(recursion_limit=_RECURSION_LIMIT)
         logger.info(
             "PSAP agent initialized successfully with single global checkpoint"
         )
@@ -191,16 +199,21 @@ async def get_psap_agent(
             if hasattr(checkpoint, "setup"):
                 await checkpoint.setup()
 
-            get_memory_manager(store=checkpoint)
-            agent_redhat = create_react_agent(
-                model=model,
-                prompt=get_system_prompt(),
-                tools=tools,
-                checkpointer=checkpoint,
-                store=checkpoint,
-            )
+            async with AsyncPostgresStore.from_conn_string(
+                settings.database_uri
+            ) as skill_store:
+                await skill_store.setup()
 
-            logger.info(
-                "PSAP agent initialized successfully with PostgreSQL checkpoint"
-            )
-            yield agent_redhat
+                get_memory_manager(store=skill_store)
+                agent_redhat = create_react_agent(
+                    model=model,
+                    prompt=get_system_prompt(),
+                    tools=tools,
+                    checkpointer=checkpoint,
+                    store=skill_store,
+                ).with_config(recursion_limit=_RECURSION_LIMIT)
+
+                logger.info(
+                    "PSAP agent initialized successfully with PostgreSQL checkpoint and store"
+                )
+                yield agent_redhat
