@@ -2,6 +2,7 @@
 
 This module provides the core agent functionality for the PSAP agent,
 including initialization, configuration, and agent creation utilities.
+Integrates reflection (Tier 2) and memory (Tier 3) when enabled.
 """
 
 from contextlib import asynccontextmanager
@@ -12,15 +13,33 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.prebuilt import create_react_agent
+from langgraph.store.postgres import AsyncPostgresStore
 
 from psap_agent.src.core.cache_manager import get_cache_manager
 from psap_agent.src.core.exceptions.exceptions import AppException, AppExceptionCode
+from psap_agent.src.core.memory import MemoryManager
 from psap_agent.src.core.prompt import get_system_prompt
 from psap_agent.src.core.storage import get_global_checkpoint
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
+# Each LangGraph "step" is one node invocation (LLM call or tool execution).
+# A single tool-use round-trip = 2 steps (LLM decides + tool runs).
+# 50 steps ≈ 25 tool calls max, which is generous for any legitimate query.
+_RECURSION_LIMIT = 50
+
 logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
+
+# Global memory manager instance
+_memory_manager: Optional[MemoryManager] = None
+
+
+def get_memory_manager(store=None) -> MemoryManager:
+    """Get or create the global MemoryManager instance."""
+    global _memory_manager
+    if _memory_manager is None:
+        _memory_manager = MemoryManager(store=store)
+    return _memory_manager
 
 
 def _is_claude_model(model_name: str) -> bool:
@@ -41,7 +60,8 @@ def _create_claude_model(model_name: str) -> BaseChatModel:
         model_name=model_name,
         project=settings.ANTHROPIC_VERTEX_PROJECT_ID,
         location=settings.CLOUD_ML_REGION,
-        temperature=0.3,
+        temperature=0.0,
+        max_tokens=16384,
     )
 
 
@@ -121,13 +141,15 @@ async def get_psap_agent(
             model = ChatGoogleGenerativeAI(
                 model=effective_model,
                 temperature=0.3,
+                max_output_tokens=16384,
                 model_kwargs={"cached_content": cache_name} if cache_name else {}
             )
         except Exception as e:
             logger.warning(f"Failed to initialize caching: {e}. Falling back to non-cached mode.")
             model = ChatGoogleGenerativeAI(
                 model=effective_model,
-                temperature=0.3
+                temperature=0.3,
+                max_output_tokens=16384,
             )
     else:
         if tools:
@@ -136,58 +158,62 @@ async def get_psap_agent(
             logger.info("Caching disabled by configuration")
         model = ChatGoogleGenerativeAI(
             model=effective_model,
-            temperature=0.3
+            temperature=0.3,
+            max_output_tokens=16384,
         )
 
     if not enable_checkpointing:
-        # Create agent without checkpointing for streaming-only operations
         logger.info(
             "Creating agent without checkpointing for streaming-only operations"
         )
+        get_memory_manager(store=None)
         agent_redhat = create_react_agent(
             model=model,
             prompt=get_system_prompt(),
             tools=tools,
-            # No checkpointer or store - streaming only, no persistence
-        )
+        ).with_config(recursion_limit=_RECURSION_LIMIT)
         logger.info("PSAP agent initialized successfully without checkpointing")
         yield agent_redhat
     elif settings.USE_INMEMORY_SAVER:
-        # Use single global checkpoint for local development
         logger.info("Using single global checkpoint for local development")
-        # Use single checkpoint instance for both checkpointer and store
+        from langgraph.store.memory import InMemoryStore
         checkpoint = get_global_checkpoint()
+        skill_store = InMemoryStore()
+        get_memory_manager(store=skill_store)
         agent_redhat = create_react_agent(
             model=model,
             prompt=get_system_prompt(),
             tools=tools,
             checkpointer=checkpoint,
-            store=checkpoint,
-        )
+            store=skill_store,
+        ).with_config(recursion_limit=_RECURSION_LIMIT)
         logger.info(
             "PSAP agent initialized successfully with single global checkpoint"
         )
         yield agent_redhat
     else:
-        # Use PostgreSQL storage for production
         logger.info("Using PostgreSQL checkpoint for production")
         async with AsyncPostgresSaver.from_conn_string(
             settings.database_uri
         ) as checkpoint:
-            # Setup database connection once
             if hasattr(checkpoint, "setup"):
                 await checkpoint.setup()
 
-            # Create the agent with single checkpoint instance for both checkpointer and store
-            agent_redhat = create_react_agent(
-                model=model,
-                prompt=get_system_prompt(),
-                tools=tools,
-                checkpointer=checkpoint,
-                store=checkpoint,
-            )
+            async with AsyncPostgresStore.from_conn_string(
+                settings.database_uri
+            ) as skill_store:
+                await skill_store.setup()
 
-            logger.info(
-                "PSAP agent initialized successfully with PostgreSQL checkpoint"
-            )
-            yield agent_redhat
+                get_memory_manager(store=skill_store)
+                agent_redhat = create_react_agent(
+                    model=model,
+                    prompt=get_system_prompt(),
+                    tools=tools,
+                    checkpointer=checkpoint,
+                    store=skill_store,
+                ).with_config(recursion_limit=_RECURSION_LIMIT)
+
+                logger.info(
+                    "PSAP agent initialized successfully with PostgreSQL checkpoint and store"
+                )
+                yield agent_redhat

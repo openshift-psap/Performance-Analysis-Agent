@@ -50,6 +50,9 @@ dependencies = [
     "langfuse==3.13.0",
     "structlog==25.5.0",
 
+    # Self-improvement: reflection, memory, evaluation
+    "mem0ai==2.0.2",
+
     # Data processing
     "pandas==2.3.3",
     "numpy==2.4.2",

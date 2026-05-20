@@ -44,6 +44,8 @@ KNOWN_MODELS: Dict[str, Dict[str, str]] = {
 }
 
 # Aliases map commonly-used names to the canonical S3/local folder names.
+# Only needed for names where substring matching wouldn't work (e.g., "deepseek" → "deepseek-r1").
+# New models uploaded to S3 are discovered automatically via substring matching in _match_all_models.
 _MODEL_ALIASES: Dict[str, str] = {
     "deepseek": "deepseek-r1",
     "deepseek-r1-0528": "deepseek-r1",
@@ -129,8 +131,8 @@ def _parse_rank_from_filename(filename: str) -> Optional[int]:
       rank7.json                                     -> rank 7
       trace_1050_1060_0_20260225_002159.json         -> rank 0  (3rd underscore-delimited segment)
 
-    The fallback pattern matches ``trace_<start>_<end>_<rank>_<date>_<time>.json``
-    which is the format produced by the RHAIIS profiling pipeline.
+    Returns None when no rank can be extracted — the caller should assign an
+    auto-incrementing rank for such files.
     """
     match = re.search(r"rank(\d+)", filename)
     if match:
@@ -217,7 +219,8 @@ def _match_all_models(user_model: Optional[str], available_models: List[str]) ->
     # Alias: resolve bare model aliases, then collect all matching keys
     alias = _MODEL_ALIASES.get(lower)
     if alias:
-        matches = [k for k in available_models if _bare_model(k) == alias]
+        alias_lower = alias.lower()
+        matches = [k for k in available_models if _bare_model(k).lower() == alias_lower]
         if matches:
             return matches
 
@@ -253,7 +256,12 @@ def _get_display_name(model_key: str) -> str:
 
 
 def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
-    """Build a model info dict from known metadata + discovered data."""
+    """Build a model info dict from known metadata + discovered data.
+
+    ``num_ranks`` is the number of rank trace files found in storage,
+    NOT necessarily the tensor-parallelism used during the benchmark.
+    Only rank-0 traces may be stored even for multi-GPU (TP>1) runs.
+    """
     bare = _bare_model(model_key)
     accel = _key_accelerator(model_key)
     known = KNOWN_MODELS.get(bare, {})
@@ -261,8 +269,12 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
         "display_name": known.get("display_name", bare),
         "model_id": known.get("model_id", bare),
         "gpus": accel,
-        "tensor_parallelism": num_ranks,
-        "num_ranks": num_ranks,
+        "ranks_stored": num_ranks,
+        "note": (
+            "ranks_stored is the number of trace files available, not the "
+            "tensor-parallelism used in the benchmark. Only rank-0 traces "
+            "may be stored for multi-GPU runs."
+        ),
     }
 
 
@@ -306,8 +318,15 @@ def _discover_profiles_s3() -> Optional[Dict]:
         return [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
 
     def _scan_version_traces(version_prefix: str, composite_key: str) -> None:
-        """List trace files under a version prefix and add them to the index."""
+        """List trace files under a version prefix and add them to the index.
+
+        Any .json file in the version directory is treated as a profiler trace.
+        If the filename encodes a rank (e.g. rank0, rank3), that rank is used.
+        Otherwise, an auto-incrementing rank is assigned so that files with any
+        naming convention are indexed.
+        """
         paginator_token = None
+        auto_rank = 0
         while True:
             kwargs: Dict[str, Any] = {"Bucket": bucket, "Prefix": version_prefix}
             if paginator_token:
@@ -319,13 +338,21 @@ def _discover_profiles_s3() -> Optional[Dict]:
                 filename = key.split("/")[-1]
                 if not filename.endswith(".json"):
                     continue
+
                 rank = _parse_rank_from_filename(filename)
                 if rank is None:
-                    continue
+                    rank = auto_rank
+                    auto_rank += 1
 
-                index.setdefault(composite_key, {}).setdefault(
+                version_dict = index.setdefault(composite_key, {}).setdefault(
                     version_prefix.rstrip("/").split("/")[-1], {}
-                )[rank] = {
+                )
+                # Avoid collisions: if rank already taken, bump auto_rank
+                while rank in version_dict:
+                    rank = auto_rank
+                    auto_rank += 1
+
+                version_dict[rank] = {
                     "source": "s3",
                     "key": key,
                     "filename": filename,
@@ -377,8 +404,8 @@ def _discover_profiles_s3() -> Optional[Dict]:
 def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
     """Discover available profiles from the local filesystem.
 
-    Scans ``base_dir/<accelerator>/<model>/<version>/*.json`` for files
-    containing ``rank`` in the filename.
+    Scans ``base_dir/<accelerator>/<model>/<version>/*.json`` and indexes
+    all JSON files as profiler traces.
 
     Returns::
 
@@ -406,17 +433,24 @@ def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
                 if not version_dir.is_dir() or version_dir.name.startswith("."):
                     continue
                 version_name = version_dir.name
+                auto_rank = 0
 
                 for f in sorted(version_dir.rglob("*.json")):
                     if not f.is_file():
                         continue
                     rank = _parse_rank_from_filename(f.name)
                     if rank is None:
-                        continue
+                        rank = auto_rank
+                        auto_rank += 1
 
-                    index.setdefault(composite_key, {}).setdefault(
+                    version_dict = index.setdefault(composite_key, {}).setdefault(
                         version_name, {}
-                    )[rank] = {
+                    )
+                    while rank in version_dict:
+                        rank = auto_rank
+                        auto_rank += 1
+
+                    version_dict[rank] = {
                         "source": "local",
                         "path": f,
                         "filename": f.name,
@@ -1359,7 +1393,8 @@ async def analyze_pytorch_profile(
             "profile_info": {
                 "model": model_info["model_id"],
                 "gpus": model_info["gpus"],
-                "tensor_parallelism": model_info["tensor_parallelism"],
+                "ranks_stored": model_info["ranks_stored"],
+                "note": model_info["note"],
             },
         }
 
@@ -1604,10 +1639,6 @@ async def compare_pytorch_profiles(
                 "scope": scope1 if scope1 == scope2 else f"{mv1}: {scope1}, {mv2}: {scope2}",
                 "category_filter": category or "all",
             },
-            "regressions": regressions,
-            "improvements": improvements,
-            "new_kernels": new_kernels,
-            "removed_kernels": removed_kernels,
             "summary": {
                 "total_time1_us": total_time1,
                 "total_time1_human": _format_duration(total_time1),
@@ -1625,12 +1656,17 @@ async def compare_pytorch_profiles(
                 "regression_impact_human": _format_duration(regression_impact),
                 "improvement_impact_us": improvement_impact,
                 "improvement_impact_human": _format_duration(improvement_impact),
+                "note": "Use these pre-computed statistics. Do NOT re-count or re-calculate from the arrays below.",
             },
             "message": (
                 f"{display_name}: {mv2} is {abs(total_diff_pct):.1f}% "
                 f"{'slower' if total_diff > 0 else 'faster'} than {mv1}. "
                 f"Found {len(regressions)} regressions and {len(improvements)} improvements."
             ),
+            "regressions": regressions,
+            "improvements": improvements,
+            "new_kernels": new_kernels,
+            "removed_kernels": removed_kernels,
             "pipeline_breakdown": pipeline_breakdown,
             "event_counts": {
                 "v1": event_counts_v1,
@@ -1639,7 +1675,8 @@ async def compare_pytorch_profiles(
             "profile_info": {
                 "model": model_info["model_id"],
                 "gpus": model_info["gpus"],
-                "tensor_parallelism": model_info["tensor_parallelism"],
+                "ranks_stored": model_info["ranks_stored"],
+                "note": model_info["note"],
             },
             "next_steps": [
                 "Use map_kernel_to_vllm_code to find source files for top regressions",
@@ -2106,7 +2143,8 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                 "profiles": profiles_list,
                 "profile_info": {
                     "gpus": model_info["gpus"],
-                    "tensor_parallelism": model_info["tensor_parallelism"],
+                    "ranks_stored": model_info["ranks_stored"],
+                    "note": model_info["note"],
                 },
             }
 

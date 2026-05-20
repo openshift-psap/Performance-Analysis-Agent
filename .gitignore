@@ -9,5 +9,6 @@ sa-key.json
 # Local-only folders
 performance-dashboard/
 openshift-manifests-haumesh/
-docs/
+docs-nogit/
+docs/images/generate_workflow.py
 ai_auto_perf_analysis/

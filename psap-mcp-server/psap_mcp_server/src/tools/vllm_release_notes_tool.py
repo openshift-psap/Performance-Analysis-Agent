@@ -338,9 +338,9 @@ async def get_vllm_release_notes(
                 
                 # Include full body if not filtering for performance only
                 if not performance_only:
-                    # Truncate very long bodies
-                    release_info["body"] = body[:10000] if len(body) > 10000 else body
-                    release_info["body_truncated"] = len(body) > 10000
+                    _BODY_CHAR_LIMIT = 40000
+                    release_info["body"] = body[:_BODY_CHAR_LIMIT] if len(body) > _BODY_CHAR_LIMIT else body
+                    release_info["body_truncated"] = len(body) > _BODY_CHAR_LIMIT
                 
                 processed_releases.append(release_info)
             

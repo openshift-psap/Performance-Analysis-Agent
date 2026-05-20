@@ -321,21 +321,24 @@ async def query_grafana_metrics(
                     if data.get("status") == "success" and data.get("data", {}).get("result"):
                         # Analyze GPU activity from utilization metric
                         gpu_activity = {}
-                        for series in data["data"]["result"]:
+                        for idx, series in enumerate(data["data"]["result"]):
                             labels = series.get("metric", {})
                             values = series.get("values", [])
-                            # GPU ID label varies by vendor: NVIDIA uses "gpu", AMD uses "gpu_id"
                             gpu_id = labels.get("gpu") or labels.get("GPU") or labels.get("gpu_id") or labels.get("gpu_index")
-                            
+
                             if gpu_id is not None:
                                 try:
-                                    gpu_id_int = int(gpu_id)
-                                    # Count non-zero utilization points (actual activity)
-                                    activity_score = sum(1 for _, value in values if float(value) > 0)
-                                    gpu_activity[gpu_id_int] = activity_score
+                                    gpu_id_key = int(gpu_id)
                                 except (ValueError, TypeError):
-                                    pass
-                        
+                                    gpu_id_key = idx
+                            else:
+                                # DCGM often uses UUID instead of a numeric gpu label.
+                                # Fall back to series index so each GPU gets a unique key.
+                                gpu_id_key = idx
+
+                            activity_score = sum(1 for _, value in values if float(value) > 0)
+                            gpu_activity[gpu_id_key] = activity_score
+
                         # Sort by activity and take top TP GPUs
                         if gpu_activity:
                             sorted_gpus = sorted(gpu_activity.items(), key=lambda x: x[1], reverse=True)
@@ -407,31 +410,36 @@ async def query_grafana_metrics(
                         
                         # STEP 1: Collect all GPU data and analyze activity
                         gpu_data = {}  # gpu_id -> list of data points
-                        
-                        for series in data["data"]["result"]:
+
+                        for idx, series in enumerate(data["data"]["result"]):
                             labels = series.get("metric", {})
                             values = series.get("values", [])
-                            
-                            # Extract GPU ID - label varies by vendor: NVIDIA uses "gpu", AMD uses "gpu_id"
+
+                            # Extract GPU ID - label varies by vendor
                             gpu_id = labels.get("gpu") or labels.get("GPU") or labels.get("gpu_id") or labels.get("gpu_index")
-                            
-                            if is_dcgm_metric and gpu_id is not None:
-                                try:
-                                    gpu_id_int = int(gpu_id)
-                                    if gpu_id_int not in gpu_data:
-                                        gpu_data[gpu_id_int] = []
-                                    
-                                    # Store all data points for this GPU
-                                    for timestamp, value in values:
-                                        gpu_data[gpu_id_int].append({
-                                            "timestamp": timestamp,
-                                            "value": float(value),
-                                            "labels": labels,
-                                        })
-                                except (ValueError, TypeError):
-                                    pass
+
+                            if is_dcgm_metric:
+                                if gpu_id is not None:
+                                    try:
+                                        gpu_id_key = int(gpu_id)
+                                    except (ValueError, TypeError):
+                                        gpu_id_key = idx
+                                else:
+                                    # DCGM often uses UUID instead of a numeric
+                                    # gpu label; fall back to series index.
+                                    gpu_id_key = idx
+
+                                if gpu_id_key not in gpu_data:
+                                    gpu_data[gpu_id_key] = []
+
+                                for timestamp, value in values:
+                                    gpu_data[gpu_id_key].append({
+                                        "timestamp": timestamp,
+                                        "value": float(value),
+                                        "labels": labels,
+                                    })
                             else:
-                                # Non-DCGM metrics or no GPU ID - include all
+                                # Non-DCGM metrics - include all
                                 if "all" not in gpu_data:
                                     gpu_data["all"] = []
                                 for timestamp, value in values:
@@ -529,9 +537,9 @@ async def query_grafana_metrics(
                             summary = {"message": "No data points found"}
                         
                         results[metric_name] = {
-                            "data": metric_data[:100],  # Limit to 100 points for display
-                            "total_points": len(metric_data),
                             "summary": summary,
+                            "total_points": len(metric_data),
+                            "sample_points": metric_data[:5],
                         }
                     else:
                         errors.append(f"{metric_name}: No data found")
