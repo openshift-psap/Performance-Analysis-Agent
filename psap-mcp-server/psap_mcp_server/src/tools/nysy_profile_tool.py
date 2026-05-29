@@ -283,7 +283,10 @@ def _discover_nysy_profiles_s3() -> Optional[Dict]:
         return [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
 
     def _scan_version_traces(version_prefix: str, composite_key: str) -> None:
-        """List .nsys-rep files under version prefix."""
+        """List .nsys-rep and .json files under version prefix.
+
+        Prefers .json files (pre-exported) over binary .nsys-rep files.
+        """
         paginator_token = None
         auto_rank = 0
         while True:
@@ -295,7 +298,12 @@ def _discover_nysy_profiles_s3() -> Optional[Dict]:
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
                 filename = key.split("/")[-1]
-                if not filename.endswith(".nsys-rep"):
+                # Accept both .nsys-rep (binary) and .json (pre-exported)
+                if not (filename.endswith(".nsys-rep") or filename.endswith(".json")):
+                    continue
+
+                # Skip placeholder files
+                if filename == ".placeholder":
                     continue
 
                 rank = _parse_rank_from_filename(filename)
@@ -306,7 +314,16 @@ def _discover_nysy_profiles_s3() -> Optional[Dict]:
                 version_dict = index.setdefault(composite_key, {}).setdefault(
                     version_prefix.rstrip("/").split("/")[-1], {}
                 )
-                while rank in version_dict:
+
+                # Prefer .json over .nsys-rep for the same rank
+                existing = version_dict.get(rank)
+                if existing and existing["filename"].endswith(".json"):
+                    # Already have JSON for this rank, skip binary
+                    if filename.endswith(".nsys-rep"):
+                        continue
+
+                while rank in version_dict and filename.endswith(".nsys-rep"):
+                    # Binary file conflicts with another entry, try next rank
                     rank = auto_rank
                     auto_rank += 1
 
@@ -554,7 +571,10 @@ def _extract_nysy_stats(events: List[Any]) -> Dict[str, Dict]:
 # ===================================================================== #
 
 def _load_nysy_trace_from_s3(s3_key: str) -> Optional[dict]:
-    """Download and parse NYSY trace from S3."""
+    """Download and parse NYSY trace from S3.
+
+    Supports both binary .nsys-rep files (via nsys export) and pre-exported JSON files.
+    """
     bucket = settings.S3_BUCKET
     if not bucket:
         return None
@@ -565,11 +585,23 @@ def _load_nysy_trace_from_s3(s3_key: str) -> Optional[dict]:
         s3 = get_s3_client()
         logger.info(f"Downloading NYSY from S3: s3://{bucket}/{s3_key}")
 
-        # Download to temp file
+        response = s3.get_object(Bucket=bucket, Key=s3_key)
+        content = response["Body"].read()
+
+        # Check if it's a JSON file (pre-exported)
+        if s3_key.endswith('.json'):
+            try:
+                data = json.loads(content.decode('utf-8'))
+                logger.info(f"Loaded pre-exported NYSY JSON from S3: {s3_key}")
+                return data
+            except Exception as exc:
+                logger.error(f"Failed to parse NYSY JSON from S3: {exc}")
+                return None
+
+        # Otherwise, treat as binary .nsys-rep file
         with tempfile.NamedTemporaryFile(mode='wb', suffix='.nsys-rep', delete=False) as tmp:
             tmp_path = tmp.name
-            response = s3.get_object(Bucket=bucket, Key=s3_key)
-            tmp.write(response["Body"].read())
+            tmp.write(content)
 
         # Export to JSON
         data = _export_nsys_to_json(tmp_path)
