@@ -380,6 +380,32 @@ class Settings(BaseSettings):
         },
     )
 
+    # NYSY (NVIDIA Nsight Systems) Profile Configuration
+    NYSY_PROFILE_S3_PREFIX: str = Field(
+        default="profiles/nsys",
+        json_schema_extra={
+            "env": "NYSY_PROFILE_S3_PREFIX",
+            "description": "S3 key prefix where NYSY profile traces are stored",
+            "example": "profiles/nsys",
+        },
+    )
+    NYSY_PROFILE_BASE: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "env": "NYSY_PROFILE_BASE",
+            "description": "Local fallback directory for NYSY profiles",
+            "example": "/app/nysy-profiles",
+        },
+    )
+    ENABLE_NYSY_PROFILER: bool = Field(
+        default=True,
+        json_schema_extra={
+            "env": "ENABLE_NYSY_PROFILER",
+            "description": "Enable NYSY profiler support",
+            "example": True,
+        },
+    )
+
     # S3 configuration for vLLM log files
     LOG_S3_BUCKET: str = Field(
         default="psap-model-furnace",

@@ -58,6 +58,11 @@ from psap_mcp_server.src.tools.pytorch_profile_tool import (
     analyze_trace_structure,
     compare_trace_structures,
 )
+from psap_mcp_server.src.tools.nysy_profile_tool import (
+    analyze_nysy_profile,
+    compare_nysy_profiles,
+    analyze_nysy_performance_insights,
+)
 from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     map_kernel_to_vllm_code,
     get_kernel_categories,
@@ -167,6 +172,11 @@ class PSAPMCPServer:
         # Register trace structure analysis tools (block segmentation, median block, streams, overhead)
         self.mcp.tool()(analyze_trace_structure)
         self.mcp.tool()(compare_trace_structures)
+        # Register NYSY profile analysis tools (with feature flag)
+        if getattr(settings, "ENABLE_NYSY_PROFILER", True):
+            self.mcp.tool()(analyze_nysy_profile)
+            self.mcp.tool()(compare_nysy_profiles)
+            self.mcp.tool()(analyze_nysy_performance_insights)
         # Register kernel-to-code mapping tools
         self.mcp.tool()(map_kernel_to_vllm_code)
         self.mcp.tool()(get_kernel_categories)
