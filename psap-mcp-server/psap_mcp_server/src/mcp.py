@@ -72,6 +72,11 @@ from psap_mcp_server.src.tools.vllm_log_tool import (
 from psap_mcp_server.src.tools.vllm_performance_triage_tool import (
     get_vllm_performance_triage_guide,
 )
+from psap_mcp_server.src.tools.key_facts_tool import (
+    search_key_facts,
+    get_version_summary,
+    get_model_performance_history,
+)
 from psap_mcp_server.utils.pylogger import (
     force_reconfigure_all_loggers,
     get_python_logger,
@@ -139,6 +144,9 @@ class PSAPMCPServer:
         - fetch_vllm_logs: Fetch and parse vLLM server logs for a specific version
         - compare_vllm_logs: Compare vLLM server logs between two versions (auto-enriches with ALL pinned dependency versions from requirements/cuda.txt)
         - get_vllm_performance_triage_guide: Retrieve vLLM performance triage guidance (5-step diagnostic workflow)
+        - search_key_facts: Search config-level findings from prior analysis runs (read-only memory layer access)
+        - get_version_summary: Get the version-level summary and all model summaries for a version
+        - get_model_performance_history: Track model performance trends across recent versions
         """
         # Register performance analysis tools
         self.mcp.tool()(query_performance_metrics)
@@ -179,3 +187,7 @@ class PSAPMCPServer:
         self.mcp.tool()(compare_vllm_logs)
         # Register vLLM performance triage guide
         self.mcp.tool()(get_vllm_performance_triage_guide)
+        # Register key facts memory layer tools (read-only for interactive UI)
+        self.mcp.tool()(search_key_facts)
+        self.mcp.tool()(get_version_summary)
+        self.mcp.tool()(get_model_performance_history)

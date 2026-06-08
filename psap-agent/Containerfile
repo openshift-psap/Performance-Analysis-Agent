@@ -10,6 +10,7 @@ RUN pip install uv
 RUN uv venv
 RUN source /app/.venv/bin/activate
 RUN uv pip install -r pyproject.toml
+RUN mkdir -p /app/red_flags && chmod 777 /app/red_flags
 USER default
 
 

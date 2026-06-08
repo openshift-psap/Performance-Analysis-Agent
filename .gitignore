@@ -12,3 +12,9 @@ openshift-manifests-haumesh/
 docs-nogit/
 docs/images/generate_workflow.py
 ai_auto_perf_analysis/
+archive/
+mem0_integration/
+prompt_testing/
+
+# Database files
+*.db

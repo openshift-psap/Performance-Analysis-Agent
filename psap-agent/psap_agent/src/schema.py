@@ -7,7 +7,7 @@ for the PSAP agent service.
 
 from typing import Any, Literal, NotRequired
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import TypedDict
 
 
@@ -170,3 +170,74 @@ class ChatHistoryResponse(BaseModel):
     """
 
     messages: list[ChatMessage]
+
+
+# ---------------------------------------------------------------------------
+# /v1/analyze — Analysis Pipeline Models
+# ---------------------------------------------------------------------------
+
+
+class AnalyzeConfigInput(BaseModel):
+    """Configuration input for a specific benchmark run."""
+
+    model: str = Field(description="Model name, e.g. 'nova-ai/Helios-34B'.")
+    accelerator: str = Field(description="Accelerator type, e.g. 'Accel-X900'.")
+    tp: int = Field(description="Tensor-parallel degree.")
+    prompt_toks: int = Field(description="Prompt token count for the profile.")
+    output_toks: int = Field(description="Output token count for the profile.")
+    concurrency: int | None = Field(default=None, description="Concurrency level.")
+
+
+class AnalyzeRequest(BaseModel):
+    """Request body for POST /v1/analyze."""
+
+    analysis_level: Literal["config", "model", "version", "consolidation"]
+    run_id: str
+    rhaiis_version: str
+    baseline_version: str
+    mode: Literal["shallow", "deep"] | None = None
+    regression_detected: bool | None = None
+    config: AnalyzeConfigInput | None = None
+
+    @model_validator(mode="after")
+    def _validate_fields_per_level(self) -> "AnalyzeRequest":
+        level = self.analysis_level
+
+        if level == "config":
+            if self.mode is None:
+                raise ValueError("'mode' is required for config-level analysis")
+            if self.regression_detected is None:
+                raise ValueError(
+                    "'regression_detected' is required for config-level analysis"
+                )
+            if self.config is None:
+                raise ValueError("'config' is required for config-level analysis")
+
+        if level == "model":
+            if self.config is None or not self.config.model:
+                raise ValueError(
+                    "'config.model' is required for model-level analysis"
+                )
+
+        return self
+
+
+class AnalyzeResponse(BaseModel):
+    """Immediate response after submitting an analysis job."""
+
+    job_id: str
+    status: Literal["accepted"] = "accepted"
+    analysis_level: str
+
+
+class AnalyzeStatusResponse(BaseModel):
+    """Response from polling an analysis job's status."""
+
+    job_id: str
+    status: Literal["accepted", "running", "completed", "failed"]
+    analysis_level: str
+    report_preview: str | None = None
+    facts_stored: int | None = None
+    red_flags_added: int | None = None
+    error: str | None = None
+    duration_seconds: float | None = None

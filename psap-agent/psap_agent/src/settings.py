@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = Field(
         default="gemini-3-flash-preview", json_schema_extra={"env": "GEMINI_MODEL"}
     )
+    FACT_MODEL: str = Field(
+        default="gemini-2.0-flash",
+        json_schema_extra={"env": "FACT_MODEL"},
+    )
 
     # Anthropic Vertex AI Configuration (for Claude models)
     ANTHROPIC_VERTEX_PROJECT_ID: Optional[str] = Field(
