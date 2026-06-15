@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 
 from psap_agent.src.core.agent import get_psap_agent
 from psap_agent.src.core.exceptions.exceptions import AppException, AppExceptionCode
+from psap_agent.src.routes.analyze import router as analyze_router
 from psap_agent.src.routes.feedback import router as feedback_router
 from psap_agent.src.routes.health import router as health_router
 from psap_agent.src.routes.history import router as history_router
@@ -73,6 +74,7 @@ app.include_router(stream_router)
 app.include_router(feedback_router)
 app.include_router(history_router)
 app.include_router(threads_router)
+app.include_router(analyze_router)
 
 
 @app.exception_handler(Exception)

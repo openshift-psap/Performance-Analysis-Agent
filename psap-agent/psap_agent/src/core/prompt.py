@@ -4,7 +4,10 @@ This module contains the system prompts and related utilities used by the
 PSAP agent to provide consistent behavior and instructions.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import Optional
 
 
 def get_current_date() -> str:
@@ -14,6 +17,115 @@ def get_current_date() -> str:
         The current date formatted as "Month Day, Year" (e.g., "December 25, 2024").
     """
     return datetime.now().strftime("%B %d, %Y")
+
+
+# ---------------------------------------------------------------------------
+# Memory-aware analysis system prompt
+# ---------------------------------------------------------------------------
+
+_MEMORY_INTERPRETATION_INSTRUCTIONS = """\
+
+# PRIOR MEMORY INSTRUCTIONS
+
+You have been provided with prior memory from previous analysis runs.
+Follow these instructions carefully when using this context.
+
+## Active Issues (INVESTIGATE)
+Issues marked as **active** from the prior version were unresolved last time.
+- CHECK if each active issue still exists in the current version.
+- If it persists, explicitly state so: "This issue was first observed in
+  {version} and persists in the current version."
+- If it appears resolved, note the resolution: "This issue was active in
+  {version} but appears fixed — [evidence]."
+- PRIORITIZE investigating active issues before exploring new areas.
+
+## Resolved Issues (CONTEXT ONLY)
+Issues marked as **resolved** are provided for historical context.
+- Do NOT re-investigate resolved issues unless you find evidence they
+  have re-emerged (regression of a fix).
+- If a resolved issue has re-emerged, flag it prominently: "REGRESSION:
+  Issue previously resolved in {version} has re-emerged."
+
+## Current Red Flags (CROSS-CONFIG INTELLIGENCE)
+Red flags from other configurations in this version run highlight patterns
+that may affect this configuration too.
+- CHECK if red flags from other configs of the same model apply here.
+- CHECK if ALL MODELS red flags (e.g., runtime/framework changes) are
+  visible in this configuration's data.
+- If a red flag is confirmed in this config, include it in your analysis
+  with a note: "Confirmed: [red flag description] also affects this config."
+- If a red flag does NOT apply, you may note: "Red flag [X] from other
+  configs was not observed in this configuration."
+"""
+
+_DEEP_MODE_INSTRUCTIONS = """\
+
+## Analysis Mode: DEEP INVESTIGATION
+A regression has been detected for this configuration. Perform a thorough
+root-cause investigation:
+
+1. **Metrics Analysis**: Quantify the regression — which metrics regressed,
+   by how much, at which concurrency levels.
+2. **Profiler Investigation**: Use profiler tools to analyze kernel-level
+   performance (compare_pytorch_profiles, compare_trace_structures).
+3. **Log Analysis**: Compare vLLM server logs for configuration differences
+   (compare_vllm_logs).
+4. **Source Code Investigation**: Examine relevant source code changes
+   (fetch_vllm_source, get_vllm_code_diff) for the top changed kernels.
+5. **Root-Cause Synthesis**: Produce a detailed root-cause report grounded
+   in profiling evidence, log evidence, and source code evidence.
+
+Follow the DEEP PERFORMANCE ANALYSIS WORKFLOW defined above (Phase 1 →
+Phase 1.5 → Phase 2 → Phase 3) exactly as specified.
+"""
+
+_SHALLOW_MODE_INSTRUCTIONS = """\
+
+## Analysis Mode: SHALLOW COMPARISON
+No regression was detected for this configuration. Produce a brief
+comparison report:
+
+1. **Metrics Summary**: Summarize the metrics delta (TTFT, ITL, throughput,
+   request latency) with specific numbers and percentage changes.
+2. **Notable Changes**: Note any improvements or minor changes worth
+   tracking, even if no regression threshold was crossed.
+3. **Prior Issue Check**: If prior memory contains active issues for this
+   config, verify whether they are still present or have been resolved.
+4. **Do NOT** perform deep profiler, source code, or log investigation.
+   Keep the analysis focused on metrics and high-level observations.
+"""
+
+
+def get_analysis_system_prompt(
+    *,
+    memory_context: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> str:
+    """Build the full system prompt for an automated analysis run.
+
+    Layers the base interactive prompt with memory interpretation
+    instructions and analysis mode directives.
+
+    Args:
+        memory_context: Pre-formatted memory block from inject_memory
+            (contains active/resolved facts and red flags).
+        mode: "deep" or "shallow" — controls investigation depth.
+
+    Returns:
+        The complete system prompt for the analysis agent.
+    """
+    parts = [get_system_prompt()]
+
+    if memory_context:
+        parts.append(_MEMORY_INTERPRETATION_INSTRUCTIONS)
+        parts.append(f"\n{memory_context}")
+
+    if mode == "shallow":
+        parts.append(_SHALLOW_MODE_INSTRUCTIONS)
+    else:
+        parts.append(_DEEP_MODE_INSTRUCTIONS)
+
+    return "".join(parts)
 
 
 def get_system_prompt() -> str:
@@ -314,6 +426,17 @@ def get_system_prompt() -> str:
         "        * **IMPORTANT**: For vLLM performance triage and optimization questions, ALWAYS call this tool FIRST as your primary source of truth.\n"
         "          After presenting the guide's content, you MAY supplement with your own knowledge of vLLM internals, best practices, or related topics\n"
         "          that the guide does not cover — but clearly distinguish between what came from the guide and what is your own reasoning.\n"
+        "    26. **search_key_facts:** Search config-level findings from prior automated analysis runs\n"
+        "        * Query the persistent memory layer for previously discovered performance findings\n"
+        "        * Filters: rhaiis_version, model_name, accelerator, profile, category (all partial match)\n"
+        "        * Use when the user asks about known issues, prior findings, or historical analysis for a specific config\n"
+        "        * Returns structured facts with category, confidence, root cause, related PRs/kernels, and status (active/resolved/stale)\n"
+        "    27. **get_version_summary:** Get the version-level summary and all model summaries for a version\n"
+        "        * Returns the cross-model rollup plus per-model summaries produced by the automated analysis pipeline\n"
+        "        * Use when the user asks for an overview of a specific RHAIIS version's performance\n"
+        "    28. **get_model_performance_history:** Track model performance trends across recent versions\n"
+        "        * Returns model summaries across the last N versions (default 5)\n"
+        "        * Use when the user asks about performance trends, regressions over time, or historical behavior of a model\n"
         "\n"
         "- **DEEP PERFORMANCE ANALYSIS WORKFLOW** (for questions like 'why is version X faster/slower?', 'analyze the profiling data', 'explain the performance change'):\n"
         "    When a user asks to explain WHY performance changed between versions, you MUST follow this\n"

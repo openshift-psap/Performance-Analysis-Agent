@@ -43,6 +43,7 @@ dependencies = [
 
     # Database
     "psycopg[binary,pool]==3.3.2",
+    "asyncpg",
     "motor==3.7.1",
     "pymongo==4.16.0",
 
