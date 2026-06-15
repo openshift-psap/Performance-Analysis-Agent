@@ -81,6 +81,22 @@ spec:
           value: "/var/secrets/gcp/sa-key.json"
         - name: MEM0_QDRANT_PATH
           value: "/app/qdrant_data"
+        - name: ENABLE_LLM_JUDGE
+          value: "true"
+        - name: LLM_JUDGE_MODEL
+          value: "gemini-3-flash-preview"
+        - name: ENABLE_REFLECTION
+          value: "true"
+        - name: MAX_REFLECTION_ITERATIONS
+          value: "2"
+        - name: AGENT_RESPONSE_TIMEOUT_SECONDS
+          value: "600"
+        - name: ENABLE_MEM0
+          value: "true"
+        - name: ENABLE_SKILL_DOCUMENTS
+          value: "true"
+        - name: SKILL_GENERATION_THRESHOLD
+          value: "5"
         volumeMounts:
         - name: gcp-vertex-sa
           mountPath: /var/secrets/gcp

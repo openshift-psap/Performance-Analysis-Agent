@@ -71,11 +71,20 @@ EVAL_CRITERIA = {
         ),
     },
     "completeness": {
-        "description": "Did the agent address all parts of the user's query?",
+        "description": "Did the agent address all parts of the user's query, using all relevant data from tool results?",
         "rubric": (
-            "Score 1.0: All parts of the question fully addressed. "
-            "Score 0.5: Most parts addressed, one aspect missing. "
-            "Score 0.0: Significant parts of the question unanswered."
+            "Score 1.0: All parts of the question fully addressed AND all relevant data "
+            "from tool results is reflected in the response. "
+            "Score 0.5: Most parts addressed, but the response OMITS data points that "
+            "the tools returned and that are relevant to the query. For example, if the "
+            "user asked for data at concurrency 1 and the tool returned it, but the "
+            "response says 'no data available' — that is an omission, score 0.5 or lower. "
+            "Score 0.0: Significant parts of the question unanswered or large amounts of "
+            "relevant tool data omitted/contradicted. "
+            "IMPORTANT: Compare the tool RESULTS against the response. If a tool returned "
+            "data that directly answers part of the user's query but the response ignores "
+            "or contradicts that data, this is incomplete — even if the response is otherwise "
+            "well-structured."
         ),
     },
 }
@@ -283,7 +292,8 @@ def _extract_conversation_parts(messages: list) -> tuple[str, str, str, str, str
     return user_query, agent_response, full_summary, calls_only, memory_context
 
 
-_MEMORY_GATE_THRESHOLD = 0.5
+_MEMORY_GATE_THRESHOLD = 1.0
+_MEMORY_GATE_CRITERIA = ("hallucination", "correctness", "completeness")
 
 
 async def evaluate_response(
@@ -347,16 +357,13 @@ def should_store_memory(scores: dict[str, float]) -> bool:
 
     Returns True (safe to store) when:
     - No scores available (eval disabled or failed -- don't block memory)
-    - Both hallucination and correctness pass the quality gate
+    - All gated criteria (hallucination, correctness, completeness) score 1.0
     """
     if not scores:
         return True
-    hallucination = scores.get("hallucination")
-    correctness = scores.get("correctness")
-    if hallucination is not None and hallucination <= _MEMORY_GATE_THRESHOLD:
-        logger.info(f"Memory gate: BLOCKED (hallucination={hallucination:.1f})")
-        return False
-    if correctness is not None and correctness <= _MEMORY_GATE_THRESHOLD:
-        logger.info(f"Memory gate: BLOCKED (correctness={correctness:.1f})")
-        return False
+    for criterion in _MEMORY_GATE_CRITERIA:
+        value = scores.get(criterion)
+        if value is not None and value < _MEMORY_GATE_THRESHOLD:
+            logger.info(f"Memory gate: BLOCKED ({criterion}={value:.1f})")
+            return False
     return True
