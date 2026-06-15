@@ -6,6 +6,8 @@ metadata:
   namespace: psap-ai-agent
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: psap-agent
@@ -83,8 +85,10 @@ spec:
           value: "/app/qdrant_data"
         - name: ENABLE_LLM_JUDGE
           value: "true"
+        - name: CRITIC_MODEL
+          value: "gemini-3.1-pro-preview"
         - name: LLM_JUDGE_MODEL
-          value: "gemini-3-flash-preview"
+          value: "gemini-3.5-flash"
         - name: ENABLE_REFLECTION
           value: "true"
         - name: MAX_REFLECTION_ITERATIONS

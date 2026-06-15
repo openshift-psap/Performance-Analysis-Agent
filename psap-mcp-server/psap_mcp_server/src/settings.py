@@ -372,11 +372,11 @@ class Settings(BaseSettings):
 
     # S3 prefix for PyTorch profile traces
     PROFILE_S3_PREFIX: str = Field(
-        default="profiles/rhaiis",
+        default="pytorch-profiles/rhaiis",
         json_schema_extra={
             "env": "PROFILE_S3_PREFIX",
-            "description": "S3 key prefix under S3_BUCKET where PyTorch profile traces are stored (model/version/trace_*.json)",
-            "example": "profiles/rhaiis",
+            "description": "S3 key prefix under S3_BUCKET where PyTorch profile traces are stored (<accel>/<model>/<tp>/<version>/<workload>/trace_*.json)",
+            "example": "pytorch-profiles/rhaiis",
         },
     )
 

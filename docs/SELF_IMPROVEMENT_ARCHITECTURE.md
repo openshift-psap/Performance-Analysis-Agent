@@ -561,7 +561,8 @@ All settings are in `psap_agent/src/settings.py` and can be overridden via envir
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `LLM_JUDGE_MODEL` | `gemini-3-flash-preview` | Model used for judge, critic, and skill extraction |
+| `CRITIC_MODEL` | `gemini-3.1-pro-preview` | Model used for the inline critic (blocks response delivery) |
+| `LLM_JUDGE_MODEL` | `gemini-3.5-flash` | Model used for post-hoc judge and skill extraction |
 | `MAX_REFLECTION_ITERATIONS` | `2` | Max revision loops before delivering response |
 | `AGENT_RESPONSE_TIMEOUT_SECONDS` | `600` | Timeout per agent pass (seconds) |
 | `MEM0_QDRANT_PATH` | `/app/qdrant_data` | Qdrant storage path inside container |

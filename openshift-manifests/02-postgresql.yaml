@@ -66,7 +66,7 @@ spec:
             command:
             - /bin/sh
             - -c
-            - pg_isready -U $POSTGRES_USER
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
@@ -74,7 +74,7 @@ spec:
             command:
             - /bin/sh
             - -c
-            - pg_isready -U $POSTGRES_USER
+            - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
           initialDelaySeconds: 5
           periodSeconds: 5
       volumes:

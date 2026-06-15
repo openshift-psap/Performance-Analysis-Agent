@@ -64,7 +64,7 @@ Environment variables (see `.env.example`):
 | `MCP_TRANSPORT_PROTOCOL` | `streamable-http` | Transport: `streamable-http`, `sse`, or `http` |
 | `PYTHON_LOG_LEVEL` | `INFO` | Logging level |
 | `S3_BUCKET` | -- | S3 bucket for benchmark data and profiler traces |
-| `PROFILE_S3_PREFIX` | `profiles/rhaiis` | S3 prefix for PyTorch profiler traces |
+| `PROFILE_S3_PREFIX` | `pytorch-profiles/rhaiis` | S3 prefix for PyTorch profiler traces |
 | `GRAFANA_URL` | -- | Grafana server URL |
 | `GRAFANA_TOKEN` | -- | Grafana API token |
 | `GITHUB_TOKEN` | -- | GitHub token (optional, for higher API rate limits) |
@@ -112,10 +112,10 @@ Performance metrics are loaded from S3 or a local `consolidated_dashboard.csv` f
 Chrome trace JSON files are expected at:
 
 ```
-s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/trace_rank<N>_*.json
+s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<tp>/<version>/<workload>/trace_rank<N>_*.json
 ```
 
-The server auto-discovers available accelerators, models, and versions by listing S3 prefixes.
+The server auto-discovers available accelerators, models, TP configs, versions, and workloads by listing S3 prefixes.
 
 ### vLLM Source and Releases (GitHub API)
 

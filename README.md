@@ -207,7 +207,13 @@ The manifests deploy 9 pods: PostgreSQL, ClickHouse, Redis, MinIO, Langfuse Work
 The PyTorch profiler tools expect Chrome trace JSON files in S3 under a specific layout:
 
 ```
-s3://<bucket>/profiles/rhaiis/<accelerator>/<model>/<version>/trace_rank<N>_*.json
+s3://<bucket>/pytorch-profiles/rhaiis/<accelerator>/<model>/<tp>/<version>/<workload>/trace_rank<N>_*.json
+```
+
+Example:
+
+```
+s3://psap-dashboard-data/pytorch-profiles/rhaiis/H200/deepseek-ai--DeepSeek-R1-0528/tp8/vLLM-0.21.0/isl1000_osl1000/trace_rank0_pid757_runisl1000_osl1000_range500-510.json
 ```
 
 Use the helper script to upload:
