@@ -1,13 +1,22 @@
 """MCP tool for analyzing PyTorch profiler traces from vLLM benchmark runs.
 
 This tool dynamically discovers Chrome trace JSON files from either S3
-(``s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/``)
+(``s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<tp>/<version>/<workload>/``)
 or a local directory fallback, extracts kernel statistics, and enables
 comparison between different vLLM versions to identify performance
 regressions and improvements.
 
 New profiles are auto-discovered -- just upload trace files to S3 under
 the expected folder structure and the agent will find them.
+
+Directory hierarchy::
+
+    <prefix>/<accelerator>/<model>/<tp>/<vllm_version>/<isl_osl>/trace_*.json
+
+Example::
+
+    pytorch-profiles/rhaiis/H200/deepseek-ai--DeepSeek-R1-0528/tp8/vLLM-0.21.0/isl1000_osl1000/
+        trace_rank0_pid757_runisl1000_osl1000_range500-510.json
 """
 
 import json
@@ -25,37 +34,78 @@ from psap_mcp_server.src.settings import settings
 logger = get_python_logger()
 
 # ---------------------------------------------------------------------------
-# Known model metadata (optional enrichment).
-# Models not listed here are still usable -- the folder name is used as-is.
+# Known model metadata -- empty; display names are derived from S3 folder names.
 # ---------------------------------------------------------------------------
-KNOWN_MODELS: Dict[str, Dict[str, str]] = {
-    "deepseek-r1": {
-        "display_name": "DeepSeek-R1",
-        "model_id": "deepseek-ai/DeepSeek-R1-0528",
-    },
-    "gpt-oss": {
-        "display_name": "GPT-OSS",
-        "model_id": "gpt-oss",
-    },
-    "gpt-oss-120b": {
-        "display_name": "GPT-OSS-120B",
-        "model_id": "openai/gpt-oss-120b",
-    },
-}
+KNOWN_MODELS: Dict[str, Dict[str, str]] = {}
 
-# Aliases map commonly-used names to the canonical S3/local folder names.
-# Only needed for names where substring matching wouldn't work (e.g., "deepseek" → "deepseek-r1").
-# New models uploaded to S3 are discovered automatically via substring matching in _match_all_models.
-_MODEL_ALIASES: Dict[str, str] = {
-    "deepseek": "deepseek-r1",
-    "deepseek-r1-0528": "deepseek-r1",
-    "gpt-oss": "gpt-oss-120b",
-    "gptoss": "gpt-oss-120b",
-    "gpt_oss": "gpt-oss-120b",
-    "gpt-oss-120b": "gpt-oss-120b",
-    "gptoss120b": "gpt-oss-120b",
-    "gpt_oss_120b": "gpt-oss-120b",
-}
+
+def _normalize_separator(name: str) -> str:
+    """Collapse dashes, underscores, and spaces into a single canonical form."""
+    return re.sub(r"[-_\s]+", "-", name.lower().strip())
+
+
+def _tokenize_model_name(name: str) -> List[str]:
+    """Split a model name into semantic tokens for matching.
+
+    E.g. "nemotron-3-nano" -> ["nemotron", "3", "nano"]
+         "deepseek-r1"     -> ["deepseek", "r1"]
+         "deepseek-v3.2"   -> ["deepseek", "v3.2"]
+    """
+    normalized = _normalize_separator(name)
+    return [t for t in re.split(r"[-]", normalized) if t]
+
+
+def _generate_variants(name: str) -> List[str]:
+    """Generate common user-typed variants of a model folder name.
+
+    Given "gpt-oss-120b", produces: gpt-oss-120b, gpt_oss_120b, gptoss120b, etc.
+    """
+    lower = name.lower()
+    variants = {lower}
+    # Underscore variant
+    variants.add(lower.replace("-", "_"))
+    # No-separator variant
+    variants.add(lower.replace("-", ""))
+    # Space variant
+    variants.add(lower.replace("-", " "))
+    return list(variants)
+
+
+def _is_exact_model_match(user_input: str, folder_name: str) -> bool:
+    """Check if user input is an exact match for a folder name (ignoring separators/case)."""
+    return _normalize_separator(user_input) == _normalize_separator(folder_name)
+
+
+def _is_specific_model_match(user_input: str, folder_name: str) -> bool:
+    """Token-aware matching that requires ALL user tokens to appear in the folder name.
+
+    This prevents "deepseek" from matching "deepseek-r1" AND "deepseek-v3" --
+    the user must provide enough tokens to uniquely identify the model.
+
+    Rules:
+    - All tokens in user_input must be present in folder tokens.
+    - Partial token matches allowed only for version-like suffixes (e.g., "v3" matches "v3.2").
+    """
+    user_tokens = _tokenize_model_name(user_input)
+    folder_tokens = _tokenize_model_name(folder_name)
+
+    if not user_tokens:
+        return False
+
+    for ut in user_tokens:
+        matched = False
+        for ft in folder_tokens:
+            if ut == ft:
+                matched = True
+                break
+            # Allow partial match for version-like tokens: "v3" matches "v3.2"
+            if ft.startswith(ut) and len(ut) >= 2:
+                matched = True
+                break
+        if not matched:
+            return False
+
+    return True
 
 # Local fallback directory (used when S3 is not configured or unreachable)
 _DEFAULT_LOCAL_PROFILE_BASE = "/app/pytorch-profiles"
@@ -126,10 +176,11 @@ def _parse_rank_from_filename(filename: str) -> Optional[int]:
     """Extract the rank number from a profiler trace filename.
 
     Handles patterns produced by PyTorch profiler, e.g.:
-      trace_rank0_pid467_range2000-2010.json        -> rank 0  (explicit rank)
-      trace_rank3_pid458_range2000-2010_v0112.json  -> rank 3
-      rank7.json                                     -> rank 7
-      trace_1050_1060_0_20260225_002159.json         -> rank 0  (3rd underscore-delimited segment)
+      trace_rank0_pid467_range2000-2010.json                      -> rank 0  (explicit rank)
+      trace_rank0_pid757_runisl1000_osl1000_range500-510.json     -> rank 0  (explicit rank, new format)
+      trace_rank3_pid458_range2000-2010_v0112.json                -> rank 3
+      rank7.json                                                   -> rank 7
+      trace_1050_1060_0_20260225_002159.json                       -> rank 0  (3rd underscore-delimited segment)
 
     Returns None when no rank can be extracted — the caller should assign an
     auto-incrementing rank for such files.
@@ -196,10 +247,15 @@ def _key_accelerator(composite_key: str) -> str:
 
 
 def _match_all_models(user_model: Optional[str], available_models: List[str]) -> List[str]:
-    """Fuzzy-match a user-provided model name against discovered composite keys.
+    """Smart model matching that handles separator variants and disambiguates similar names.
 
     Composite keys have the form ``accelerator/model`` (e.g. ``H200/deepseek-r1``).
     The user may provide just the model part, just the accelerator, or both.
+
+    Matching priority:
+    1. Exact match (ignoring case/separators) on full composite key or bare model
+    2. Separator-variant match (gpt_oss_120b -> gpt-oss-120b)
+    3. Token-based match requiring ALL user tokens present in model name
 
     Returns **all** matching composite keys (empty list if no match).
     """
@@ -211,34 +267,53 @@ def _match_all_models(user_model: Optional[str], available_models: List[str]) ->
 
     lower = user_model.lower().strip()
 
-    # Direct case-insensitive match on full composite key
+    # 1. Exact match on full composite key (case+separator insensitive)
     for key in available_models:
-        if key.lower() == lower:
+        if _is_exact_model_match(lower, key):
             return [key]
 
-    # Alias: resolve bare model aliases, then collect all matching keys
-    alias = _MODEL_ALIASES.get(lower)
-    if alias:
-        alias_lower = alias.lower()
-        matches = [k for k in available_models if _bare_model(k).lower() == alias_lower]
-        if matches:
-            return matches
-
-    # Substring match against the full key, bare model part, and known metadata
-    matches = []
+    # 2. Exact match on bare model part (case+separator insensitive)
+    exact_bare = []
     for key in available_models:
-        bare = _bare_model(key).lower()
-        if lower in key.lower() or lower in bare or bare in lower:
-            matches.append(key)
-            continue
+        bare = _bare_model(key)
+        if _is_exact_model_match(lower, bare):
+            exact_bare.append(key)
+    if exact_bare:
+        return exact_bare
+
+    # 3. Separator-variant match: generate all variants of each available model
+    #    and check if user input matches any variant exactly
+    variant_matches = []
+    for key in available_models:
+        bare = _bare_model(key)
+        variants = _generate_variants(bare)
+        if lower in variants:
+            variant_matches.append(key)
+    if variant_matches:
+        return variant_matches
+
+    # 4. Token-based specific matching: user tokens must all appear in model
+    token_matches = []
+    for key in available_models:
+        bare = _bare_model(key)
+        if _is_specific_model_match(lower, bare):
+            token_matches.append(key)
+        elif _is_specific_model_match(lower, key):
+            token_matches.append(key)
+    if token_matches:
+        return token_matches
+
+    # 5. Fallback: check KNOWN_MODELS metadata (display_name, model_id)
+    meta_matches = []
+    for key in available_models:
+        bare = _bare_model(key)
         info = KNOWN_MODELS.get(bare, {})
         if lower in info.get("display_name", "").lower():
-            matches.append(key)
-            continue
-        if lower in info.get("model_id", "").lower():
-            matches.append(key)
+            meta_matches.append(key)
+        elif lower in info.get("model_id", "").lower():
+            meta_matches.append(key)
 
-    return matches
+    return meta_matches
 
 
 def _match_model(user_model: Optional[str], available_models: List[str]) -> Optional[str]:
@@ -285,15 +360,22 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
 def _discover_profiles_s3() -> Optional[Dict]:
     """Discover available profiles from S3 by listing directories.
 
-    Walks ``s3://<bucket>/<prefix>/<accelerator>/<model>/<version>/`` and
-    returns::
+    Walks the 6-level hierarchy::
 
-        {"accelerator/model": {version: {rank: {"source": "s3", "key": ..., ...}}}}
+        s3://<bucket>/<prefix>/<accelerator>/<model>/<tp>/<version>/<workload>/
+
+    and returns::
+
+        {
+            "accelerator/model": {
+                tp: {version: {workload: {rank: {"source": "s3", "key": ..., ...}}}}
+            }
+        }
 
     Returns ``None`` if S3 is not configured or unreachable.
     """
     bucket = settings.S3_BUCKET
-    prefix = getattr(settings, "PROFILE_S3_PREFIX", "profiles/rhaiis")
+    prefix = getattr(settings, "PROFILE_S3_PREFIX", "pytorch-profiles/rhaiis")
     if not bucket:
         return None
 
@@ -311,24 +393,20 @@ def _discover_profiles_s3() -> Optional[Dict]:
         logger.warning(f"Failed to create S3 client: {exc}")
         return None
 
-    index: Dict[str, Dict[str, Dict[int, Dict]]] = {}
+    index: Dict = {}
 
     def _list_prefixes(parent_prefix: str) -> List[str]:
         resp = s3.list_objects_v2(Bucket=bucket, Prefix=parent_prefix, Delimiter="/")
         return [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
 
-    def _scan_version_traces(version_prefix: str, composite_key: str) -> None:
-        """List trace files under a version prefix and add them to the index.
-
-        Any .json file in the version directory is treated as a profiler trace.
-        If the filename encodes a rank (e.g. rank0, rank3), that rank is used.
-        Otherwise, an auto-incrementing rank is assigned so that files with any
-        naming convention are indexed.
-        """
+    def _scan_workload_traces(
+        workload_prefix: str, composite_key: str, tp: str, version: str, workload: str,
+    ) -> None:
+        """List trace files under a workload prefix and add them to the index."""
         paginator_token = None
         auto_rank = 0
         while True:
-            kwargs: Dict[str, Any] = {"Bucket": bucket, "Prefix": version_prefix}
+            kwargs: Dict[str, Any] = {"Bucket": bucket, "Prefix": workload_prefix}
             if paginator_token:
                 kwargs["ContinuationToken"] = paginator_token
 
@@ -344,15 +422,18 @@ def _discover_profiles_s3() -> Optional[Dict]:
                     rank = auto_rank
                     auto_rank += 1
 
-                version_dict = index.setdefault(composite_key, {}).setdefault(
-                    version_prefix.rstrip("/").split("/")[-1], {}
+                rank_dict = (
+                    index
+                    .setdefault(composite_key, {})
+                    .setdefault(tp, {})
+                    .setdefault(version, {})
+                    .setdefault(workload, {})
                 )
-                # Avoid collisions: if rank already taken, bump auto_rank
-                while rank in version_dict:
+                while rank in rank_dict:
                     rank = auto_rank
                     auto_rank += 1
 
-                version_dict[rank] = {
+                rank_dict[rank] = {
                     "source": "s3",
                     "key": key,
                     "filename": filename,
@@ -365,28 +446,44 @@ def _discover_profiles_s3() -> Optional[Dict]:
                 break
 
     try:
-        # 1. List accelerator folders  (e.g. H200/, MI300X/)
+        # 1. accelerator folders (H200/, B200/, MI300x/)
         accel_prefixes = _list_prefixes(prefix)
 
         for accel_prefix in accel_prefixes:
             accelerator = accel_prefix.rstrip("/").split("/")[-1]
 
-            # 2. List model folders  (e.g. deepseek-r1/, gpt-oss/)
+            # 2. model folders (deepseek-ai--DeepSeek-R1-0528/)
             model_prefixes = _list_prefixes(accel_prefix)
 
             for model_prefix in model_prefixes:
                 model_name = model_prefix.rstrip("/").split("/")[-1]
                 composite_key = f"{accelerator}/{model_name}"
 
-                # 3. List version folders  (e.g. rhaiis-3.2.5/, vLLM-0.13.0/)
-                version_prefixes = _list_prefixes(model_prefix)
+                # 3. tp folders (tp2/, tp8/)
+                tp_prefixes = _list_prefixes(model_prefix)
 
-                for version_prefix in version_prefixes:
-                    _scan_version_traces(version_prefix, composite_key)
+                for tp_prefix in tp_prefixes:
+                    tp_name = tp_prefix.rstrip("/").split("/")[-1]
+
+                    # 4. vLLM version folders (vLLM-0.21.0/)
+                    version_prefixes = _list_prefixes(tp_prefix)
+
+                    for version_prefix in version_prefixes:
+                        version_name = version_prefix.rstrip("/").split("/")[-1]
+
+                        # 5. workload folders (isl1000_osl1000/)
+                        workload_prefixes = _list_prefixes(version_prefix)
+
+                        for workload_prefix in workload_prefixes:
+                            workload_name = workload_prefix.rstrip("/").split("/")[-1]
+                            _scan_workload_traces(
+                                workload_prefix, composite_key,
+                                tp_name, version_name, workload_name,
+                            )
 
         if index:
             summary = ", ".join(
-                f"{m} ({len(vs)} version(s))" for m, vs in index.items()
+                f"{m} ({len(tps)} tp(s))" for m, tps in index.items()
             )
             logger.info(f"S3 profile discovery: {summary}")
         else:
@@ -404,62 +501,69 @@ def _discover_profiles_s3() -> Optional[Dict]:
 def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
     """Discover available profiles from the local filesystem.
 
-    Scans ``base_dir/<accelerator>/<model>/<version>/*.json`` and indexes
-    all JSON files as profiler traces.
+    Scans ``base_dir/<accelerator>/<model>/<tp>/<version>/<workload>/*.json``
+    and indexes all JSON files as profiler traces.
 
     Returns::
 
-        {"accelerator/model": {version: {rank: {"source": "local", "path": Path, ...}}}}
+        {
+            "accelerator/model": {
+                tp: {version: {workload: {rank: {"source": "local", "path": ..., ...}}}}
+            }
+        }
     """
     base = Path(base_dir or LOCAL_PROFILE_BASE)
-    index: Dict[str, Dict[str, Dict[int, Dict]]] = {}
+    index: Dict = {}
 
     if not base.exists():
         logger.info(f"Local profile base not found: {base}")
         return index
 
-    for accel_dir in sorted(base.iterdir()):
-        if not accel_dir.is_dir() or accel_dir.name.startswith("."):
-            continue
+    def _subdirs(parent: Path):
+        if not parent.is_dir():
+            return []
+        return sorted(d for d in parent.iterdir() if d.is_dir() and not d.name.startswith("."))
+
+    for accel_dir in _subdirs(base):
         accelerator = accel_dir.name
+        for model_dir in _subdirs(accel_dir):
+            composite_key = f"{accelerator}/{model_dir.name}"
+            for tp_dir in _subdirs(model_dir):
+                tp_name = tp_dir.name
+                for version_dir in _subdirs(tp_dir):
+                    version_name = version_dir.name
+                    for workload_dir in _subdirs(version_dir):
+                        workload_name = workload_dir.name
+                        auto_rank = 0
+                        for f in sorted(workload_dir.rglob("*.json")):
+                            if not f.is_file():
+                                continue
+                            rank = _parse_rank_from_filename(f.name)
+                            if rank is None:
+                                rank = auto_rank
+                                auto_rank += 1
 
-        for model_dir in sorted(accel_dir.iterdir()):
-            if not model_dir.is_dir() or model_dir.name.startswith("."):
-                continue
-            model_name = model_dir.name
-            composite_key = f"{accelerator}/{model_name}"
+                            rank_dict = (
+                                index
+                                .setdefault(composite_key, {})
+                                .setdefault(tp_name, {})
+                                .setdefault(version_name, {})
+                                .setdefault(workload_name, {})
+                            )
+                            while rank in rank_dict:
+                                rank = auto_rank
+                                auto_rank += 1
 
-            for version_dir in sorted(model_dir.iterdir()):
-                if not version_dir.is_dir() or version_dir.name.startswith("."):
-                    continue
-                version_name = version_dir.name
-                auto_rank = 0
-
-                for f in sorted(version_dir.rglob("*.json")):
-                    if not f.is_file():
-                        continue
-                    rank = _parse_rank_from_filename(f.name)
-                    if rank is None:
-                        rank = auto_rank
-                        auto_rank += 1
-
-                    version_dict = index.setdefault(composite_key, {}).setdefault(
-                        version_name, {}
-                    )
-                    while rank in version_dict:
-                        rank = auto_rank
-                        auto_rank += 1
-
-                    version_dict[rank] = {
-                        "source": "local",
-                        "path": f,
-                        "filename": f.name,
-                        "size_bytes": f.stat().st_size,
-                    }
+                            rank_dict[rank] = {
+                                "source": "local",
+                                "path": f,
+                                "filename": f.name,
+                                "size_bytes": f.stat().st_size,
+                            }
 
     if index:
         summary = ", ".join(
-            f"{m} ({len(vs)} version(s))" for m, vs in index.items()
+            f"{m} ({len(tps)} tp(s))" for m, tps in index.items()
         )
         logger.info(f"Local profile discovery: {summary}")
     else:
@@ -490,7 +594,7 @@ def _discover_profiles(force_refresh: bool = False) -> Dict:
     else:
         logger.warning(
             "No profile data found in S3. "
-            "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<version>/"
+            "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<tp>/<version>/<workload>/"
         )
         index = {}
 
@@ -601,11 +705,13 @@ def _load_trace_from_local(filepath: Path) -> Optional[dict]:
 
 def _load_or_extract_stats(
     model: str,
+    tp: str,
     version: str,
+    workload: str,
     rank: int,
     force_reload: bool = False,
 ) -> Optional[Dict[str, Dict]]:
-    """Load kernel stats for a given model/version/rank.
+    """Load kernel stats for a given model/tp/version/workload/rank.
 
     1. Check in-memory cache
     2. Look up the file in the profile index (S3 or local)
@@ -613,7 +719,7 @@ def _load_or_extract_stats(
 
     Returns ``None`` if the trace cannot be loaded.
     """
-    cache_key = f"{model}/{version}/rank{rank}"
+    cache_key = f"{model}/{tp}/{version}/{workload}/rank{rank}"
 
     if not force_reload:
         cached = _get_cached_stats(cache_key)
@@ -621,15 +727,19 @@ def _load_or_extract_stats(
             logger.debug(f"Stats cache hit: {cache_key}")
             return cached
 
-    # Look up in the profile index
     index = _discover_profiles()
-    entry = index.get(model, {}).get(version, {}).get(rank)
+    entry = (
+        index.get(model, {})
+        .get(tp, {})
+        .get(version, {})
+        .get(workload, {})
+        .get(rank)
+    )
 
     if entry is None:
         logger.warning(f"No trace found for {cache_key}")
         return None
 
-    # Load the trace
     if entry["source"] == "s3":
         trace = _load_trace_from_s3(entry["key"])
     else:
@@ -1181,15 +1291,17 @@ _RAW_EVENTS_CACHE_TTL: int = 300
 
 def _load_raw_events(
     model: str,
+    tp: str,
     version: str,
+    workload: str,
     rank: int,
 ) -> Optional[List[Dict]]:
-    """Load raw Chrome trace events for a model/version/rank.
+    """Load raw Chrome trace events for a model/tp/version/workload/rank.
 
     Checks the in-memory cache first.  Falls back to loading the trace
     JSON from S3 or local storage.
     """
-    cache_key = f"raw:{model}/{version}/rank{rank}"
+    cache_key = f"raw:{model}/{tp}/{version}/{workload}/rank{rank}"
     if cache_key in _raw_events_cache:
         ts, evts = _raw_events_cache[cache_key]
         if (_time.time() - ts) < _RAW_EVENTS_CACHE_TTL:
@@ -1197,7 +1309,13 @@ def _load_raw_events(
         del _raw_events_cache[cache_key]
 
     index = _discover_profiles()
-    entry = index.get(model, {}).get(version, {}).get(rank)
+    entry = (
+        index.get(model, {})
+        .get(tp, {})
+        .get(version, {})
+        .get(workload, {})
+        .get(rank)
+    )
     if entry is None:
         return None
 
@@ -1218,57 +1336,110 @@ def _load_raw_events(
 #  Internal helpers for tool functions                                   #
 # ===================================================================== #
 
-def _resolve_model_and_version(
+def _resolve_profile(
     model: Optional[str],
+    tp: Optional[str],
     version: str,
-) -> Tuple[Optional[str], Optional[str], Optional[str], Dict]:
-    """Resolve user-provided model/version to discovered folder names.
+    workload: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Dict]:
+    """Resolve user-provided model/tp/version/workload to discovered folder names.
 
-    Returns (model_key, matched_version, error_message, index).
+    Returns (model_key, matched_tp, matched_version, matched_workload, error_message, index).
     If error_message is not None the caller should return it.
     """
     index = _discover_profiles()
 
     if not index:
-        return None, None, "No profile data available. Check S3 configuration or local profile directory.", index
+        return None, None, None, None, "No profile data available. Check S3 configuration or local profile directory.", index
 
+    # --- model ---
     available_models = sorted(index.keys())
     matches = _match_all_models(model, available_models)
 
     if not matches:
-        return None, None, (
+        return None, None, None, None, (
             f"Model '{model}' not found. Available models: {available_models}"
         ), index
 
     if len(matches) > 1:
         formatted = ", ".join(matches)
-        return None, None, (
+        return None, None, None, None, (
             f"Multiple models match '{model}': {formatted}. "
             f"Please specify the accelerator, e.g. '{matches[0]}'"
         ), index
 
     model_key = matches[0]
+    model_data = index[model_key]
 
-    available_versions = sorted(index[model_key].keys())
+    # --- tp ---
+    available_tps = sorted(model_data.keys())
+    if tp is not None:
+        tp_lower = tp.lower().strip()
+        matched_tp = None
+        for t in available_tps:
+            if t.lower() == tp_lower:
+                matched_tp = t
+                break
+        if matched_tp is None:
+            return model_key, None, None, None, (
+                f"TP '{tp}' not found for {_get_display_name(model_key)}. "
+                f"Available: {available_tps}"
+            ), index
+    elif len(available_tps) == 1:
+        matched_tp = available_tps[0]
+    else:
+        return model_key, None, None, None, (
+            f"Multiple TP configurations available for {_get_display_name(model_key)}: {available_tps}. "
+            f"Please specify tp parameter."
+        ), index
+
+    tp_data = model_data[matched_tp]
+
+    # --- version ---
+    available_versions = sorted(tp_data.keys())
     matched_version = _match_version(version, available_versions)
     if matched_version is None:
-        return model_key, None, (
-            f"Version '{version}' not found for {_get_display_name(model_key)}. "
+        return model_key, matched_tp, None, None, (
+            f"Version '{version}' not found for {_get_display_name(model_key)} {matched_tp}. "
             f"Available versions: {available_versions}"
         ), index
 
-    return model_key, matched_version, None, index
+    version_data = tp_data[matched_version]
+
+    # --- workload ---
+    available_workloads = sorted(version_data.keys())
+    if workload is not None:
+        wl_lower = workload.lower().strip()
+        matched_workload = None
+        for w in available_workloads:
+            if w.lower() == wl_lower:
+                matched_workload = w
+                break
+        if matched_workload is None:
+            return model_key, matched_tp, matched_version, None, (
+                f"Workload '{workload}' not found for {_get_display_name(model_key)} {matched_tp} {matched_version}. "
+                f"Available: {available_workloads}"
+            ), index
+    elif len(available_workloads) == 1:
+        matched_workload = available_workloads[0]
+    else:
+        return model_key, matched_tp, matched_version, None, (
+            f"Multiple workloads available for {_get_display_name(model_key)} {matched_tp} {matched_version}: "
+            f"{available_workloads}. Please specify workload parameter."
+        ), index
+
+    return model_key, matched_tp, matched_version, matched_workload, None, index
 
 
-def _get_num_ranks(index: Dict, model_key: str, version: str) -> int:
-    """Return the number of discovered ranks for a model/version."""
-    ranks = index.get(model_key, {}).get(version, {})
+def _get_num_ranks(index: Dict, model_key: str, tp: str, version: str, workload: str) -> int:
+    """Return the number of discovered ranks for a model/tp/version/workload."""
+    ranks = index.get(model_key, {}).get(tp, {}).get(version, {}).get(workload, {})
     return max(ranks.keys()) + 1 if ranks else 0
 
 
-def _get_available_ranks(index: Dict, model_key: str, version: str) -> List[int]:
+def _get_available_ranks(index: Dict, model_key: str, tp: str, version: str, workload: str) -> List[int]:
     """Return a sorted list of discovered ranks."""
-    return sorted(index.get(model_key, {}).get(version, {}).keys())
+    return sorted(index.get(model_key, {}).get(tp, {}).get(version, {}).get(workload, {}).keys())
 
 
 # ===================================================================== #
@@ -1283,6 +1454,8 @@ async def analyze_pytorch_profile(
     category: Optional[str] = None,
     force_reload: bool = False,
     model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Analyze PyTorch profiler trace for a specific vLLM version and model.
     
@@ -1293,39 +1466,42 @@ async def analyze_pytorch_profile(
     TOOL_NAME=analyze_pytorch_profile
     DISPLAY_NAME=Analyze PyTorch Profile
     USECASE=Analyze PyTorch profiler traces from vLLM benchmark runs to understand kernel-level performance. Use to identify slow operations, see time breakdown by category, and understand inference bottlenecks.
-    INSTRUCTIONS=1. Specify a vLLM version (e.g., "v0.11.2" or "v0.13.0"), 2. Optionally specify model (deepseek or gpt-oss), 3. Optionally specify a rank or set aggregate_ranks=True, 4. Use category filter to focus on specific operation types
-    INPUT_DESCRIPTION=version (str): vLLM version like "v0.11.2" or "v0.13.0"; model (str, optional): Model name - "deepseek" (default) or "gpt-oss"; rank (int, optional): GPU rank, defaults to 0; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of top kernels; category (str, optional): Filter by category
+    INSTRUCTIONS=1. Specify a vLLM version (e.g., "0.21.0"), 2. Specify model, tp, and workload to select the profile, 3. Optionally specify a rank or set aggregate_ranks=True, 4. Use category filter to focus on specific operation types
+    INPUT_DESCRIPTION=version (str): vLLM version like "0.21.0"; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int, optional): GPU rank, defaults to 0; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of top kernels; category (str, optional): Filter by category
     OUTPUT_DESCRIPTION=Dictionary with top kernels by time, category breakdown, and summary statistics
-    EXAMPLES=analyze_pytorch_profile(version="v0.13.0"), analyze_pytorch_profile(version="v0.11.2", model="gpt-oss"), analyze_pytorch_profile(version="v0.13.0", model="deepseek", aggregate_ranks=True)
+    EXAMPLES=analyze_pytorch_profile(version="0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
     PREREQUISITES=Profile traces must exist in S3 or local directory
     RELATED_TOOLS=compare_pytorch_profiles, map_kernel_to_vllm_code, compare_vllm_versions
     
     Args:
-        version: vLLM version (e.g., "v0.11.2", "v0.13.0", "0.11.2")
+        version: vLLM version (e.g., "0.21.0", "v0.21.0", "vLLM-0.21.0")
         rank: GPU rank to analyze. If None and aggregate_ranks=False, uses rank 0
         aggregate_ranks: If True, aggregate statistics from all ranks
         top_n: Number of top kernels to return (default: 30)
         category: Filter by category (kernel, cpu, cuda, communication, memory, all)
         force_reload: If True, ignore cache and reload from trace files
-        model: Model name - "deepseek" (default, TP=8) or "gpt-oss" (TP=4)
+        model: Model name (e.g., "deepseek-r1", "nemotron")
+        tp: Tensor parallelism config (e.g., "tp8", "tp2"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
     
     Returns:
         Dictionary containing:
         - status: "success" or "error"
         - version: The version analyzed
         - model: The model analyzed
+        - tp / workload: The resolved tp and workload
         - top_kernels: List of top kernels by total time
         - category_breakdown: Time breakdown by operation category
         - summary: Overall statistics
     """
     try:
-        model_key, matched_version, error, index = _resolve_model_and_version(model, version)
+        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
         if error:
             return {"status": "error", "message": error}
 
-        assert model_key is not None and matched_version is not None  # mypy
+        assert model_key is not None and matched_tp is not None and matched_version is not None and matched_workload is not None
 
-        available_ranks = _get_available_ranks(index, model_key, matched_version)
+        available_ranks = _get_available_ranks(index, model_key, matched_tp, matched_version, matched_workload)
         num_ranks = len(available_ranks)
         display_name = _get_display_name(model_key)
         model_info = _get_model_info(model_key, num_ranks)
@@ -1334,7 +1510,7 @@ async def analyze_pytorch_profile(
             stats_list = []
             loaded_ranks = []
             for r in available_ranks:
-                s = _load_or_extract_stats(model_key, matched_version, r, force_reload)
+                s = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, r, force_reload)
                 if s:
                     stats_list.append(s)
                     loaded_ranks.append(r)
@@ -1342,7 +1518,7 @@ async def analyze_pytorch_profile(
             if not stats_list:
                 return {
                     "status": "error",
-                    "message": f"No trace files could be loaded for {display_name} {matched_version}",
+                    "message": f"No trace files could be loaded for {display_name} {matched_tp} {matched_version} {matched_workload}",
                 }
 
             stats = _merge_stats(stats_list)
@@ -1352,14 +1528,14 @@ async def analyze_pytorch_profile(
             if r not in available_ranks:
                 return {
                     "status": "error",
-                    "message": f"Rank {r} not available for {display_name} {matched_version}. Available ranks: {available_ranks}",
+                    "message": f"Rank {r} not available for {display_name} {matched_tp} {matched_version} {matched_workload}. Available ranks: {available_ranks}",
                 }
 
-            stats = _load_or_extract_stats(model_key, matched_version, r, force_reload)
+            stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, r, force_reload)
             if not stats:
                 return {
                     "status": "error",
-                    "message": f"No trace file found for {display_name} {matched_version} rank {r}",
+                    "message": f"No trace file found for {display_name} {matched_tp} {matched_version} {matched_workload} rank {r}",
                 }
             scope = f"rank {r}"
 
@@ -1374,6 +1550,8 @@ async def analyze_pytorch_profile(
             "status": "success",
             "version": matched_version,
             "model": display_name,
+            "tp": matched_tp,
+            "workload": matched_workload,
             "scope": scope,
             "category_filter": category or "all",
             "top_kernels": top_kernels,
@@ -1387,7 +1565,7 @@ async def analyze_pytorch_profile(
                 "filtered_operations": len(filtered_stats),
             },
             "message": (
-                f"Analyzed {display_name} {matched_version} ({scope}): "
+                f"Analyzed {display_name} {matched_tp} {matched_version} {matched_workload} ({scope}): "
                 f"{len(filtered_stats)} unique operations, {_format_duration(filtered_time)} total time"
             ),
             "profile_info": {
@@ -1412,6 +1590,8 @@ async def compare_pytorch_profiles(
     category: Optional[str] = None,
     force_reload: bool = False,
     model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compare PyTorch profiler traces between two vLLM versions.
     
@@ -1422,22 +1602,24 @@ async def compare_pytorch_profiles(
     TOOL_NAME=compare_pytorch_profiles
     DISPLAY_NAME=Compare PyTorch Profiles
     USECASE=Compare kernel performance between two vLLM versions to identify regressions and improvements. Use this when investigating performance changes between releases or trying to understand why one version is slower/faster.
-    INSTRUCTIONS=1. Specify two versions to compare (e.g., "v0.11.2" and "v0.13.0"), 2. Optionally specify model (deepseek or gpt-oss), 3. Results show which kernels got slower (regressions) and faster (improvements)
-    INPUT_DESCRIPTION=version1 (str): First/baseline version; version2 (str): Second/comparison version; model (str, optional): Model - "deepseek" or "gpt-oss"; rank (int, optional): GPU rank; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of results; category (str, optional): Filter by category
+    INSTRUCTIONS=1. Specify two versions to compare, 2. Specify model, tp, and workload to select profiles, 3. Results show which kernels got slower (regressions) and faster (improvements)
+    INPUT_DESCRIPTION=version1 (str): First/baseline version; version2 (str): Second/comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int, optional): GPU rank; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of results; category (str, optional): Filter by category
     OUTPUT_DESCRIPTION=Dictionary with regressions, improvements, new/removed kernels, and summary comparison
-    EXAMPLES=compare_pytorch_profiles("v0.11.2", "v0.13.0"), compare_pytorch_profiles("v0.11.2", "v0.13.0", model="gpt-oss"), compare_pytorch_profiles("v0.11.2", "v0.13.0", model="deepseek", aggregate_ranks=True)
+    EXAMPLES=compare_pytorch_profiles("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
     PREREQUISITES=Profile traces must exist for both versions
     RELATED_TOOLS=analyze_pytorch_profile, map_kernel_to_vllm_code, compare_vllm_versions, get_vllm_release_notes
     
     Args:
-        version1: First/baseline vLLM version (e.g., "v0.11.2")
-        version2: Second/comparison vLLM version (e.g., "v0.13.0")
+        version1: First/baseline vLLM version (e.g., "0.20.0")
+        version2: Second/comparison vLLM version (e.g., "0.21.0")
         rank: GPU rank to compare. If None and aggregate_ranks=False, uses rank 0
         aggregate_ranks: If True, aggregate statistics from all ranks
         top_n: Number of top regressions/improvements to return (default: 30)
         category: Filter by category (kernel, cpu, cuda, communication, memory, all)
         force_reload: If True, ignore cache and reload from trace files
-        model: Model name - "deepseek" (default, TP=8) or "gpt-oss" (TP=4)
+        model: Model name (e.g., "deepseek-r1", "nemotron")
+        tp: Tensor parallelism config (e.g., "tp8"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
     
     Returns:
         Dictionary containing:
@@ -1455,6 +1637,7 @@ async def compare_pytorch_profiles(
         if not index:
             return {"status": "error", "message": "No profile data available."}
 
+        # Resolve model and tp
         available_models = sorted(index.keys())
         matches = _match_all_models(model, available_models)
         if not matches:
@@ -1471,27 +1654,60 @@ async def compare_pytorch_profiles(
                 ),
             }
         model_key = matches[0]
+        model_data = index[model_key]
 
-        available_versions = sorted(index[model_key].keys())
+        # Resolve tp
+        available_tps = sorted(model_data.keys())
+        if tp is not None:
+            tp_lower = tp.lower().strip()
+            matched_tp = next((t for t in available_tps if t.lower() == tp_lower), None)
+            if matched_tp is None:
+                return {"status": "error", "message": f"TP '{tp}' not found. Available: {available_tps}"}
+        elif len(available_tps) == 1:
+            matched_tp = available_tps[0]
+        else:
+            return {"status": "error", "message": f"Multiple TPs available: {available_tps}. Please specify tp parameter."}
 
+        tp_data = model_data[matched_tp]
+
+        # Resolve both versions
+        available_versions = sorted(tp_data.keys())
         mv1 = _match_version(version1, available_versions)
         mv2 = _match_version(version2, available_versions)
         if mv1 is None:
             return {
                 "status": "error",
-                "message": f"Version '{version1}' not found for {_get_display_name(model_key)}. Available: {available_versions}",
+                "message": f"Version '{version1}' not found for {_get_display_name(model_key)} {matched_tp}. Available: {available_versions}",
             }
         if mv2 is None:
             return {
                 "status": "error",
-                "message": f"Version '{version2}' not found for {_get_display_name(model_key)}. Available: {available_versions}",
+                "message": f"Version '{version2}' not found for {_get_display_name(model_key)} {matched_tp}. Available: {available_versions}",
             }
+
+        # Resolve workload (must exist under both versions)
+        wl_v1 = sorted(tp_data[mv1].keys())
+        wl_v2 = sorted(tp_data[mv2].keys())
+        if workload is not None:
+            wl_lower = workload.lower().strip()
+            matched_workload = next((w for w in wl_v1 if w.lower() == wl_lower), None)
+            if matched_workload is None:
+                return {"status": "error", "message": f"Workload '{workload}' not found for {mv1}. Available: {wl_v1}"}
+            if matched_workload not in wl_v2:
+                return {"status": "error", "message": f"Workload '{matched_workload}' not found for {mv2}. Available: {wl_v2}"}
+        else:
+            common = sorted(set(wl_v1) & set(wl_v2))
+            if len(common) == 1:
+                matched_workload = common[0]
+            elif not common:
+                return {"status": "error", "message": f"No common workloads between {mv1} ({wl_v1}) and {mv2} ({wl_v2})."}
+            else:
+                return {"status": "error", "message": f"Multiple common workloads: {common}. Please specify workload parameter."}
 
         display_name = _get_display_name(model_key)
 
-        # Determine ranks to load
-        ranks_v1 = _get_available_ranks(index, model_key, mv1)
-        ranks_v2 = _get_available_ranks(index, model_key, mv2)
+        ranks_v1 = _get_available_ranks(index, model_key, matched_tp, mv1, matched_workload)
+        ranks_v2 = _get_available_ranks(index, model_key, matched_tp, mv2, matched_workload)
         num_ranks = len(ranks_v1)
         model_info = _get_model_info(model_key, num_ranks)
 
@@ -1499,7 +1715,7 @@ async def compare_pytorch_profiles(
             if aggregate_ranks:
                 parts = []
                 for r in ranks:
-                    s = _load_or_extract_stats(model_key, version, r, force_reload)
+                    s = _load_or_extract_stats(model_key, matched_tp, version, matched_workload, r, force_reload)
                     if s:
                         parts.append(s)
                 if parts:
@@ -1507,15 +1723,15 @@ async def compare_pytorch_profiles(
                 return None, ""
             else:
                 r = rank if rank is not None else 0
-                return _load_or_extract_stats(model_key, version, r, force_reload), f"rank {r}"
+                return _load_or_extract_stats(model_key, matched_tp, version, matched_workload, r, force_reload), f"rank {r}"
 
         stats1, scope1 = load_version_stats(mv1, ranks_v1)
         stats2, scope2 = load_version_stats(mv2, ranks_v2)
 
         if not stats1:
-            return {"status": "error", "message": f"No trace files found for {display_name} {mv1}"}
+            return {"status": "error", "message": f"No trace files found for {display_name} {matched_tp} {mv1} {matched_workload}"}
         if not stats2:
-            return {"status": "error", "message": f"No trace files found for {display_name} {mv2}"}
+            return {"status": "error", "message": f"No trace files found for {display_name} {matched_tp} {mv2} {matched_workload}"}
 
         # Apply category filter
         filtered1 = _filter_by_category(stats1, category)
@@ -1636,6 +1852,8 @@ async def compare_pytorch_profiles(
                 "version1": mv1,
                 "version2": mv2,
                 "model": display_name,
+                "tp": matched_tp,
+                "workload": matched_workload,
                 "scope": scope1 if scope1 == scope2 else f"{mv1}: {scope1}, {mv2}: {scope2}",
                 "category_filter": category or "all",
             },
@@ -1698,6 +1916,8 @@ async def analyze_performance_insights(
     rank: int = 0,
     benchmark_shows_improvement: bool = True,
     model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Deep analysis of profile differences with intelligent insights and conclusions.
     
@@ -1712,46 +1932,47 @@ async def analyze_performance_insights(
     TOOL_NAME=analyze_performance_insights
     DISPLAY_NAME=Analyze Performance Insights
     USECASE=Get expert-level analysis explaining WHY performance changed between versions. Use this when you need to understand the root cause of performance differences, especially when benchmark results seem to contradict profile data.
-    INSTRUCTIONS=1. Provide two versions to compare, 2. Optionally specify model (deepseek or gpt-oss), 3. Set benchmark_shows_improvement based on your actual benchmark results
-    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model - "deepseek" or "gpt-oss"; rank (int): GPU rank (default 0); benchmark_shows_improvement (bool): Whether actual benchmarks show version2 is faster
+    INSTRUCTIONS=1. Provide two versions to compare, 2. Specify model, tp, and workload, 3. Set benchmark_shows_improvement based on your actual benchmark results
+    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0); benchmark_shows_improvement (bool): Whether actual benchmarks show version2 is faster
     OUTPUT_DESCRIPTION=Dictionary with deep analysis including compute vs overhead breakdown, synchronization analysis, kernel fusion detection, and expert conclusions
-    EXAMPLES=analyze_performance_insights("v0.11.2", "v0.13.0"), analyze_performance_insights("v0.11.2", "v0.13.0", model="gpt-oss")
+    EXAMPLES=analyze_performance_insights("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
     PREREQUISITES=Profile traces must exist for both versions
     RELATED_TOOLS=compare_pytorch_profiles, compare_vllm_versions, map_kernel_to_vllm_code
     
     Args:
-        version1: Baseline vLLM version (e.g., "v0.11.2")
-        version2: Comparison vLLM version (e.g., "v0.13.0")
+        version1: Baseline vLLM version (e.g., "0.20.0")
+        version2: Comparison vLLM version (e.g., "0.21.0")
         rank: GPU rank to analyze (default: 0)
         benchmark_shows_improvement: Set True if actual benchmarks show version2 is faster
-        model: Model name - "deepseek" (default, TP=8) or "gpt-oss" (TP=4)
+        model: Model name (e.g., "deepseek-r1", "nemotron")
+        tp: Tensor parallelism config (e.g., "tp8"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
     
     Returns:
         Dictionary with deep analysis and expert conclusions.
     """
     try:
-        # Resolve model & both versions
-        index = _discover_profiles()
-        if not index:
-            return {"status": "error", "message": "No profile data available."}
+        # Resolve v1 first to get model/tp/workload, then match v2
+        model_key, matched_tp, mv1, matched_workload, error, index = _resolve_profile(model, tp, version1, workload)
+        if error:
+            return {"status": "error", "message": error}
+        assert model_key is not None and matched_tp is not None and mv1 is not None and matched_workload is not None
 
-        available_models = sorted(index.keys())
-        model_key = _match_model(model, available_models)
-        if model_key is None:
-            return {"status": "error", "message": f"Model '{model}' not found. Available: {available_models}"}
-
-        available_versions = sorted(index[model_key].keys())
-        mv1 = _match_version(version1, available_versions)
+        tp_data = index[model_key][matched_tp]
+        available_versions = sorted(tp_data.keys())
         mv2 = _match_version(version2, available_versions)
-        if mv1 is None:
-            return {"status": "error", "message": f"Version '{version1}' not found. Available: {available_versions}"}
         if mv2 is None:
             return {"status": "error", "message": f"Version '{version2}' not found. Available: {available_versions}"}
 
+        # Verify workload exists for v2
+        if matched_workload not in tp_data.get(mv2, {}):
+            wl_v2 = sorted(tp_data.get(mv2, {}).keys())
+            return {"status": "error", "message": f"Workload '{matched_workload}' not found for {mv2}. Available: {wl_v2}"}
+
         display_name = _get_display_name(model_key)
 
-        stats1 = _load_or_extract_stats(model_key, mv1, rank)
-        stats2 = _load_or_extract_stats(model_key, mv2, rank)
+        stats1 = _load_or_extract_stats(model_key, matched_tp, mv1, matched_workload, rank)
+        stats2 = _load_or_extract_stats(model_key, matched_tp, mv2, matched_workload, rank)
 
         if not stats1 or not stats2:
             return {"status": "error", "message": "Missing profile data for comparison"}
@@ -2063,22 +2284,22 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
     """List all available PyTorch profile traces.
     
     Discover what profile data is available for analysis. Returns information
-    about available models, versions, ranks, and profile metadata.
+    about available models, TP configs, versions, workloads, ranks, and metadata.
     
     TOOL_NAME=list_available_profiles
     DISPLAY_NAME=List Available Profiles
-    USECASE=Discover what PyTorch profile traces are available for analysis. Use this first to see which models and versions have profile data.
+    USECASE=Discover what PyTorch profile traces are available for analysis. Use this first to see which models, TP configs, versions, and workloads have profile data.
     INSTRUCTIONS=Call without arguments to see all available profiles across all models, or specify a model to filter
-    INPUT_DESCRIPTION=model (str, optional): Filter by model name - "deepseek" or "gpt-oss". If not specified, shows all models.
-    OUTPUT_DESCRIPTION=Dictionary with available models, versions, ranks, and file information
-    EXAMPLES=list_available_profiles(), list_available_profiles(model="gpt-oss")
+    INPUT_DESCRIPTION=model (str, optional): Filter by model name. If not specified, shows all models.
+    OUTPUT_DESCRIPTION=Dictionary with available models, tp configs, versions, workloads, ranks, and file information
+    EXAMPLES=list_available_profiles(), list_available_profiles(model="deepseek")
     PREREQUISITES=None
     RELATED_TOOLS=analyze_pytorch_profile, compare_pytorch_profiles
     
     Returns:
         Dictionary containing:
         - status: "success" or "error"
-        - models: Information about each available model
+        - models: Information about each available model (with tp/version/workload hierarchy)
         - available_models: List of model names with profiles
     """
     try:
@@ -2093,7 +2314,6 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                 "data_source": "S3" if settings.S3_BUCKET else "local",
             }
 
-        # Optionally filter by model name
         if model is not None:
             available_models = sorted(index.keys())
             matches = _match_all_models(model, available_models)
@@ -2108,47 +2328,49 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
 
         models_data: Dict[str, Any] = {}
         available: List[str] = []
+        total_profiles = 0
 
-        for model_key, versions in sorted(models_to_show.items()):
+        for model_key, tp_data in sorted(models_to_show.items()):
             available.append(model_key)
-            profiles_list: List[Dict] = []
+            tp_list: List[Dict] = []
 
-            for version_name, ranks in sorted(versions.items()):
-                rank_list = sorted(ranks.keys())
-                # Pick the first file to show size info
-                first_entry = ranks[rank_list[0]]
-                size_mb = first_entry.get("size_bytes", 0) / (1024 * 1024)
-
-                profiles_list.append(
-                    {
+            for tp_name, versions in sorted(tp_data.items()):
+                version_list: List[Dict] = []
+                for version_name, workloads in sorted(versions.items()):
+                    workload_list: List[Dict] = []
+                    for workload_name, ranks in sorted(workloads.items()):
+                        rank_list = sorted(ranks.keys())
+                        first_entry = ranks[rank_list[0]]
+                        size_mb = first_entry.get("size_bytes", 0) / (1024 * 1024)
+                        total_profiles += 1
+                        workload_list.append({
+                            "workload": workload_name,
+                            "ranks_available": rank_list,
+                            "rank_count": len(rank_list),
+                            "source": first_entry["source"],
+                            "example_file": first_entry["filename"],
+                            "file_size_approx_mb": round(size_mb, 1),
+                        })
+                    version_list.append({
                         "version": version_name,
-                        "ranks_available": rank_list,
-                        "rank_count": len(rank_list),
-                        "source": first_entry["source"],
-                        "example_file": first_entry["filename"],
-                        "file_size_approx_mb": round(size_mb, 1),
-                    }
-                )
+                        "workloads": workload_list,
+                        "available_workloads": sorted(workloads.keys()),
+                    })
+                tp_list.append({
+                    "tp": tp_name,
+                    "versions": version_list,
+                    "available_versions": sorted(versions.keys()),
+                })
 
-            num_ranks = max(
-                (len(ranks) for ranks in versions.values()), default=0
-            )
-            model_info = _get_model_info(model_key, num_ranks)
-
+            model_info = _get_model_info(model_key, 1)
             models_data[model_key] = {
                 "display_name": model_info["display_name"],
                 "model_id": model_info["model_id"],
                 "accelerator": _key_accelerator(model_key),
-                "available_versions": sorted(versions.keys()),
-                "profiles": profiles_list,
-                "profile_info": {
-                    "gpus": model_info["gpus"],
-                    "ranks_stored": model_info["ranks_stored"],
-                    "note": model_info["note"],
-                },
+                "available_tps": sorted(tp_data.keys()),
+                "tp_configs": tp_list,
             }
 
-        total_versions = sum(len(m["available_versions"]) for m in models_data.values())
         data_source = "S3" if settings.S3_BUCKET else "local"
 
         return {
@@ -2158,11 +2380,11 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
             "data_source": data_source,
             "message": (
                 f"Found profiles for {len(available)} model(s) with "
-                f"{total_versions} version(s) total (source: {data_source})"
+                f"{total_profiles} profile(s) total (source: {data_source})"
             ),
             "note": (
-                "Use model parameter in analyze_pytorch_profile() and "
-                "compare_pytorch_profiles() to specify which model to analyze."
+                "Specify model, tp, version, and workload parameters in "
+                "analyze_pytorch_profile() and compare_pytorch_profiles()."
             ),
         }
 
@@ -2181,9 +2403,9 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
     DISPLAY_NAME=Check Profile Status
     USECASE=Quick diagnostic check to see if profile data is available. Use this first to verify setup before running expensive comparisons.
     INSTRUCTIONS=Call without arguments to check all models, or specify a model name
-    INPUT_DESCRIPTION=model (str, optional): Model to check - "deepseek" or "gpt-oss". If not specified, checks all models.
+    INPUT_DESCRIPTION=model (str, optional): Model to check. If not specified, checks all models.
     OUTPUT_DESCRIPTION=Dictionary with profile availability for each model
-    EXAMPLES=check_profile_status(), check_profile_status(model="gpt-oss")
+    EXAMPLES=check_profile_status(), check_profile_status(model="deepseek")
     PREREQUISITES=None
     RELATED_TOOLS=list_available_profiles, analyze_pytorch_profile
     
@@ -2202,11 +2424,10 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
                 "data_source": "none",
                 "message": "No profile data found. Upload traces to S3 or configure local profile directory.",
                 "s3_configured": bool(settings.S3_BUCKET),
-                "s3_prefix": getattr(settings, "PROFILE_S3_PREFIX", "profiles/rhaiis"),
+                "s3_prefix": getattr(settings, "PROFILE_S3_PREFIX", "pytorch-profiles/rhaiis"),
                 "local_path": LOCAL_PROFILE_BASE,
             }
 
-        # Optionally filter
         if model is not None:
             available_models = sorted(index.keys())
             matches = _match_all_models(model, available_models)
@@ -2222,27 +2443,41 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
         models_status: Dict[str, Any] = {}
         all_ready = True
 
-        for mkey, versions in sorted(models_to_check.items()):
-            version_status: Dict[str, Any] = {}
-            for vname, ranks in sorted(versions.items()):
-                rank_list = sorted(ranks.keys())
-                first_entry = ranks[rank_list[0]]
-                version_status[vname] = {
-                    "ranks_available": rank_list,
-                    "rank_count": len(rank_list),
-                    "source": first_entry["source"],
-                    "file_size_mb": round(first_entry.get("size_bytes", 0) / (1024 * 1024), 1),
-                    "ready": True,
+        for mkey, tp_data in sorted(models_to_check.items()):
+            tp_status: Dict[str, Any] = {}
+            total_versions = 0
+            for tp_name, versions in sorted(tp_data.items()):
+                version_status: Dict[str, Any] = {}
+                for vname, workloads in sorted(versions.items()):
+                    workload_status: Dict[str, Any] = {}
+                    for wname, ranks in sorted(workloads.items()):
+                        rank_list = sorted(ranks.keys())
+                        first_entry = ranks[rank_list[0]]
+                        workload_status[wname] = {
+                            "ranks_available": rank_list,
+                            "rank_count": len(rank_list),
+                            "source": first_entry["source"],
+                            "file_size_mb": round(first_entry.get("size_bytes", 0) / (1024 * 1024), 1),
+                            "ready": True,
+                        }
+                    version_status[vname] = {
+                        "workloads": workload_status,
+                        "ready": True,
+                    }
+                    total_versions += 1
+                tp_status[tp_name] = {
+                    "versions": version_status,
+                    "ready_for_comparison": len(version_status) >= 2,
                 }
 
             models_status[mkey] = {
                 "display_name": _get_display_name(mkey),
-                "versions": version_status,
+                "tp_configs": tp_status,
                 "status": "ready",
-                "ready_for_comparison": len(version_status) >= 2,
+                "ready_for_comparison": total_versions >= 2,
             }
 
-            if len(version_status) < 2:
+            if total_versions < 2:
                 all_ready = False
 
         data_source = "S3" if settings.S3_BUCKET else "local"
@@ -2270,6 +2505,8 @@ async def analyze_trace_structure(
     version: str,
     rank: int = 0,
     model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Analyze the temporal structure of a PyTorch profiler trace with transformer block segmentation.
 
@@ -2280,31 +2517,33 @@ async def analyze_trace_structure(
     TOOL_NAME=analyze_trace_structure
     DISPLAY_NAME=Analyze Trace Structure
     USECASE=Perform block-level structural analysis of a PyTorch profiler trace. Use this to understand the temporal structure of inference: how many transformer blocks were captured, what a single representative block looks like (operations in order, per-stream), and where overhead lives (inter-block gaps, intra-block idle).
-    INSTRUCTIONS=1. Specify a vLLM version and optionally a model, 2. The tool detects transformer block boundaries automatically, 3. It picks a median-wall-time block as representative, 4. It returns ordered pipeline breakdown, stream analysis, and overhead accounting
-    INPUT_DESCRIPTION=version (str): vLLM version like "v0.13.0"; model (str, optional): Model name; rank (int): GPU rank (default 0)
+    INSTRUCTIONS=1. Specify a vLLM version, model, tp, and workload, 2. The tool detects transformer block boundaries automatically, 3. It picks a median-wall-time block as representative, 4. It returns ordered pipeline breakdown, stream analysis, and overhead accounting
+    INPUT_DESCRIPTION=version (str): vLLM version like "0.21.0"; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0)
     OUTPUT_DESCRIPTION=Dictionary with block segmentation, median block detail, stream analysis, ordered pipeline breakdown, and overhead metrics
-    EXAMPLES=analyze_trace_structure("v0.13.0"), analyze_trace_structure("v0.11.2", model="gpt-oss")
+    EXAMPLES=analyze_trace_structure("0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
     PREREQUISITES=Profile traces must exist in S3 or local directory
     RELATED_TOOLS=compare_trace_structures, compare_pytorch_profiles, analyze_performance_insights
 
     Args:
-        version: vLLM version (e.g., "v0.13.0")
+        version: vLLM version (e.g., "0.21.0")
         rank: GPU rank to analyze (default: 0)
-        model: Model name (e.g., "deepseek", "gpt-oss")
+        model: Model name (e.g., "deepseek-r1")
+        tp: Tensor parallelism config (e.g., "tp8"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
 
     Returns:
         Dictionary with block segmentation, median block, stream analysis,
         ordered pipeline breakdown, and overhead accounting.
     """
     try:
-        model_key, matched_version, error, index = _resolve_model_and_version(model, version)
+        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
         if error:
             return {"status": "error", "message": error}
-        assert model_key is not None and matched_version is not None
+        assert model_key is not None and matched_tp is not None and matched_version is not None and matched_workload is not None
 
         display_name = _get_display_name(model_key)
 
-        raw_events = _load_raw_events(model_key, matched_version, rank)
+        raw_events = _load_raw_events(model_key, matched_tp, matched_version, matched_workload, rank)
         if not raw_events:
             return {
                 "status": "error",
@@ -2387,6 +2626,8 @@ async def compare_trace_structures(
     version2: str,
     rank: int = 0,
     model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compare trace structure between two vLLM versions at the transformer block level.
 
@@ -2397,10 +2638,10 @@ async def compare_trace_structures(
     TOOL_NAME=compare_trace_structures
     DISPLAY_NAME=Compare Trace Structures
     USECASE=Compare the temporal structure of two vLLM versions at the transformer block level. Use this for deep root-cause analysis: it compares median blocks operation-by-operation (preserving execution order), analyses stream overlap changes, computes overhead deltas, and produces structured root-cause objects with per-kernel evidence and suggested source files.
-    INSTRUCTIONS=1. Specify two vLLM versions, 2. Optionally specify model, 3. The tool segments both traces into blocks, picks median blocks, and compares them structurally
-    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; rank (int): GPU rank (default 0)
+    INSTRUCTIONS=1. Specify two vLLM versions, model, tp, and workload, 2. The tool segments both traces into blocks, picks median blocks, and compares them structurally
+    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0)
     OUTPUT_DESCRIPTION=Dictionary with per-version median block details, ordered pipeline comparison, stream analysis diff, overhead comparison, and structured root causes
-    EXAMPLES=compare_trace_structures("v0.11.2", "v0.13.0"), compare_trace_structures("v0.11.2", "v0.13.0", model="gpt-oss")
+    EXAMPLES=compare_trace_structures("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
     PREREQUISITES=Profile traces must exist for both versions
     RELATED_TOOLS=analyze_trace_structure, compare_pytorch_profiles, analyze_performance_insights
 
@@ -2409,37 +2650,34 @@ async def compare_trace_structures(
         version2: Comparison vLLM version
         rank: GPU rank (default: 0)
         model: Model name
+        tp: Tensor parallelism config (e.g., "tp8"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
 
     Returns:
         Dictionary with structural comparison of median blocks including
         root causes, pipeline breakdowns, stream analysis, and overhead.
     """
     try:
-        # Resolve model and both versions
-        index = _discover_profiles()
-        if not index:
-            return {"status": "error", "message": "No profile data available."}
+        # Resolve v1 first, then match v2 under same model/tp/workload
+        model_key, matched_tp, mv1, matched_workload, error, index = _resolve_profile(model, tp, version1, workload)
+        if error:
+            return {"status": "error", "message": error}
+        assert model_key is not None and matched_tp is not None and mv1 is not None and matched_workload is not None
 
-        available_models = sorted(index.keys())
-        matches = _match_all_models(model, available_models)
-        if not matches:
-            return {"status": "error", "message": f"Model '{model}' not found. Available: {available_models}"}
-        if len(matches) > 1:
-            return {"status": "error", "message": f"Multiple models match '{model}': {', '.join(matches)}. Please specify."}
-        model_key = matches[0]
         display_name = _get_display_name(model_key)
 
-        available_versions = sorted(index[model_key].keys())
-        mv1 = _match_version(version1, available_versions)
+        tp_data = index[model_key][matched_tp]
+        available_versions = sorted(tp_data.keys())
         mv2 = _match_version(version2, available_versions)
-        if mv1 is None:
-            return {"status": "error", "message": f"Version '{version1}' not found. Available: {available_versions}"}
         if mv2 is None:
             return {"status": "error", "message": f"Version '{version2}' not found. Available: {available_versions}"}
 
-        # Load raw events for both versions
-        raw1 = _load_raw_events(model_key, mv1, rank)
-        raw2 = _load_raw_events(model_key, mv2, rank)
+        if matched_workload not in tp_data.get(mv2, {}):
+            wl_v2 = sorted(tp_data.get(mv2, {}).keys())
+            return {"status": "error", "message": f"Workload '{matched_workload}' not found for {mv2}. Available: {wl_v2}"}
+
+        raw1 = _load_raw_events(model_key, matched_tp, mv1, matched_workload, rank)
+        raw2 = _load_raw_events(model_key, matched_tp, mv2, matched_workload, rank)
         if not raw1:
             return {"status": "error", "message": f"No trace found for {display_name} {mv1} rank {rank}"}
         if not raw2:

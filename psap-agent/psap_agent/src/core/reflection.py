@@ -43,6 +43,8 @@ The agent has TWO valid data sources:
 - Memory Context from past interactions (if provided below)
 Data from EITHER source is valid and NOT fabrication.
 
+CONFLICT RESOLUTION: When a live tool result EXPLICITLY contradicts memory context (e.g. tool says "model not found" but memory says it exists), the live tool result takes precedence. Memory context can become stale. Do NOT force the agent to override a clear tool result with potentially outdated memory. The agent should acknowledge both (e.g. "previously available but not currently listed") rather than asserting the memory-based claim as current fact.
+
 CRITICAL DISTINCTION — General knowledge vs. data claims:
 - **General knowledge** (e.g. "what is Nvidia?", "what does vLLM do?", "explain CUDA") does NOT require tool evidence. Well-known facts about companies, technologies, and concepts are valid without tool calls.
 - **Data-specific claims** (e.g. metrics, benchmark numbers, model performance, URLs, configuration details) MUST come from tool outputs or memory context.
@@ -53,6 +55,8 @@ Check for these issues:
 2. UNSUPPORTED DATA CLAIMS: Specific metrics, benchmark numbers, or dataset-specific facts that don't come from tool outputs OR memory context. General knowledge about technologies, companies, or concepts is NOT an unsupported claim.
 3. MISSING TOOL EVIDENCE: Data-specific claims that should be backed by tool calls or memory but aren't. Do NOT require tool evidence for general knowledge.
 4. INCOMPLETE RESPONSE: Parts of the user's question that weren't addressed.
+5. INTERNAL CONTRADICTIONS: Numbers or claims within the response that contradict each other. For example, a sub-component duration that exceeds the stated total, or percentage breakdowns that don't add up. Cross-check all tables and quantitative claims against each other.
+6. FABRICATED VALUES IN CODE BLOCKS: When the response includes reconstructed commands (in code blocks), verify that specific numeric values, paths, and endpoints are traceable to tool outputs or memory context. Common argument NAMES (e.g. --model, --tensor-parallel-size) can be inferred from context, but specific VALUES (e.g. a number of prompts, a port, an API endpoint path) must appear somewhere in the tool data. If a specific number in a code block does not appear in any tool output, flag it.
 
 IMPORTANT: Asking the user for clarification IS a valid and complete response when:
 - The user's query is ambiguous (e.g. "what's the performance?" without specifying which model/profile/config)
@@ -78,6 +82,78 @@ _VERSION_QUERY_PATTERNS = re.compile(
     r"|(?:(?:v?\d+\.\d+).*(?:feature|change|release|note))",
     re.IGNORECASE,
 )
+
+_TABLE_ROW_PATTERN = re.compile(
+    r"\|\s*\*{0,2}(?P<label>[^|*]+?)\*{0,2}\s*\|"
+    r"[^|]*?"
+    r"(?P<value>[\d,]+(?:\.\d+)?)\s*(?P<unit>µs|us|ms|s)"
+)
+
+_UNIT_TO_US = {"s": 1_000_000, "ms": 1_000, "us": 1, "µs": 1}
+
+
+def _normalize_to_us(value: float, unit: str) -> float:
+    """Convert a duration value to microseconds."""
+    return value * _UNIT_TO_US.get(unit.lower().replace("µ", "u"), 1)
+
+
+def _check_numerical_consistency(response: str) -> list[str]:
+    """Check for internal contradictions in numerical claims.
+
+    Detects cases where a sub-component duration exceeds a stated total,
+    or percentage breakdowns that are clearly impossible.
+    """
+    issues: list[str] = []
+
+    # Extract all duration values from tables
+    table_rows: list[tuple[str, float, str]] = []
+    for match in _TABLE_ROW_PATTERN.finditer(response):
+        label = match.group("label").strip().lower()
+        value_str = match.group("value").replace(",", "")
+        unit = match.group("unit")
+        try:
+            value = float(value_str)
+            table_rows.append((label, value, unit))
+        except ValueError:
+            continue
+
+    # Look for "total" rows and check that components don't exceed them
+    total_keywords = ("total", "wall time", "block wall", "overall")
+    component_keywords = ("idle", "active", "overhead", "gap")
+
+    totals_us: list[tuple[str, float]] = []
+    components_us: list[tuple[str, float]] = []
+
+    for label, value, unit in table_rows:
+        value_us = _normalize_to_us(value, unit)
+        if any(kw in label for kw in total_keywords):
+            totals_us.append((label, value_us))
+        elif any(kw in label for kw in component_keywords):
+            components_us.append((label, value_us))
+
+    for total_label, total_val in totals_us:
+        for comp_label, comp_val in components_us:
+            if comp_val > total_val * 1.1:
+                issues.append(
+                    f"INCONSISTENCY: '{comp_label}' ({comp_val:.0f}µs) exceeds "
+                    f"stated '{total_label}' ({total_val:.0f}µs)"
+                )
+
+    # Check percentage breakdowns that claim to sum to 100%
+    pct_pattern = re.compile(
+        r"(?P<value>\d+(?:\.\d+)?)\s*%\s*(?:of\s+regression|of\s+total)",
+        re.IGNORECASE,
+    )
+    pct_values = [float(m.group("value")) for m in pct_pattern.finditer(response)]
+    if len(pct_values) >= 2:
+        pct_sum = sum(pct_values)
+        if pct_sum > 120:
+            issues.append(
+                f"INCONSISTENCY: percentage breakdown sums to {pct_sum:.0f}% "
+                f"(values: {pct_values}), exceeds plausible 100%"
+            )
+
+    return issues
 
 
 def verify_tool_outputs(messages: list[BaseMessage], user_query: str = "") -> list[str]:
@@ -124,6 +200,10 @@ def verify_tool_outputs(messages: list[BaseMessage], user_query: str = "") -> li
         if not any(url_clean in tool_url or tool_url in url_clean for tool_url in tool_output_urls):
             issues.append(f"URL not from tool output: {url_clean[:100]}")
 
+    # Check: internal numerical contradictions
+    consistency_issues = _check_numerical_consistency(final_ai_content)
+    issues.extend(consistency_issues)
+
     return issues
 
 
@@ -157,7 +237,7 @@ async def run_critic(
         elif getattr(msg, "type", "") == "tool":
             call_id = getattr(msg, "tool_call_id", "")
             call_desc = pending_calls.pop(call_id, getattr(msg, "name", "tool"))
-            result_text = str(getattr(msg, "content", ""))[:10000]
+            result_text = str(getattr(msg, "content", ""))[:30000]
             tool_exchanges.append(f"CALL: {call_desc}\nRESULT: {result_text}")
 
     if not final_response:
@@ -188,7 +268,7 @@ async def run_critic(
             client = get_client()
             langfuse_gen = client.start_generation(
                 name="critic",
-                model=settings.LLM_JUDGE_MODEL,
+                model=settings.CRITIC_MODEL,
                 input=[
                     {"role": "system", "content": CRITIC_SYSTEM_PROMPT[:200] + "..."},
                     {"role": "user", "content": critic_prompt},
@@ -200,7 +280,7 @@ async def run_critic(
 
     try:
         critic_model = ChatGoogleGenerativeAI(
-            model=settings.LLM_JUDGE_MODEL,
+            model=settings.CRITIC_MODEL,
             temperature=0.0,
         )
 

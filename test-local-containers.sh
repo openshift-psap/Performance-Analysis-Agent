@@ -574,7 +574,7 @@ start_mcp_server() {
     
     # PyTorch profile S3 prefix (profiles are loaded from S3 at runtime)
     PROFILE_ENV=""
-    PROFILE_S3_PREFIX="${PROFILE_S3_PREFIX:-profiles/rhaiis}"
+    PROFILE_S3_PREFIX="${PROFILE_S3_PREFIX:-pytorch-profiles/rhaiis}"
     if [ -n "$S3_BUCKET" ]; then
         PROFILE_ENV="-e PROFILE_S3_PREFIX=$PROFILE_S3_PREFIX"
         log_info "PyTorch profiles (S3): s3://$S3_BUCKET/$PROFILE_S3_PREFIX"
@@ -677,7 +677,8 @@ start_agent() {
       -e "LANGFUSE_HOST=http://langfuse-web:3000"
       -e "LANGFUSE_TRACING_ENVIRONMENT=production"
       -e "ENABLE_LLM_JUDGE=${ENABLE_LLM_JUDGE:-true}"
-      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
+      -e "CRITIC_MODEL=${CRITIC_MODEL:-gemini-3.1-pro-preview}"
+      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3.5-flash}"
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
       -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"
@@ -752,7 +753,7 @@ start_mcp_server_staging() {
     fi
 
     PROFILE_ENV_STAGING=""
-    PROFILE_S3_PREFIX="${PROFILE_S3_PREFIX:-profiles/rhaiis}"
+    PROFILE_S3_PREFIX="${PROFILE_S3_PREFIX:-pytorch-profiles/rhaiis}"
     if [ -n "$S3_BUCKET" ]; then
         PROFILE_ENV_STAGING="-e PROFILE_S3_PREFIX=$PROFILE_S3_PREFIX"
     fi
@@ -812,7 +813,8 @@ start_agent_staging() {
       -e "LANGFUSE_HOST=http://langfuse-web:3000"
       -e "LANGFUSE_TRACING_ENVIRONMENT=staging"
       -e "ENABLE_LLM_JUDGE=${ENABLE_LLM_JUDGE:-true}"
-      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3-flash-preview}"
+      -e "CRITIC_MODEL=${CRITIC_MODEL:-gemini-3.1-pro-preview}"
+      -e "LLM_JUDGE_MODEL=${LLM_JUDGE_MODEL:-gemini-3.5-flash}"
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
       -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"

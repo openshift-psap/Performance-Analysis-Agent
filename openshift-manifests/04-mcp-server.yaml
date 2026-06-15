@@ -103,9 +103,9 @@ spec:
               name: psap-secrets
               key: AWS_SECRET_ACCESS_KEY
               optional: true
-        # PyTorch profile S3 prefix (model/version/trace_*.json)
+        # PyTorch profile S3 prefix (<accel>/<model>/<tp>/<version>/<workload>/trace_*.json)
         - name: PROFILE_S3_PREFIX
-          value: "profiles/rhaiis"
+          value: "pytorch-profiles/rhaiis"
         resources:
           requests:
             memory: "512Mi"

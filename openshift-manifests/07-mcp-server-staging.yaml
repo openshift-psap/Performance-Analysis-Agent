@@ -99,7 +99,7 @@ spec:
               key: AWS_SECRET_ACCESS_KEY
               optional: true
         - name: PROFILE_S3_PREFIX
-          value: "profiles/rhaiis"
+          value: "pytorch-profiles/rhaiis"
         resources:
           requests:
             memory: "512Mi"

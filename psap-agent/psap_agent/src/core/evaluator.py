@@ -67,7 +67,11 @@ EVAL_CRITERIA = {
             "Only flag as hallucination when SPECIFIC metrics, benchmark numbers, URLs, or dataset-specific facts are fabricated. "
             "The agent has TWO valid data sources: tool CALL/RESULT pairs AND memory context "
             "from past interactions. Data from EITHER source is NOT fabrication. "
-            "Carefully cross-reference EVERY claim against ALL tool results AND memory context before flagging."
+            "Carefully cross-reference EVERY claim against ALL tool results AND memory context before flagging. "
+            "CODE BLOCK CHECK: When the response contains reconstructed commands in code blocks, verify that "
+            "specific numeric values and paths in those commands are traceable to tool outputs. Argument names "
+            "can be inferred, but specific VALUES (e.g. a number like 1608, an endpoint like /v1/completions) "
+            "must appear in the tool data. A number in a code block that exists nowhere in tool outputs is fabrication."
         ),
     },
     "completeness": {
@@ -85,6 +89,18 @@ EVAL_CRITERIA = {
             "data that directly answers part of the user's query but the response ignores "
             "or contradicts that data, this is incomplete — even if the response is otherwise "
             "well-structured."
+        ),
+    },
+    "internal_consistency": {
+        "description": "Are the numbers and claims within the response logically consistent with each other?",
+        "rubric": (
+            "Score 1.0: All numbers, percentages, and quantitative claims are internally consistent. "
+            "Sub-components do not exceed totals, percentage breakdowns sum correctly, and no table "
+            "contradicts another table in the same response. "
+            "Score 0.5: Minor arithmetic imprecision (rounding differences). "
+            "Score 0.0: Clear logical contradictions between numbers in the response "
+            "(e.g., a sub-component duration exceeding the stated total, or a 'per block' metric "
+            "that is impossible given other 'per block' metrics in the same response)."
         ),
     },
 }
@@ -236,7 +252,7 @@ async def _run_single_eval(
     return criterion_name, None
 
 
-_CRITERIA_NEEDING_FULL_RESULTS = {"correctness", "hallucination", "completeness"}
+_CRITERIA_NEEDING_FULL_RESULTS = {"correctness", "hallucination", "completeness", "internal_consistency"}
 
 
 _MEMORY_CONTEXT_MARKER = "[SYSTEM - Memory Context (use if relevant, ignore if not)]"
@@ -293,7 +309,7 @@ def _extract_conversation_parts(messages: list) -> tuple[str, str, str, str, str
 
 
 _MEMORY_GATE_THRESHOLD = 1.0
-_MEMORY_GATE_CRITERIA = ("hallucination", "correctness", "completeness")
+_MEMORY_GATE_CRITERIA = ("hallucination", "correctness", "completeness", "internal_consistency")
 
 
 async def evaluate_response(
