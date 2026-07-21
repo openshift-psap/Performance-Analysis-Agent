@@ -66,6 +66,12 @@ spec:
               name: psap-secrets
               key: GRAFANA_DATASOURCE_UID
               optional: true
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: GITHUB_TOKEN
+              optional: true
         # S3 Configuration for performance data
         - name: S3_BUCKET
           valueFrom:

@@ -147,7 +147,15 @@ prompt_for_credentials() {
             fi
         fi
         
-        # Prompt for any missing Grafana credentials
+        # GitHub Token (for vLLM release/PR lookups — optional)
+    if [ -z "$GITHUB_TOKEN" ] && [ -f psap-mcp-server/.env ] && grep -q "GITHUB_TOKEN" psap-mcp-server/.env; then
+        GITHUB_TOKEN=$(grep "GITHUB_TOKEN" psap-mcp-server/.env | grep -v '^#' | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        if [ -n "$GITHUB_TOKEN" ]; then
+            log_success "GitHub Token loaded from psap-mcp-server/.env"
+        fi
+    fi
+
+    # Prompt for any missing Grafana credentials
         if [ -z "$GRAFANA_URL" ]; then
             log_warning "Grafana URL not found"
             read -p "Enter your GRAFANA_URL (e.g., https://grafana.example.com): " GRAFANA_URL
@@ -236,6 +244,11 @@ prompt_for_credentials() {
     else
         echo "  ⚠ Grafana:                 Not configured"
     fi
+    if [ -n "$GITHUB_TOKEN" ]; then
+        echo "  ✓ GitHub Token:            ${GITHUB_TOKEN:0:20}..."
+    else
+        echo "  ⚠ GitHub Token:            Not configured (60 req/hr rate limit)"
+    fi
     if [ -n "$S3_BUCKET" ]; then
         echo "  ✓ S3 Bucket:               $S3_BUCKET"
         echo "  ✓ S3 Key:                  $S3_KEY"
@@ -323,6 +336,13 @@ build_images() {
     build_mcp
     build_agent
     build_streamlit
+    prune_old_images
+}
+
+prune_old_images() {
+    log_info "Pruning dangling images to free disk space..."
+    podman image prune -f > /dev/null 2>&1 || true
+    log_success "Image prune complete"
 }
 
 # Map user-facing component names to build/start functions and container names.
@@ -598,6 +618,7 @@ start_mcp_server() {
       -e GRAFANA_URL="$GRAFANA_URL" \
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
+      -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
       -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-https://aidash.app.intlab.redhat.com}" \
       $S3_ENV_VARS \
       $PROFILE_ENV \
@@ -773,6 +794,7 @@ start_mcp_server_staging() {
       -e GRAFANA_URL="$GRAFANA_URL" \
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
+      -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
       -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL_STAGING:-https://staging-aidash.apps.ocp4.intlab.redhat.com}" \
       $S3_ENV_VARS_STAGING \
       $PROFILE_ENV_STAGING \
@@ -1063,6 +1085,7 @@ case "${1:-}" in
             for comp in $(resolve_component "$2"); do
                 build_component "$comp"
             done
+            prune_old_images
         else
             log_info "Rebuilding all images..."
             build_images
