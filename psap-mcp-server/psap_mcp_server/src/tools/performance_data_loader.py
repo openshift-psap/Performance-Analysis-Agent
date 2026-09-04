@@ -448,6 +448,23 @@ def get_available_models(dashboard: str = "rhaiis") -> list[str]:
         return []
 
 
+def get_base_accelerator(name: str) -> str:
+    """Extract the base GPU type from a cluster-specific accelerator name.
+
+    Cluster-specific names follow the pattern ``{GPU_TYPE}_{CLUSTER}``
+    (e.g. ``H200_ZEUS2``, ``H200_HERA``).  This returns the base GPU type
+    (``H200``) so tools can cross-reference data across clusters that use
+    the same hardware.
+
+    If the name has no underscore or is already a base type, returns it
+    unchanged (e.g. ``H200`` → ``H200``, ``MI300X`` → ``MI300X``).
+    """
+    if not name:
+        return name
+    parts = name.split("_", 1)
+    return parts[0]
+
+
 def get_available_accelerators(dashboard: str = "rhaiis") -> list[str]:
     """Get list of available accelerators in the specified dashboard.
 

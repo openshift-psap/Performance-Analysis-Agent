@@ -70,7 +70,7 @@ async def discover_configurations(
             filters_applied["version"] = version
         
         if accelerator:
-            df = df[df["accelerator"] == accelerator]
+            df = df[df["accelerator"].str.contains(accelerator, case=False, na=False)]
             filters_applied["accelerator"] = accelerator
         
         if model:

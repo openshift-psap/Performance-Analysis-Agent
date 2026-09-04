@@ -67,10 +67,23 @@ def _find_uuid_for_run(
             return None, f"Model '{model}' not found for version '{version}'. Available models: {available}"
 
     if accelerator:
+        pre_accel = filtered
         filtered = filtered[filtered["accelerator"].str.contains(accelerator, case=False, na=False)]
         if filtered.empty:
-            available = sorted(df["accelerator"].dropna().unique().tolist())
-            return None, f"Accelerator '{accelerator}' not found for version '{version}'. Available: {available}"
+            # Cluster-specific names like H200_ZEUS2 share hardware with the
+            # base GPU type H200.  Try the base type as a fallback.
+            from psap_mcp_server.src.tools.performance_data_loader import get_base_accelerator
+            base = get_base_accelerator(accelerator)
+            if base.lower() != accelerator.lower():
+                filtered = pre_accel[pre_accel["accelerator"].str.contains(base, case=False, na=False)]
+            if filtered.empty:
+                available = sorted(df["accelerator"].dropna().unique().tolist())
+                return None, f"Accelerator '{accelerator}' not found for version '{version}'. Available: {available}"
+            if base.lower() != accelerator.lower():
+                logger.info(
+                    f"Accelerator '{accelerator}' not found; using base GPU type '{base}' "
+                    f"(same hardware, different cluster)"
+                )
 
     if tp is not None and "TP" in filtered.columns:
         filtered = filtered[filtered["TP"] == tp]
