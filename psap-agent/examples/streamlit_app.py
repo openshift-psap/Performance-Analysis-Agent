@@ -224,7 +224,25 @@ def apply_custom_css():
         .stSelectbox [data-baseweb="select"],
         .stSelectbox [data-baseweb="select"] > div {
             background-color: #ffffff !important;
-            color: #31333F !important;
+            color: #000000 !important;
+        }
+        .stSelectbox [data-baseweb="select"] span,
+        .stSelectbox [data-baseweb="select"] [data-testid="stMarkdownContainer"],
+        .stSelectbox [data-baseweb="select"] div[class*="ValueContainer"] span,
+        .stSelectbox [data-baseweb="select"] div[class*="singleValue"],
+        .stSelectbox [data-baseweb="select"] div,
+        .stSelectbox [data-baseweb="select"] div span,
+        .stSelectbox [data-baseweb="select"] *,
+        [data-testid="stSidebar"] .stSelectbox *,
+        [data-testid="stSidebar"] [data-baseweb="select"] *,
+        [data-testid="stSidebar"] [data-baseweb="select"] div,
+        [data-testid="stSidebar"] [data-baseweb="select"] span {
+            color: #000000 !important;
+            -webkit-text-fill-color: #000000 !important;
+        }
+        .stSelectbox svg,
+        [data-testid="stSidebar"] .stSelectbox svg {
+            fill: #000000 !important;
         }
         /* Dropdown popover / menu list */
         [data-baseweb="popover"],
@@ -711,14 +729,14 @@ def main():
         # API status (cached to avoid flaky checks on every Streamlit re-render)
         def _check_api_health(url: str) -> bool:
             try:
-                return requests.get(f"{url}/health", timeout=5).status_code == 200
+                return requests.get(f"{url}/health", timeout=15).status_code == 200
             except Exception:
                 return False
 
         cache_key = "_api_health_cache"
         now = time.time()
         cached = st.session_state.get(cache_key, {})
-        if now - cached.get("ts", 0) > 15 or cached.get("url") != default_api_url:
+        if now - cached.get("ts", 0) > 120 or cached.get("url") != default_api_url:
             healthy = _check_api_health(default_api_url)
             st.session_state[cache_key] = {"ts": now, "url": default_api_url, "ok": healthy}
         else:

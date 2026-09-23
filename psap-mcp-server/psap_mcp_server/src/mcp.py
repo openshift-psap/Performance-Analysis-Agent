@@ -57,6 +57,7 @@ from psap_mcp_server.src.tools.pytorch_profile_tool import (
     analyze_performance_insights,
     analyze_trace_structure,
     compare_trace_structures,
+    get_kernel_call_stacks,
 )
 from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     map_kernel_to_vllm_code,
@@ -129,6 +130,7 @@ class PSAPMCPServer:
         - analyze_pytorch_profile: Analyze PyTorch profiler traces for kernel-level performance
         - compare_pytorch_profiles: Compare profiler traces between vLLM versions
         - list_available_profiles: List available PyTorch profile traces
+        - get_kernel_call_stacks: Get real Python/C++ call stacks for a kernel from profile traces
         - analyze_trace_structure: Block-level structural analysis with median block, streams, overhead
         - compare_trace_structures: Compare trace structures between versions with root-cause detection
         - map_kernel_to_vllm_code: Map kernel names to vLLM source code locations
@@ -164,6 +166,7 @@ class PSAPMCPServer:
         self.mcp.tool()(list_available_profiles)
         self.mcp.tool()(check_profile_status)
         self.mcp.tool()(analyze_performance_insights)
+        self.mcp.tool()(get_kernel_call_stacks)
         # Register trace structure analysis tools (block segmentation, median block, streams, overhead)
         self.mcp.tool()(analyze_trace_structure)
         self.mcp.tool()(compare_trace_structures)

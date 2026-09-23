@@ -272,6 +272,18 @@ def _match_all_models(user_model: Optional[str], available_models: List[str]) ->
         if _is_exact_model_match(lower, key):
             return [key]
 
+    # 1b. Accelerator-normalized match: cluster-specific names like
+    #     H200_ZEUS2/model share hardware with H200/model.
+    if "/" in lower:
+        from psap_mcp_server.src.tools.performance_data_loader import get_base_accelerator
+        user_accel, user_bare = lower.split("/", 1)
+        base_accel = get_base_accelerator(user_accel).lower()
+        if base_accel != user_accel:
+            normalized_key = f"{base_accel}/{user_bare}"
+            for key in available_models:
+                if _is_exact_model_match(normalized_key, key):
+                    return [key]
+
     # 2. Exact match on bare model part (case+separator insensitive)
     exact_bare = []
     for key in available_models:
@@ -630,10 +642,14 @@ def _extract_kernel_stats(trace: dict) -> Dict[str, Dict]:
     """Extract kernel statistics from a Chrome trace JSON dict.
 
     Returns dict of ``kernel_name -> {count, total_dur, avg_dur, min_dur,
-    max_dur, cat}``.
+    max_dur, cat, call_stacks}``.
+
+    If the trace was collected with ``with_stack=True``, each kernel entry
+    includes a ``call_stacks`` dict mapping unique stack strings to their
+    invocation count.  For profiles without stacks this field is an empty dict.
     """
     stats: Dict[str, Dict] = defaultdict(
-        lambda: {"count": 0, "total_dur": 0, "min_dur": float("inf"), "max_dur": 0, "cat": ""}
+        lambda: {"count": 0, "total_dur": 0, "min_dur": float("inf"), "max_dur": 0, "cat": "", "call_stacks": {}}
     )
 
     for event in trace.get("traceEvents", []):
@@ -648,6 +664,12 @@ def _extract_kernel_stats(trace: dict) -> Dict[str, Dict]:
                 stats[name]["max_dur"] = max(stats[name]["max_dur"], dur)
                 if not stats[name]["cat"]:
                     stats[name]["cat"] = cat
+
+                args = event.get("args")
+                if args:
+                    stack = args.get("Call stack") or args.get("Python call stack") or ""
+                    if stack:
+                        stats[name]["call_stacks"][stack] = stats[name]["call_stacks"].get(stack, 0) + 1
 
     for data in stats.values():
         data["avg_dur"] = data["total_dur"] / data["count"] if data["count"] > 0 else 0
@@ -761,7 +783,7 @@ def _load_or_extract_stats(
 def _merge_stats(stats_list: List[Dict[str, Dict]]) -> Dict[str, Dict]:
     """Merge statistics from multiple ranks into one aggregated view."""
     merged: Dict[str, Dict] = defaultdict(
-        lambda: {"count": 0, "total_dur": 0, "min_dur": float("inf"), "max_dur": 0, "cat": ""}
+        lambda: {"count": 0, "total_dur": 0, "min_dur": float("inf"), "max_dur": 0, "cat": "", "call_stacks": {}}
     )
 
     for stats in stats_list:
@@ -776,6 +798,8 @@ def _merge_stats(stats_list: List[Dict[str, Dict]]) -> Dict[str, Dict]:
             )
             if not merged[name]["cat"]:
                 merged[name]["cat"] = data.get("cat", "")
+            for stack, count in data.get("call_stacks", {}).items():
+                merged[name]["call_stacks"][stack] = merged[name]["call_stacks"].get(stack, 0) + count
 
     for data in merged.values():
         data["avg_dur"] = data["total_dur"] / data["count"] if data["count"] > 0 else 0
@@ -818,19 +842,26 @@ def _get_top_kernels(stats: Dict[str, Dict], n: int = 30, sort_by: str = "total_
 
     result = []
     for name, data in sorted_kernels[:n]:
-        result.append(
-            {
-                "name": name,
-                "category": data.get("cat", "unknown"),
-                "count": data["count"],
-                "total_dur_us": data["total_dur"],
-                "total_dur_human": _format_duration(data["total_dur"]),
-                "avg_dur_us": data.get("avg_dur", 0),
-                "avg_dur_human": _format_duration(data.get("avg_dur", 0)),
-                "min_dur_us": data.get("min_dur", 0),
-                "max_dur_us": data.get("max_dur", 0),
+        entry = {
+            "name": name,
+            "category": data.get("cat", "unknown"),
+            "count": data["count"],
+            "total_dur_us": data["total_dur"],
+            "total_dur_human": _format_duration(data["total_dur"]),
+            "avg_dur_us": data.get("avg_dur", 0),
+            "avg_dur_human": _format_duration(data.get("avg_dur", 0)),
+            "min_dur_us": data.get("min_dur", 0),
+            "max_dur_us": data.get("max_dur", 0),
+        }
+        call_stacks = data.get("call_stacks", {})
+        if call_stacks:
+            primary_stack = max(call_stacks, key=call_stacks.get)
+            entry["source_attribution"] = {
+                "call_stack": primary_stack,
+                "confidence": "profile_stack_trace",
+                "unique_stacks": len(call_stacks),
             }
-        )
+        result.append(entry)
 
     return result
 
@@ -867,7 +898,8 @@ def _extract_raw_events(trace: dict) -> List[Dict[str, Any]]:
     """Extract duration events from a Chrome trace, preserving temporal/stream info.
 
     Returns a list of dicts sorted by start time (ts), each with:
-    name, cat, ts (start µs), dur (µs), end (µs), tid (stream/thread id), pid.
+    name, cat, ts (start µs), dur (µs), end (µs), tid (stream/thread id), pid,
+    and stack (call stack string, empty if not available).
     Only includes complete duration events (ph == "X") with dur > 0.
     """
     events = []
@@ -875,6 +907,10 @@ def _extract_raw_events(trace: dict) -> List[Dict[str, Any]]:
         if ev.get("ph") == "X" and ev.get("dur", 0) > 0:
             ts = ev["ts"]
             dur = ev["dur"]
+            args = ev.get("args")
+            stack = ""
+            if args:
+                stack = args.get("Call stack") or args.get("Python call stack") or ""
             events.append({
                 "name": ev.get("name", "unknown"),
                 "cat": ev.get("cat", ""),
@@ -883,6 +919,7 @@ def _extract_raw_events(trace: dict) -> List[Dict[str, Any]]:
                 "end": ts + dur,
                 "tid": ev.get("tid", 0),
                 "pid": ev.get("pid", 0),
+                "stack": stack,
             })
     events.sort(key=lambda e: e["ts"])
     return events
@@ -1757,8 +1794,7 @@ async def compare_pytorch_profiles(
                 count_change_pct = ((count2 - count1) / count1 * 100) if count1 > 0 else (100.0 if count2 > 0 else 0.0)
                 avg_change_pct = ((avg2 - avg1) / avg1 * 100) if avg1 > 0 else (100.0 if avg2 > 0 else 0.0)
 
-                diffs.append(
-                    {
+                diff_entry = {
                         "name": kernel,
                         "category": s1.get("cat", "") or s2.get("cat", ""),
                         "total1_us": total1,
@@ -1779,7 +1815,18 @@ async def compare_pytorch_profiles(
                         "is_new": total1 == 0,
                         "is_removed": total2 == 0,
                     }
-                )
+
+                stacks2 = s2.get("call_stacks", {})
+                stacks1 = s1.get("call_stacks", {})
+                active_stacks = stacks2 or stacks1
+                if active_stacks:
+                    primary_stack = max(active_stacks, key=active_stacks.get)
+                    diff_entry["source_attribution"] = {
+                        "call_stack": primary_stack,
+                        "confidence": "profile_stack_trace",
+                    }
+
+                diffs.append(diff_entry)
 
         diffs_by_impact = sorted(diffs, key=lambda x: abs(x["diff_abs_us"]), reverse=True)
 
@@ -2391,6 +2438,121 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
     except Exception as exc:
         logger.error(f"Error listing profiles: {exc}")
         return {"status": "error", "message": f"Failed to list profiles: {exc}"}
+
+
+async def get_kernel_call_stacks(
+    kernel_name: str,
+    version: str,
+    model: Optional[str] = None,
+    tp: Optional[str] = None,
+    workload: Optional[str] = None,
+    rank: int = 0,
+) -> Dict[str, Any]:
+    """Retrieve call stack attribution for a specific kernel from a PyTorch profile trace.
+
+    Returns the Python/C++ call paths that dispatched a kernel, extracted from
+    profiles collected with ``with_stack=True``.  If the profile was collected
+    without stacks, returns an informational message indicating stacks are
+    unavailable for that version.
+
+    TOOL_NAME=get_kernel_call_stacks
+    DISPLAY_NAME=Get Kernel Call Stacks
+    USECASE=Look up the real Python/C++ call path for a kernel from a profile trace. Use this to get ground-truth source attribution for any kernel identified by analyze_pytorch_profile or compare_pytorch_profiles. Only available for profiles collected with stack traces enabled.
+    INSTRUCTIONS=1. Provide a kernel name from profiler output, 2. Specify the version and optionally model/tp/workload, 3. Returns deduplicated call stacks ranked by frequency
+    INPUT_DESCRIPTION=kernel_name (str): Exact kernel name from profiler; version (str): vLLM version; model (str, optional): Model name; tp (str, optional): TP config; workload (str, optional): ISL/OSL workload; rank (int): GPU rank (default 0)
+    OUTPUT_DESCRIPTION=Dictionary with call stacks ranked by invocation count, or a message indicating stacks are not available
+    EXAMPLES=get_kernel_call_stacks("fused_moe_kernel", "0.22.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
+    PREREQUISITES=Profile traces must exist for the specified version (ideally collected with with_stack=True)
+    RELATED_TOOLS=analyze_pytorch_profile, compare_pytorch_profiles, map_kernel_to_vllm_code
+
+    Args:
+        kernel_name: Exact kernel name from profiler output.
+        version: vLLM version (e.g., "0.22.0").
+        model: Model name (e.g., "deepseek-r1").
+        tp: Tensor parallelism config (e.g., "tp8"). Auto-selected if only one exists.
+        workload: ISL/OSL workload (e.g., "isl1000_osl1000"). Auto-selected if only one exists.
+        rank: GPU rank (default: 0).
+
+    Returns:
+        Dictionary with call stacks or unavailability message.
+    """
+    try:
+        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
+        if error:
+            return {"status": "error", "message": error}
+        assert model_key is not None and matched_tp is not None and matched_version is not None and matched_workload is not None
+
+        display_name = _get_display_name(model_key)
+
+        stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, rank)
+        if not stats:
+            return {"status": "error", "message": f"No profile data for {display_name} {matched_version} rank {rank}"}
+
+        if kernel_name not in stats:
+            similar = [k for k in stats if kernel_name.lower() in k.lower()][:10]
+            return {
+                "status": "error",
+                "message": f"Kernel '{kernel_name}' not found in profile",
+                "similar_kernels": similar,
+                "suggestion": "Use an exact kernel name from analyze_pytorch_profile output",
+            }
+
+        kernel_data = stats[kernel_name]
+        call_stacks = kernel_data.get("call_stacks", {})
+
+        if not call_stacks:
+            return {
+                "status": "success",
+                "kernel_name": kernel_name,
+                "version": matched_version,
+                "model": display_name,
+                "stacks_available": False,
+                "message": (
+                    f"No call stacks available for '{kernel_name}' in {display_name} {matched_version}. "
+                    f"This profile was likely collected without with_stack=True. "
+                    f"Stack traces are available for profiles collected after stack tracing was enabled."
+                ),
+                "kernel_stats": {
+                    "count": kernel_data["count"],
+                    "total_dur_us": kernel_data["total_dur"],
+                    "avg_dur_us": kernel_data.get("avg_dur", 0),
+                },
+            }
+
+        sorted_stacks = sorted(call_stacks.items(), key=lambda x: x[1], reverse=True)
+        total_invocations = sum(c for _, c in sorted_stacks)
+
+        stacks_result = []
+        for stack_str, count in sorted_stacks[:10]:
+            stacks_result.append({
+                "call_stack": stack_str,
+                "invocation_count": count,
+                "percentage": round(count / total_invocations * 100, 1),
+            })
+
+        return {
+            "status": "success",
+            "kernel_name": kernel_name,
+            "version": matched_version,
+            "model": display_name,
+            "stacks_available": True,
+            "total_invocations": total_invocations,
+            "unique_call_paths": len(call_stacks),
+            "call_stacks": stacks_result,
+            "kernel_stats": {
+                "count": kernel_data["count"],
+                "total_dur_us": kernel_data["total_dur"],
+                "avg_dur_us": kernel_data.get("avg_dur", 0),
+            },
+            "message": (
+                f"Found {len(call_stacks)} unique call path(s) for '{kernel_name}' "
+                f"in {display_name} {matched_version} ({total_invocations} total invocations)"
+            ),
+        }
+
+    except Exception as exc:
+        logger.error(f"Error getting kernel call stacks: {exc}")
+        return {"status": "error", "message": f"Failed to get call stacks: {exc}"}
 
 
 async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:

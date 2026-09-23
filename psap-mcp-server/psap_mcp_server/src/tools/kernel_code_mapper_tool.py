@@ -253,20 +253,29 @@ async def map_kernel_to_vllm_code(
     kernel_name: str,
     version: str = "v0.13.0",
     search_github: bool = False,
+    profile_model: Optional[str] = None,
+    profile_tp: Optional[str] = None,
+    profile_workload: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Map a PyTorch kernel/operation name to vLLM source code locations.
     
     Given a kernel name from PyTorch profiler traces, find the likely vLLM
     source files that implement or invoke that kernel. Useful for correlating
     performance data with actual code to understand implementation details.
+
+    When profile coordinates (profile_model, profile_tp, profile_workload) are
+    provided alongside the version, the tool loads the actual profile trace and
+    returns ground-truth call stack attribution if the profile was collected
+    with ``with_stack=True``.  Falls back to heuristic pattern matching for
+    profiles without stacks.
     
     TOOL_NAME=map_kernel_to_vllm_code
     DISPLAY_NAME=Map Kernel to vLLM Code
-    USECASE=Map PyTorch profiler kernel names to vLLM source code files. Use this after identifying slow kernels with compare_pytorch_profiles to understand the code responsible for performance characteristics.
-    INSTRUCTIONS=1. Provide a kernel name from PyTorch profiler (e.g., "flash_attn_v2_fwd", "fused_moe", "aten::mm"), 2. Optionally specify a vLLM version, 3. Results include likely source files and GitHub URLs
-    INPUT_DESCRIPTION=kernel_name (str): Kernel name from PyTorch profiler; version (str): vLLM version for GitHub URLs (default: v0.13.0); search_github (bool): Also search GitHub for the kernel name
-    OUTPUT_DESCRIPTION=Dictionary with likely source files, confidence levels, and GitHub URLs
-    EXAMPLES=map_kernel_to_vllm_code("flash_attn_v2_fwd"), map_kernel_to_vllm_code("fused_moe_kernel", version="v0.11.2")
+    USECASE=Map PyTorch profiler kernel names to vLLM source code files. Use this after identifying slow kernels with compare_pytorch_profiles to understand the code responsible for performance characteristics. When profile coordinates are provided, returns ground-truth call stacks from the profile (if collected with stack traces enabled).
+    INSTRUCTIONS=1. Provide a kernel name from PyTorch profiler (e.g., "flash_attn_v2_fwd", "fused_moe", "aten::mm"), 2. Optionally specify a vLLM version, 3. Optionally provide profile_model, profile_tp, profile_workload to get real call stack attribution from the profile, 4. Results include likely source files and GitHub URLs
+    INPUT_DESCRIPTION=kernel_name (str): Kernel name from PyTorch profiler; version (str): vLLM version for GitHub URLs (default: v0.13.0); search_github (bool): Also search GitHub for the kernel name; profile_model (str, optional): Model name to look up real stacks; profile_tp (str, optional): TP config; profile_workload (str, optional): ISL/OSL workload
+    OUTPUT_DESCRIPTION=Dictionary with likely source files, confidence levels, GitHub URLs, and real call stack attribution when available
+    EXAMPLES=map_kernel_to_vllm_code("flash_attn_v2_fwd"), map_kernel_to_vllm_code("fused_moe_kernel", version="v0.21.0", profile_model="deepseek-r1", profile_tp="tp8", profile_workload="isl1000_osl1000")
     PREREQUISITES=None
     RELATED_TOOLS=compare_pytorch_profiles, analyze_pytorch_profile, compare_vllm_versions, get_vllm_pull_request
     
@@ -274,6 +283,9 @@ async def map_kernel_to_vllm_code(
         kernel_name: The kernel name from PyTorch profiler (e.g., "flash_attn_v2_fwd")
         version: vLLM version for GitHub URLs (default: "v0.13.0")
         search_github: If True, also search GitHub API for the kernel name
+        profile_model: Model name to load profile stacks from (e.g., "deepseek-r1")
+        profile_tp: Tensor parallelism config (e.g., "tp8")
+        profile_workload: ISL/OSL workload (e.g., "isl1000_osl1000")
     
     Returns:
         Dictionary containing:
@@ -281,6 +293,7 @@ async def map_kernel_to_vllm_code(
         - kernel_name: The input kernel name
         - is_pytorch_stdlib: Whether this is a standard PyTorch operation
         - likely_source_files: List of likely source file locations
+        - profile_call_stacks: Real call stacks from profile (if available)
         - github_urls: GitHub URLs to view the files
         - search_suggestions: How to find more information
     """
@@ -290,9 +303,36 @@ async def map_kernel_to_vllm_code(
         # Check if it's a standard PyTorch op
         is_stdlib = _is_pytorch_stdlib(kernel_name)
         
-        # Find mappings
+        # Attempt to load real call stacks from profile data
+        profile_call_stacks = None
+        if profile_model and not is_stdlib:
+            try:
+                from psap_mcp_server.src.tools.pytorch_profile_tool import (
+                    _resolve_profile,
+                    _load_or_extract_stats,
+                    _extract_bare_version,
+                    _match_version,
+                )
+                bare_version = f"vLLM-{_extract_bare_version(version)}"
+                model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(
+                    profile_model, profile_tp, bare_version, profile_workload
+                )
+                if not error and model_key and matched_tp and matched_version and matched_workload:
+                    stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, 0)
+                    if stats and kernel_name in stats:
+                        stacks = stats[kernel_name].get("call_stacks", {})
+                        if stacks:
+                            sorted_stacks = sorted(stacks.items(), key=lambda x: x[1], reverse=True)
+                            profile_call_stacks = [
+                                {"call_stack": s, "invocation_count": c}
+                                for s, c in sorted_stacks[:5]
+                            ]
+            except Exception as e:
+                logger.warning(f"Could not load profile stacks for {kernel_name}: {e}")
+
+        # Find heuristic mappings
         mappings = _find_kernel_mapping(kernel_name)
-        
+
         # Build result
         likely_files = []
         github_urls = []
@@ -347,10 +387,12 @@ async def map_kernel_to_vllm_code(
         
         # Build suggestions
         suggestions = []
+        if profile_call_stacks:
+            suggestions.append("Real call stacks available from profile — use these for ground-truth attribution")
         if is_stdlib:
             suggestions.append("This is a standard PyTorch operation implemented in PyTorch core, not vLLM")
             suggestions.append("Performance may be affected by how vLLM uses this op (tensor shapes, data types)")
-        elif not mappings:
+        elif not mappings and not profile_call_stacks:
             suggestions.append(f"No curated mapping found for '{kernel_name}'")
             suggestions.append(f"Try searching GitHub: {_build_github_search_url(kernel_name)}")
             suggestions.append("Check if this kernel is from a third-party library (e.g., flash-attn, triton)")
@@ -358,7 +400,7 @@ async def map_kernel_to_vllm_code(
             suggestions.append(f"Use get_vllm_pull_request to find PRs that modified these files")
             suggestions.append(f"Use compare_vllm_versions to see changes between releases")
         
-        return {
+        result = {
             "status": "success",
             "kernel_name": kernel_name,
             "version": version,
@@ -371,6 +413,18 @@ async def map_kernel_to_vllm_code(
                       else f"No specific mapping for '{kernel_name}' - try GitHub search",
             "github_manual_search_url": _build_github_search_url(kernel_name),
         }
+
+        if profile_call_stacks:
+            result["profile_call_stacks"] = profile_call_stacks
+            result["attribution_source"] = "profile_stack_trace"
+            result["message"] = (
+                f"Ground-truth call stack from profile for '{kernel_name}' "
+                f"({len(profile_call_stacks)} unique path(s))"
+            )
+        else:
+            result["attribution_source"] = "heuristic_pattern_match"
+
+        return result
         
     except Exception as e:
         logger.error(f"Error mapping kernel to code: {e}")
