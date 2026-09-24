@@ -1,8 +1,23 @@
 # Environment files with credentials — NEVER commit
 .env
+.env.*
+!.env.example
 langfuse-keys.txt
 consolidated_dashboard.csv
-sa-key.json
+
+# Private keys and credential bundles — NEVER commit
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Service-account and credential files — NEVER commit
+**/credentials*.json
+**/service-account*.json
+**/service_account*.json
+**/*-sa.json
+**/sa-key.json
 # macOS
 .DS_Store
 
@@ -12,3 +27,9 @@ openshift-manifests-haumesh/
 docs-nogit/
 docs/images/generate_workflow.py
 ai_auto_perf_analysis/
+
+# Local presentation work and generated validation artifacts
+.chart-data-*/
+.codex*
+output/
+*.pptx

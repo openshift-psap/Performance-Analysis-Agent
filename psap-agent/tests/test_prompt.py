@@ -22,6 +22,11 @@ class TestPrompt:
         assert len(prompt) > 0
         assert "PSAP Agent" in prompt
         assert "Today's date is" in prompt
+        assert "load_skill" in prompt
+        assert "benchmark_analysis" in prompt
+        assert "clarification_and_comparison" in prompt
+        assert "vllm_performance_triage" in prompt
+        assert "DEEP PERFORMANCE ANALYSIS WORKFLOW" not in prompt
 
     @patch("psap_agent.src.core.prompt.get_current_date")
     def test_get_system_prompt_includes_date(self, mock_get_date):

@@ -146,4 +146,3 @@ spec:
     targetPort: 5001
     protocol: TCP
   type: ClusterIP
-

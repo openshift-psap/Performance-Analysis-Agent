@@ -30,7 +30,7 @@ This system implements a **Tool-Augmented AI Agent** that uses the **Model Conte
 ┌─────────────────────────────────────────────────────────────┐
 │                    ORCHESTRATION LAYER                       │
 │  • LangGraph Agent (State Machine)                          │
-│  • Google Gemini (LLM Reasoning, default: gemini-3-flash)   │
+│  • Google Gemini (LLM Reasoning, default: gemini-3.8-flash) │
 │  • PostgreSQL (State Persistence + Skill Store)             │
 └────────────────┬────────────────────────────────────────────┘
                  │ MCP Protocol (Streamable HTTP)
@@ -73,13 +73,14 @@ This system implements a **Tool-Augmented AI Agent** that uses the **Model Conte
 - **Role:** Orchestrates the agent's reasoning loop, manages conversation state, tool invocation flow
 - **Why chosen:** Built-in state persistence, cycle detection, human-in-the-loop support
 
-### 4. **LLM (Gemini + Claude)**
-- **What it is:** Multi-model support -- Google Gemini (default) and Anthropic Claude via Vertex AI
+### 4. **LLM (Gemini + OpenAI + Claude)**
+- **What it is:** Multi-model support -- Google Gemini (default), OpenAI, and Anthropic Claude via Vertex AI
 - **Role:** Natural language understanding, query intent parsing, response generation, tool calling
-- **Default model:** `gemini-3-flash-preview` (configurable via `GEMINI_MODEL` env var)
-- **Available models:** `gemini-3-flash-preview`, `gemini-3.1-pro-preview`, `claude-opus-4-6`, `claude-sonnet-4-6`
-- **Per-request model selection:** Users can switch models from the Streamlit UI dropdown; the `model` field in `StreamRequest` overrides the server default for that request
+- **Default model:** `gemini-3.8-flash` (configurable via `GEMINI_MODEL` env var)
+- **Available models:** `gemini-3.8-flash`, `gemini-3.1-pro-preview`, `gpt-6-luna` (extra-high thinking), `gpt-6-sol` (medium thinking), `openai:<model-id>`, `claude-opus-4-6`, `claude-sonnet-4-6`
+- **Per-request model selection:** Users can switch models from the Streamlit UI dropdown; the `model` field in `StreamRequest` overrides the server default, and OpenAI selections may provide `reasoning_effort` (for example, `xhigh`) for that request
 - **Claude integration:** Uses `ChatAnthropicVertex` via `langchain-google-vertexai`, requires `ANTHROPIC_VERTEX_PROJECT_ID` and GCP auth
+- **OpenAI integration:** Uses `ChatOpenAI` via `langchain-openai`, requires `OPENAI_API_KEY`; Streamlit includes fixed GPT-6 Luna and Sol choices, while `OPENAI_MODEL` optionally adds another choice. GPT-6 requests use the Responses API so tools work with their selected reasoning effort
 
 ### 5. **FastAPI (Web Framework)**
 - **What it is:** Modern Python web framework
@@ -440,26 +441,18 @@ for tool in available_tools:
 
 ## Tool Calling Mechanism
 
-### LangChain + Gemini Tool Integration
+### LangChain Tool Integration
 
-Tools are discovered dynamically from the MCP server and bound to Gemini automatically by `create_react_agent`. No manual tool schema definitions are needed.
+Tools are discovered dynamically from the MCP server and bound to the selected chat model automatically by `create_react_agent`. No manual tool schema definitions are needed.
 
 **1. LLM Initialization (multi-model):**
 ```python
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_google_vertexai.model_garden import ChatAnthropicVertex
+from psap_agent.src.core.model_factory import create_chat_model
 
-if model_name.startswith("claude-"):
-    llm = ChatAnthropicVertex(
-        model_name=model_name,  # e.g. "claude-opus-4-6"
-        project=settings.ANTHROPIC_VERTEX_PROJECT_ID,
-    )
-else:
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,       # e.g. "gemini-3-flash-preview"
-        temperature=0,
-        google_api_key=settings.gemini_api_key,
-    )
+llm = create_chat_model(
+    model_name,  # e.g. "gemini-3.8-flash", "openai:<model-id>", or "claude-opus-4-6"
+    temperature=0,
+)
 ```
 
 **2. Tool Discovery + Agent Creation:**
@@ -487,13 +480,13 @@ async for event in agent.astream_events(
     version="v2",
 ):
     # LangGraph autonomously loops: reason → call tools → reason
-    # until Gemini produces a final text response
+    # until the selected model produces a final text response
     pass
 ```
 
-### Gemini Function Calling Format
+### Model Function Calling Format
 
-When Gemini decides to use a tool, it generates a function call:
+When the selected model decides to use a tool, LangChain normalizes its function call for the LangGraph agent:
 
 ```json
 {
@@ -510,10 +503,10 @@ When Gemini decides to use a tool, it generates a function call:
 ```
 
 The LangGraph ReAct agent then:
-1. Extracts the function call(s) -- Gemini can emit multiple parallel calls
+1. Extracts the function call(s) -- models can emit multiple parallel calls
 2. Invokes the MCP tools via `MultiServerMCPClient`
 3. Formats the results as `FunctionMessage` entries
-4. Sends back to Gemini for the next reasoning step or final response
+4. Sends the result back to the selected model for the next reasoning step or final response
 
 ---
 
@@ -533,7 +526,7 @@ store = AsyncPostgresStore.from_conn_string(DATABASE_URL)
 
 agent = create_react_agent(
     model=llm,              # ChatGoogleGenerativeAI
-    tools=mcp_tools,        # ~31 tools from MultiServerMCPClient
+    tools=mcp_tools + [load_skill],  # MCP tools plus local curated-skill loader
     checkpointer=checkpointer,
     store=store,            # skill documents (key-value)
     prompt=SYSTEM_PROMPT,
@@ -544,7 +537,9 @@ The ReAct loop: Gemini reasons about the query → calls tools → inspects resu
 
 ### System Prompt Engineering
 
-The agent's behavior is controlled by a detailed system prompt in `prompt.py` (~900 lines). Key sections include:
+The agent uses a concise, stable policy prompt plus reviewed workflow skills that
+it loads on demand with a local `load_skill` tool. The stable prompt retains the
+rules that apply to every response:
 
 **Global Integrity Rules** -- prevent hallucination and fabrication:
 ```
@@ -560,7 +555,17 @@ The agent's behavior is controlled by a detailed system prompt in `prompt.py` (~
 - Observation vs. Causal Conclusion → require profiling evidence
 ```
 
-**Tool Usage Rules**, **Mandatory Clarification Protocol**, **Output Formatting**, and domain-specific workflows (vLLM profiling, Grafana comparison, cost analysis, etc.) comprise the rest.
+Detailed instructions for data-backed clarification and fair comparisons,
+benchmark and cost analysis, Grafana metrics, deep profiling, PyTorch traces,
+kernel/source attribution, vLLM logs, and vLLM performance triage live in
+`psap_agent/src/core/curated_skill_documents/`. The model loads only the
+relevant instructions for a specialized request; simple discovery requests use
+the MCP tools directly. Policy-coverage tests protect the migrated legacy
+guardrails from being silently removed during future prompt changes.
+
+The self-improvement system's generated skill documents remain a separate,
+advisory source of prior tool-call recipes. They do not override global policy,
+curated workflow instructions, or current tool evidence.
 
 The prompt is injected via `create_react_agent(prompt=...)`, which prepends it as a system message to every Gemini call.
 
@@ -899,7 +904,7 @@ async def query_grafana(uuid: str, start_ms: int, end_ms: int):
 ┌─────────────────┐
 │  Presentation   │ ← Streamlit (UI/UX only)
 ├─────────────────┤
-│  Orchestration  │ ← LangGraph + Gemini (Reasoning + coordination)
+│  Orchestration  │ ← LangGraph + selected LLM (Reasoning + coordination)
 ├─────────────────┤
 │  Tool Layer     │ ← FastMCP (Tool execution)
 ├─────────────────┤
@@ -909,7 +914,7 @@ async def query_grafana(uuid: str, start_ms: int, end_ms: int):
 
 **Benefits:**
 - Each layer can be developed/tested independently
-- Easy to swap implementations (e.g., switch LLM provider via `GEMINI_MODEL` env var)
+- Easy to swap implementations (e.g., select OpenAI with `openai:<model-id>`)
 - Clear responsibilities
 
 ### 2. Protocol-Based Integration (MCP)
@@ -1209,7 +1214,7 @@ async def chat(request: ChatRequest):
 1. **User Interface (Streamlit)** provides the interaction layer
 2. **HTTP/REST + SSE** carries streaming requests to the agent
 3. **LangGraph** orchestrates the agent's reasoning workflow (ReAct loop)
-4. **Google Gemini** (`gemini-3-flash-preview`) performs natural language understanding, tool calling, and generation
+4. **The selected LLM** (Gemini by default; OpenAI and Claude are optional) performs natural language understanding, tool calling, and generation
 5. **MCP Protocol (Streamable HTTP)** provides standardized tool communication
 6. **FastMCP** implements the MCP server and tool registry
 7. **~31 Specialized Tools** (across 15 modules) handle analysis, comparison, profiling, and dashboarding tasks
@@ -1230,4 +1235,3 @@ Each technology plays a specific role, and the **MCP protocol** is the key that 
 ---
 
 **This architecture represents a modern, production-ready approach to building self-improving AI agents with reliable tool access, observability, and maintainable code.**
-

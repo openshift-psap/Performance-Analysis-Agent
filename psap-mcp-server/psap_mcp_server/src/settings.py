@@ -277,12 +277,12 @@ class Settings(BaseSettings):
             "example": "true",
         },
     )
-    DASHBOARD_BASE_URL: str = Field(
-        default="https://aidash.app.intlab.redhat.com",
+    DASHBOARD_BASE_URL: Optional[str] = Field(
+        default=None,
         json_schema_extra={
             "env": "DASHBOARD_BASE_URL",
-            "description": "Base URL for the performance dashboard (production or staging)",
-            "example": "https://staging-aidash.apps.ocp4.intlab.redhat.com",
+            "description": "Base URL for the performance dashboard (optional)",
+            "example": "https://dashboard.example.com",
         },
     )
     GRAFANA_URL: Optional[str] = Field(

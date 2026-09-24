@@ -8,16 +8,16 @@ Integrates reflection (Tier 2) and memory (Tier 3) when enabled.
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.prebuilt import create_react_agent
 from langgraph.store.postgres import AsyncPostgresStore
 
 from psap_agent.src.core.cache_manager import get_cache_manager
+from psap_agent.src.core.curated_skills import create_load_skill_tool
 from psap_agent.src.core.exceptions.exceptions import AppException, AppExceptionCode
 from psap_agent.src.core.memory import MemoryManager
+from psap_agent.src.core.model_factory import create_chat_model, get_model_provider, is_gemini_model
 from psap_agent.src.core.prompt import get_system_prompt
 from psap_agent.src.core.storage import get_global_checkpoint
 from psap_agent.src.settings import settings
@@ -42,34 +42,12 @@ def get_memory_manager(store=None) -> MemoryManager:
     return _memory_manager
 
 
-def _is_claude_model(model_name: str) -> bool:
-    return model_name.startswith("claude-")
-
-
-def _create_claude_model(model_name: str) -> BaseChatModel:
-    """Create a ChatAnthropicVertex model for Claude via Vertex AI."""
-    from langchain_google_vertexai.model_garden import ChatAnthropicVertex
-
-    if not settings.ANTHROPIC_VERTEX_PROJECT_ID:
-        raise AppException(
-            "ANTHROPIC_VERTEX_PROJECT_ID must be set to use Claude models",
-            AppExceptionCode.CONFIGURATION_VALIDATION_ERROR,
-        )
-
-    return ChatAnthropicVertex(
-        model_name=model_name,
-        project=settings.ANTHROPIC_VERTEX_PROJECT_ID,
-        location=settings.CLOUD_ML_REGION,
-        temperature=0.0,
-        max_tokens=16384,
-    )
-
-
 @asynccontextmanager
 async def get_psap_agent(
     sso_token: Optional[str] = None,
     enable_checkpointing: bool = True,
     model_name: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ):
     """Get a fully initialized PSAP agent.
 
@@ -83,6 +61,8 @@ async def get_psap_agent(
         enable_checkpointing: Whether to enable checkpointing/persistence.
             Set to False for streaming-only operations that shouldn't save to DB.
         model_name: Optional model name override. Falls back to settings.GEMINI_MODEL.
+        reasoning_effort: Optional OpenAI reasoning effort override. Ignored by
+            Gemini and Claude models.
 
     Yields:
         The initialized PSAP agent instance.
@@ -120,15 +100,18 @@ async def get_psap_agent(
                 AppExceptionCode.PRODUCTION_MCP_CONNECTION_ERROR,
             )
 
+    tools.append(create_load_skill_tool())
+    logger.info("Curated workflow skill loader enabled")
+
     # Resolve which model to use (client override vs server default)
     effective_model = model_name or settings.GEMINI_MODEL
     logger.info(f"🤖 Using model: {effective_model}")
+    if reasoning_effort:
+        logger.info(f"🧠 OpenAI reasoning effort: {reasoning_effort}")
 
     # Initialize the language model
-    if _is_claude_model(effective_model):
-        logger.info("Using Claude model via Vertex AI")
-        model = _create_claude_model(effective_model)
-    elif settings.ENABLE_PROMPT_CACHING and not tools:
+    provider = get_model_provider(effective_model)
+    if is_gemini_model(effective_model) and settings.ENABLE_PROMPT_CACHING and not tools:
         # Gemini-specific: cached_content not supported with tools/system_instruction
         try:
             cache_manager = get_cache_manager()
@@ -138,28 +121,35 @@ async def get_psap_agent(
             logger.info(f"✅ Caching enabled: {cache_stats.get('token_count', 0)} tokens cached")
             logger.info(f"💰 Cache expires in: {cache_stats.get('time_remaining_human', 'unknown')}")
             
-            model = ChatGoogleGenerativeAI(
-                model=effective_model,
+            model = create_chat_model(
+                effective_model,
                 temperature=0.3,
                 max_output_tokens=16384,
-                model_kwargs={"cached_content": cache_name} if cache_name else {}
+                cached_content=cache_name,
+                reasoning_effort=reasoning_effort,
             )
         except Exception as e:
             logger.warning(f"Failed to initialize caching: {e}. Falling back to non-cached mode.")
-            model = ChatGoogleGenerativeAI(
-                model=effective_model,
+            model = create_chat_model(
+                effective_model,
                 temperature=0.3,
                 max_output_tokens=16384,
+                reasoning_effort=reasoning_effort,
             )
     else:
-        if tools:
+        if provider == "openai":
+            logger.info("Using OpenAI model; Gemini prompt caching is unavailable")
+        elif provider == "claude":
+            logger.info("Using Claude model via Vertex AI")
+        elif tools:
             logger.info("Caching disabled: Gemini API doesn't support cached_content with tools")
         else:
             logger.info("Caching disabled by configuration")
-        model = ChatGoogleGenerativeAI(
-            model=effective_model,
+        model = create_chat_model(
+            effective_model,
             temperature=0.3,
             max_output_tokens=16384,
+            reasoning_effort=reasoning_effort,
         )
 
     if not enable_checkpointing:

@@ -25,6 +25,7 @@ dependencies = [
     "langchain-core==1.2.9",
     "langchain-google-genai==4.2.0",
     "langchain-groq==1.1.2",
+    "langchain-openai==1.0.3",
     "langchain-mcp-adapters==0.2.1",
 
     # LangGraph ecosystem

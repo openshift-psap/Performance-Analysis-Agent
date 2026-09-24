@@ -16,7 +16,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: 16Gi
 
 ---
 apiVersion: v1
@@ -90,7 +90,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: clickhouse
-        image: clickhouse/clickhouse-server:24.3-alpine
+        image: clickhouse/clickhouse-server@sha256:3874987fad5d288ba610e7d5774bdeb4432a3bde639f2dbeb66d93e83afd76d8
         ports:
         - containerPort: 8123
           name: http
@@ -189,7 +189,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7
+        image: redis@sha256:28bd5e15c3674c48a472a3dd475ba446d0a3cd876e7addb988b5840a286b2256
         ports:
         - containerPort: 6379
           name: redis
@@ -261,7 +261,7 @@ spec:
     spec:
       containers:
       - name: minio
-        image: minio/minio:latest
+        image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
         ports:
         - containerPort: 9000
           name: api
@@ -349,29 +349,17 @@ spec:
     spec:
       containers:
       - name: langfuse-worker
-        image: langfuse/langfuse-worker:3.172.0
+        image: langfuse/langfuse-worker@sha256:6652a013e812ea4160f7ec4de6ed7b0c5ee23750246de2415f539b1a668d0381
         env:
         # --- PostgreSQL ---
         - name: DATABASE_URL
-          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@psap-postgres:5432/$(POSTGRES_DB)"
-        - name: POSTGRES_USER
           valueFrom:
             secretKeyRef:
               name: psap-secrets
-              key: POSTGRES_USER
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: psap-secrets
-              key: POSTGRES_PASSWORD
-        - name: POSTGRES_DB
-          valueFrom:
-            secretKeyRef:
-              name: psap-secrets
-              key: POSTGRES_DB
+              key: DATABASE_URL
         # --- Auth secrets ---
         - name: NEXTAUTH_URL
-          value: "https://langfuse-psap-ai-agent.apps.your-cluster.com"  # UPDATE after route is created
+          value: "https://langfuse-psap-ai-agent.apps.<your-cluster-domain>"
         - name: SALT
           valueFrom:
             secretKeyRef:
@@ -495,32 +483,20 @@ spec:
     spec:
       containers:
       - name: langfuse-web
-        image: langfuse/langfuse:3.172.0
+        image: langfuse/langfuse@sha256:eb72bf0112c372d6d19d72f6368d3e68771d2001c28f23e380a4a6f066752b8b
         ports:
         - containerPort: 3000
           name: http
         env:
         # --- PostgreSQL ---
         - name: DATABASE_URL
-          value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@psap-postgres:5432/$(POSTGRES_DB)"
-        - name: POSTGRES_USER
           valueFrom:
             secretKeyRef:
               name: psap-secrets
-              key: POSTGRES_USER
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: psap-secrets
-              key: POSTGRES_PASSWORD
-        - name: POSTGRES_DB
-          valueFrom:
-            secretKeyRef:
-              name: psap-secrets
-              key: POSTGRES_DB
+              key: DATABASE_URL
         # --- Auth secrets ---
         - name: NEXTAUTH_URL
-          value: "https://langfuse-psap-ai-agent.apps.your-cluster.com"  # UPDATE after route is created
+          value: "https://langfuse-psap-ai-agent.apps.<your-cluster-domain>"
         - name: NEXTAUTH_SECRET
           valueFrom:
             secretKeyRef:

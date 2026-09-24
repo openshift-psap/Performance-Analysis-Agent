@@ -2,6 +2,7 @@
 
 **Namespace**: `psap-ai-agent`
 **Registry**: `quay.io/<your-username>`
+**Production cluster routes**: `*.apps.<your-cluster-domain>`
 
 ---
 
@@ -18,7 +19,7 @@ Before starting, ensure you have:
 - [ ] Your Grafana credentials (optional)
 - [ ] All 3 custom container images built and pushed to Quay
 
-**Langfuse v3 Architecture Note**: This deployment uses Langfuse v3 which requires 5 backend components (ClickHouse, Redis, MinIO, Worker, Web) in addition to PostgreSQL. These use public Docker Hub images and do not need to be built. The deployment also requires 2 PersistentVolumeClaims (10Gi each for ClickHouse and MinIO data).
+**Langfuse v3 Architecture Note**: This deployment uses Langfuse v3 which requires 5 backend components (ClickHouse, Redis, MinIO, Worker, Web) in addition to PostgreSQL. The current production snapshot uses 16Gi for ClickHouse, 20Gi for MinIO, 10Gi for PostgreSQL, and 4Gi for each production/staging Mem0/Qdrant volume. Redis has no PVC.
 
 ---
 
@@ -71,6 +72,7 @@ There are **three** Secret resources in `01-secrets.yaml`:
 2. Update the following in `01-secrets.yaml` under `psap-secrets`:
    - `POSTGRES_PASSWORD`: Your generated password
    - `GOOGLE_API_KEY`: Your Google Gemini API key
+   - `OPENAI_API_KEY`: Your OpenAI API key (optional; leave blank to disable OpenAI models)
    - `GRAFANA_API_TOKEN`: Your Grafana token (or remove if not using)
    - `GRAFANA_URL`: Your Grafana URL (or remove if not using)
    - `GRAFANA_DATASOURCE_UID`: Your datasource UID (or remove if not using)
@@ -149,7 +151,7 @@ This may take 3-5 minutes. ClickHouse runs migrations on first boot. If worker o
 
 1. Click **Networking** -> **Routes**
 2. Find the `langfuse` route
-3. Copy the **Location** URL (e.g., `https://langfuse-psap-ai-agent.apps.your-cluster.com`)
+3. Copy the **Location** URL (e.g., `https://langfuse-psap-ai-agent.apps.<your-cluster-domain>`)
 
 ### 3.6: Update Langfuse NEXTAUTH_URL
 
@@ -220,7 +222,7 @@ Also update `NEXTAUTH_URL` in your local `03-langfuse.yaml` so future re-applies
 ### Check All Pods are Running:
 
 1. Go to **Workloads** -> **Pods**
-2. Ensure all 9 pods show **Running** status:
+2. Ensure all 12 production and staging pods show **Running** status:
    - `psap-postgres-*`
    - `langfuse-clickhouse-*`
    - `langfuse-redis-*`
@@ -230,6 +232,9 @@ Also update `NEXTAUTH_URL` in your local `03-langfuse.yaml` so future re-applies
    - `psap-mcp-server-*`
    - `psap-agent-*`
    - `streamlit-ui-*`
+   - `psap-mcp-server-staging-*`
+   - `psap-agent-staging-*`
+   - `streamlit-ui-staging-*`
 
 ### Check Pod Logs:
 
@@ -305,7 +310,7 @@ If any pod is failing:
 ### 1. Update Grafana Dashboard URL (if using)
 
 The agent's dashboard link generation tool is currently set to:
-`https://aidash.app.intlab.redhat.com`
+`https://aidash-agent.apps.<your-cluster-domain>`
 
 If this needs to be changed, you'll need to rebuild the MCP server image.
 
@@ -332,7 +337,7 @@ Configure alerts for:
 
 Your deployment is successful when:
 
-- All 9 pods are Running
+- All 12 production and staging pods are Running
 - Streamlit UI is accessible
 - You can ask questions and get responses
 - Langfuse shows traces for your queries

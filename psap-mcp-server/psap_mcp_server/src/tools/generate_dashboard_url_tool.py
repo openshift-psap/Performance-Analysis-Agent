@@ -4,9 +4,10 @@ This tool generates URLs to the performance dashboard with specific filter param
 allowing users to directly visualize the data being discussed.
 """
 
-import os
 from typing import Dict, List, Optional
 from urllib.parse import urlencode
+
+from psap_mcp_server.src.settings import settings
 
 
 # Profile mapping from shorthand notation to full dashboard names
@@ -162,8 +163,15 @@ async def generate_dashboard_url(
         ...     section="cost_analysis",
         ... )
     """
-    # Always use the configured base URL — ignore any base_url the caller passes,
-    base_url = os.environ.get("DASHBOARD_BASE_URL", "https://aidash.app.intlab.redhat.com")
+    # Always use the configured base URL — ignore any base_url the caller passes.
+    # The value comes from the DASHBOARD_BASE_URL environment variable through
+    # the central MCP settings object. Never fall back to an internal URL.
+    base_url = (settings.DASHBOARD_BASE_URL or "").strip().rstrip("/")
+    if not base_url:
+        return (
+            "Dashboard URL unavailable: DASHBOARD_BASE_URL is not configured. "
+            "Set it in the MCP server environment to enable dashboard links."
+        )
 
     def _clean_list(val):
         """Sanitize list params — LLMs sometimes pass stringified arrays like '["H200"]'."""

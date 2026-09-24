@@ -10,6 +10,7 @@ from typing import Any
 
 from langfuse import get_client
 
+from psap_agent.src.core.model_factory import create_chat_model
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
@@ -178,10 +179,8 @@ async def _run_single_eval(
     Returns:
         (criterion_name, score) -- score is None if evaluation failed.
     """
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    judge_model = ChatGoogleGenerativeAI(
-        model=settings.LLM_JUDGE_MODEL,
+    judge_model = create_chat_model(
+        settings.LLM_JUDGE_MODEL,
         temperature=0.0,
     )
 

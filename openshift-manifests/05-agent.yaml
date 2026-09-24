@@ -49,6 +49,12 @@ spec:
             secretKeyRef:
               name: psap-secrets
               key: GOOGLE_API_KEY
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: psap-secrets
+              key: OPENAI_API_KEY
+              optional: true
         - name: MCP_SERVER_URL
           value: "http://psap-mcp-server:5001/mcp/"
         - name: ENABLE_PROMPT_CACHING
@@ -144,7 +150,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 1Gi
+      storage: 4Gi
 
 ---
 apiVersion: v1
@@ -161,3 +167,18 @@ spec:
     protocol: TCP
   type: ClusterIP
 
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: psap-agent
+  namespace: psap-ai-agent
+spec:
+  to:
+    kind: Service
+    name: psap-agent
+  port:
+    targetPort: 5002
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

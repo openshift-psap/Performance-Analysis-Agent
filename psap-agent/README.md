@@ -3,7 +3,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12,3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-LangGraph-based AI agent for vLLM inference performance analysis. Powered by Google Gemini, it connects to the [PSAP MCP Server](../psap-mcp-server/) to query benchmark data, analyze PyTorch profiler traces, compare vLLM versions, and generate Grafana dashboard links -- all through natural language.
+LangGraph-based AI agent for vLLM inference performance analysis. It supports Google Gemini by default, OpenAI models through the OpenAI API, and Anthropic Claude through Vertex AI. It connects to the [PSAP MCP Server](../psap-mcp-server/) to query benchmark data, analyze PyTorch profiler traces, compare vLLM versions, and generate Grafana dashboard links -- all through natural language.
 
 ## Architecture
 
@@ -26,7 +26,7 @@ graph TB
 
     subgraph external [External Services]
         MCP[PSAP MCP Server]
-        Gemini[Google Gemini]
+        LLMs[Gemini / OpenAI / Claude]
         PG[(PostgreSQL)]
         LF[Langfuse]
     end
@@ -37,7 +37,7 @@ graph TB
 
     Stream --> Core
     Core --> Prompt
-    Core --> Gemini
+    Core --> LLMs
     Core -->|MCP protocol| MCP
     Core --> PG
     Core --> LF
@@ -46,7 +46,16 @@ graph TB
     Threads --> PG
 ```
 
-The agent uses a LangGraph ReAct loop: Gemini decides which MCP tools to call based on the user's question, the MCP server executes them and returns structured data, and Gemini synthesizes the results into a response. Conversation state is checkpointed to PostgreSQL so users can resume threads across sessions.
+The agent uses a LangGraph ReAct loop: the selected LLM decides which MCP tools to call based on the user's question, the MCP server executes them and returns structured data, and the LLM synthesizes the results into a response. Conversation state is checkpointed to PostgreSQL so users can resume threads across sessions.
+
+## Curated Workflow Skills
+
+The stable system prompt contains global integrity and confidentiality rules.
+For specialized work, the agent loads reviewed on-demand workflows for
+clarification and fair comparisons, benchmarks, cost, Grafana, profiling,
+source analysis, logs, and vLLM performance triage. This keeps detailed
+operating rules out of the always-on prompt while preserving them in versioned,
+test-covered documents.
 
 ## API Endpoints
 
@@ -102,10 +111,20 @@ Environment variables (see `.env.example`):
 | `POSTGRES_USER` | `psap_user` | Database user |
 | `POSTGRES_PASSWORD` | -- | Database password |
 | `GOOGLE_API_KEY` | -- | Google Gemini API key |
+| `OPENAI_API_KEY` | -- | OpenAI API key |
+| `OPENAI_MODEL` | -- | Optional additional OpenAI model ID exposed in the Streamlit selector |
 | `LANGFUSE_PUBLIC_KEY` | -- | Langfuse public key |
 | `LANGFUSE_SECRET_KEY` | -- | Langfuse secret key |
 | `LANGFUSE_HOST` | -- | Langfuse server URL |
 | `PYTHON_LOG_LEVEL` | `INFO` | Logging level |
+
+To enable OpenAI in the Streamlit UI, set `OPENAI_API_KEY` in the ignored local
+`.env`. The selector includes `gpt-6-luna` with extra-high (`xhigh`) thinking
+and `gpt-6-sol` with medium thinking; `OPENAI_MODEL` optionally adds one more
+model. API clients can select any configured OpenAI model with
+`"model": "openai:<model-id>"` and may send `"reasoning_effort": "xhigh"`
+or another supported value. The same model format also works for `CRITIC_MODEL`
+and `LLM_JUDGE_MODEL`.
 
 ## Local Development
 
@@ -125,7 +144,7 @@ USE_INMEMORY_SAVER=true python -m psap_agent.src.main
 make local
 ```
 
-The agent expects the PSAP MCP Server to be running at `MCP_SERVER_URL`. If it's not available and `USE_INMEMORY_SAVER=true`, the agent starts without tools (useful for testing the streaming API).
+The agent expects the PSAP MCP Server to be running at `MCP_SERVER_URL`. If it is unavailable and `USE_INMEMORY_SAVER=true`, the agent starts without performance-data MCP tools but retains its local curated-skill loader.
 
 ## Testing
 
@@ -133,6 +152,7 @@ The agent expects the PSAP MCP Server to be running at `MCP_SERVER_URL`. If it's
 pytest                                          # Run all tests
 pytest --cov=psap_agent.src --cov-report=html   # With coverage
 pytest tests/test_prompt.py -v                  # Specific test file
+pytest tests/test_legacy_policy_coverage.py -v  # Curated-policy regression checks
 ```
 
 ## Project Structure
@@ -142,9 +162,12 @@ psap-agent/
 ├── psap_agent/
 │   ├── src/
 │   │   ├── core/
-│   │   │   ├── agent.py          # Agent initialization (Gemini + MCP client + checkpointer)
+│   │   │   ├── agent.py          # Agent initialization (LLM + MCP client + checkpointer)
+│   │   │   ├── model_factory.py  # Gemini, OpenAI, and Claude model routing
 │   │   │   ├── manager.py        # AgentManager: streaming, Langfuse tracing, event formatting
-│   │   │   ├── prompt.py         # System prompt with tool usage instructions
+│   │   │   ├── prompt.py         # Stable global policy prompt
+│   │   │   ├── curated_skills.py # Allowlisted on-demand workflow loader
+│   │   │   ├── curated_skill_documents/ # Reviewed workflow documents
 │   │   │   ├── storage.py        # Global in-memory checkpoint (dev mode)
 │   │   │   ├── cache_manager.py  # Gemini context caching
 │   │   │   └── agent_utils.py    # Message conversion utilities

@@ -1,5 +1,8 @@
 """Tests for the schema module."""
 
+import pytest
+from pydantic import ValidationError
+
 from psap_agent.src.schema import (
     ChatHistoryResponse,
     ChatMessage,
@@ -50,6 +53,18 @@ class TestStreamRequest:
         stream_request = StreamRequest(message="Hello world", stream_tokens=False)
         assert stream_request.message == "Hello world"
         assert stream_request.stream_tokens is False
+
+    def test_stream_request_accepts_openai_reasoning_effort(self):
+        stream_request = StreamRequest(
+            message="Hello world",
+            model="openai:gpt-6-luna",
+            reasoning_effort="xhigh",
+        )
+        assert stream_request.reasoning_effort == "xhigh"
+
+    def test_stream_request_rejects_unsupported_reasoning_effort(self):
+        with pytest.raises(ValidationError):
+            StreamRequest(message="Hello world", reasoning_effort="extra-high")
 
 
 class TestToolCall:
