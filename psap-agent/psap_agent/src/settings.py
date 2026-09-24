@@ -84,10 +84,16 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: Optional[str] = Field(
         default=None, json_schema_extra={"env": "GOOGLE_API_KEY"}
     )
+    OPENAI_API_KEY: Optional[str] = Field(
+        default=None, json_schema_extra={"env": "OPENAI_API_KEY"}
+    )
+    OPENAI_MODEL: Optional[str] = Field(
+        default=None, json_schema_extra={"env": "OPENAI_MODEL"}
+    )
     
     # LLM Model Configuration
     GEMINI_MODEL: str = Field(
-        default="gemini-3-flash-preview", json_schema_extra={"env": "GEMINI_MODEL"}
+        default="gemini-3.8-flash", json_schema_extra={"env": "GEMINI_MODEL"}
     )
 
     # Anthropic Vertex AI Configuration (for Claude models)

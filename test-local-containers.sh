@@ -6,7 +6,10 @@
 #
 # Credentials Setup:
 # - Google API Key: Loaded from GOOGLE_API_KEY env var or psap-agent/.env
+# - OpenAI API Key: Loaded from OPENAI_API_KEY env var or psap-agent/.env
 # - Grafana: Loaded from GRAFANA_* env vars or psap-mcp-server/.env
+# - Dashboard URLs: Loaded from DASHBOARD_BASE_URL and
+#   DASHBOARD_BASE_URL_STAGING in .env
 # - Langfuse: Prompted interactively during startup (http://localhost:3000)
 #
 # Usage:
@@ -58,6 +61,10 @@ fi
 
 # Credentials (will be prompted if not set)
 GOOGLE_API_KEY="${GOOGLE_API_KEY:-}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+OPENAI_MODEL="${OPENAI_MODEL:-}"
+CRITIC_MODEL="${CRITIC_MODEL:-}"
+LLM_JUDGE_MODEL="${LLM_JUDGE_MODEL:-}"
 GRAFANA_URL="${GRAFANA_URL:-}"
 GRAFANA_API_TOKEN="${GRAFANA_API_TOKEN:-}"
 GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-}"
@@ -70,6 +77,8 @@ S3_REGION="${S3_REGION:-us-east-1}"
 S3_CACHE_TTL_SECONDS="${S3_CACHE_TTL_SECONDS:-300}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
+DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-}"
+DASHBOARD_BASE_URL_STAGING="${DASHBOARD_BASE_URL_STAGING:-}"
 
 # Functions
 log_info() {
@@ -122,6 +131,31 @@ prompt_for_credentials() {
         fi
     else
         log_success "Gemini model detected in environment: $GEMINI_MODEL"
+    fi
+
+    # OpenAI Configuration (optional)
+    if [ -z "$OPENAI_API_KEY" ] && [ -f psap-agent/.env ] && grep -q "^OPENAI_API_KEY=" psap-agent/.env; then
+        OPENAI_API_KEY=$(grep "^OPENAI_API_KEY=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        log_success "OpenAI API Key loaded from psap-agent/.env"
+    elif [ -n "$OPENAI_API_KEY" ]; then
+        log_success "OpenAI API Key detected in environment"
+    fi
+
+    if [ -z "$OPENAI_MODEL" ] && [ -f psap-agent/.env ] && grep -q "^OPENAI_MODEL=" psap-agent/.env; then
+        OPENAI_MODEL=$(grep "^OPENAI_MODEL=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        log_success "OpenAI model loaded from psap-agent/.env: $OPENAI_MODEL"
+    elif [ -n "$OPENAI_MODEL" ]; then
+        log_success "OpenAI model detected in environment: $OPENAI_MODEL"
+    fi
+
+    # Self-improvement model overrides (optional)
+    if [ -z "$CRITIC_MODEL" ] && [ -f psap-agent/.env ] && grep -q "^CRITIC_MODEL=" psap-agent/.env; then
+        CRITIC_MODEL=$(grep "^CRITIC_MODEL=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        log_success "Critic model loaded from psap-agent/.env: $CRITIC_MODEL"
+    fi
+    if [ -z "$LLM_JUDGE_MODEL" ] && [ -f psap-agent/.env ] && grep -q "^LLM_JUDGE_MODEL=" psap-agent/.env; then
+        LLM_JUDGE_MODEL=$(grep "^LLM_JUDGE_MODEL=" psap-agent/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+        log_success "LLM Judge model loaded from psap-agent/.env: $LLM_JUDGE_MODEL"
     fi
     echo ""
     
@@ -236,16 +270,31 @@ prompt_for_credentials() {
     
     # Show summary
     log_info "📋 Credentials Summary:"
-    echo "  ✓ Google API Key:          ${GOOGLE_API_KEY:0:20}..."
+    if [ -n "$GOOGLE_API_KEY" ]; then
+        echo "  ✓ Google API Key:          Configured"
+    else
+        echo "  ⚠ Google API Key:          Not configured"
+    fi
+    if [ -n "$OPENAI_API_KEY" ]; then
+        echo "  ✓ OpenAI API Key:          Configured"
+    elif [ -n "$OPENAI_MODEL" ]; then
+        echo "  ⚠ OpenAI API Key:          Not configured (model selection unavailable)"
+    else
+        echo "  • OpenAI:                  Not configured (optional)"
+    fi
     if [ -n "$GRAFANA_URL" ]; then
         echo "  ✓ Grafana URL:             $GRAFANA_URL"
-        echo "  ✓ Grafana API Token:       ${GRAFANA_API_TOKEN:0:20}..."
+        if [ -n "$GRAFANA_API_TOKEN" ]; then
+            echo "  ✓ Grafana API Token:       Configured"
+        else
+            echo "  ⚠ Grafana API Token:       Not configured"
+        fi
         echo "  ✓ Grafana Datasource UID:  $GRAFANA_DATASOURCE_UID"
     else
         echo "  ⚠ Grafana:                 Not configured"
     fi
     if [ -n "$GITHUB_TOKEN" ]; then
-        echo "  ✓ GitHub Token:            ${GITHUB_TOKEN:0:20}..."
+        echo "  ✓ GitHub Token:            Configured"
     else
         echo "  ⚠ GitHub Token:            Not configured (60 req/hr rate limit)"
     fi
@@ -254,12 +303,17 @@ prompt_for_credentials() {
         echo "  ✓ S3 Key:                  $S3_KEY"
         echo "  ✓ S3 Cache TTL:            ${S3_CACHE_TTL_SECONDS}s"
         if [ -n "$AWS_ACCESS_KEY_ID" ]; then
-            echo "  ✓ AWS Access Key:          ${AWS_ACCESS_KEY_ID:0:10}..."
+            echo "  ✓ AWS Access Key:          Configured"
         else
             echo "  ⚠ AWS Credentials:         Not set (using IAM role or anonymous)"
         fi
     else
         echo "  ⚠ S3:                      Not configured (using local files)"
+    fi
+    if [ -n "$DASHBOARD_BASE_URL" ]; then
+        echo "  ✓ Dashboard URL:           Configured"
+    else
+        echo "  ⚠ Dashboard URL:           Not configured (dashboard links disabled)"
     fi
     echo ""
 }
@@ -619,7 +673,7 @@ start_mcp_server() {
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
       -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-https://aidash.app.intlab.redhat.com}" \
+      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-}" \
       $S3_ENV_VARS \
       $PROFILE_ENV \
       $PROFILE_MOUNT \
@@ -687,7 +741,9 @@ start_agent() {
       -e "POSTGRES_USER=psap_user"
       -e "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
       -e "GOOGLE_API_KEY=$GOOGLE_API_KEY"
-      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-flash-preview}"
+      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}"
+      -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+      -e "OPENAI_MODEL=${OPENAI_MODEL:-}"
       -e "ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}"
       -e "CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}"
       -e "MCP_SERVER_URL=http://psap-mcp-server:5001/mcp/"
@@ -745,6 +801,7 @@ start_streamlit() {
       --name streamlit-ui \
       --network $NETWORK_NAME \
       -e AGENT_API_URL="http://psap-agent:5002" \
+      -e OPENAI_MODEL="${OPENAI_MODEL:-}" \
       -p 8501:8501 \
       streamlit-ui:local
     
@@ -795,7 +852,7 @@ start_mcp_server_staging() {
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
       -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL_STAGING:-https://staging-aidash.apps.ocp4.intlab.redhat.com}" \
+      -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL_STAGING:-}" \
       $S3_ENV_VARS_STAGING \
       $PROFILE_ENV_STAGING \
       -p 5003:5001 \
@@ -824,7 +881,9 @@ start_agent_staging() {
       -e "POSTGRES_USER=psap_user"
       -e "POSTGRES_PASSWORD=$POSTGRES_PASSWORD"
       -e "GOOGLE_API_KEY=$GOOGLE_API_KEY"
-      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3-flash-preview}"
+      -e "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}"
+      -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+      -e "OPENAI_MODEL=${OPENAI_MODEL:-}"
       -e "ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}"
       -e "CLOUD_ML_REGION=${CLOUD_ML_REGION:-us-east5}"
       -e "MCP_SERVER_URL=http://psap-mcp-server-staging:5001/mcp/"
@@ -880,6 +939,7 @@ start_streamlit_staging() {
       --network $NETWORK_NAME \
       -e AGENT_API_URL="http://psap-agent-staging:5002" \
       -e APP_TITLE="Staging Performance Analysis Agent" \
+      -e OPENAI_MODEL="${OPENAI_MODEL:-}" \
       -p 8502:8501 \
       streamlit-ui:local
 
@@ -1048,6 +1108,7 @@ Examples:
 
 Credentials:
   Google API Key     – loaded from GOOGLE_API_KEY env var or psap-agent/.env
+  OpenAI API Key     – loaded from OPENAI_API_KEY env var or psap-agent/.env
   Grafana            – loaded from GRAFANA_* env vars or psap-mcp-server/.env
   S3 / AWS           – loaded from psap-mcp-server/.env
   Langfuse           – prompted interactively on first start
@@ -1161,4 +1222,3 @@ case "${1:-}" in
         show_help
         ;;
 esac
-

@@ -141,6 +141,7 @@ class AgentManager:
             self.redhat_sso_token,
             enable_checkpointing=True,
             model_name=request.model,
+            reasoning_effort=request.reasoning_effort,
         ) as persistent_agent:
             try:
                 kwargs, run_id, thread_id, memory_context = await self._handle_input(
@@ -799,10 +800,11 @@ class AgentManager:
             return None
 
         content = remove_tool_calls(msg.content)
-        if content:
+        text_content = convert_message_content_to_string(content)
+        if text_content:
             token_event = {
                 "type": "token",
-                "content": convert_message_content_to_string(content),
+                "content": text_content,
             }
 
             # Add tool call ID if this token is part of a tool call response

@@ -9,9 +9,9 @@ import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langfuse import get_client
 
+from psap_agent.src.core.model_factory import create_chat_model
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
@@ -279,8 +279,8 @@ async def run_critic(
             logger.warning(f"Langfuse critic tracing failed (non-fatal): {e}")
 
     try:
-        critic_model = ChatGoogleGenerativeAI(
-            model=settings.CRITIC_MODEL,
+        critic_model = create_chat_model(
+            settings.CRITIC_MODEL,
             temperature=0.0,
         )
 

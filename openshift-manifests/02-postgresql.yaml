@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
       - name: postgres
-        image: pgvector/pgvector:pg17
+        image: pgvector/pgvector@sha256:494dff7e67e7bc2c826b94c331364978d145ebb86fd338154138b084223b7f67
         ports:
         - containerPort: 5432
           name: postgres
@@ -96,4 +96,3 @@ spec:
     targetPort: 5432
     protocol: TCP
   type: ClusterIP
-

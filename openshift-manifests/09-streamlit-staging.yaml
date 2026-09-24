@@ -75,3 +75,24 @@ spec:
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: aidash-agent-staging
+  namespace: psap-ai-agent
+  labels:
+    app: streamlit-ui-staging
+spec:
+  host: aidash-agent-staging.apps.<your-cluster-domain>
+  to:
+    kind: Service
+    name: streamlit-ui-staging
+    weight: 100
+  port:
+    targetPort: 8501
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

@@ -74,6 +74,28 @@ def initialize_session_state():
         st.session_state.stop_requested = False
 
 
+def _provider_for_model(model_name: str) -> str:
+    """Return the provider family for the selected model ID."""
+    normalized = model_name.strip().lower()
+    if normalized.startswith("openai:") or normalized.startswith(
+        ("gpt-", "o1", "o3", "o4")
+    ):
+        return "openai"
+    if normalized.startswith("claude-"):
+        return "claude"
+    return "gemini"
+
+
+def _start_new_conversation() -> None:
+    """Start a fresh agent checkpoint while keeping prior chat visible."""
+    messages = st.session_state.messages
+    if messages and messages[-1].get("role") != "divider":
+        messages.append({"role": "divider"})
+    st.session_state.thread_id = str(uuid.uuid4())
+    st.session_state.last_message_time = None
+    st.session_state.inactivity_dismissed = True
+
+
 def apply_custom_css():
     """Inject custom CSS for button styling and optional dark mode."""
     dark = st.session_state.get("dark_mode", False)
@@ -452,6 +474,7 @@ def stream_agent_response(
     stream_tokens: bool = True,
     api_url: str = "http://localhost:8081",
     model: str | None = None,
+    reasoning_effort: str | None = None,
     status_callback=None,
 ) -> tuple[str, List[Dict[str, Any]]]:
     """Stream response from the PSAP Agent using the simplified API.
@@ -463,7 +486,8 @@ def stream_agent_response(
         user_id: User identifier
         stream_tokens: Whether to stream individual tokens
         api_url: Base URL of the PSAP Agent API
-        model: Optional Gemini model override
+        model: Optional model override
+        reasoning_effort: Optional OpenAI reasoning effort override
         status_callback: Optional callback(content_dict) called on each status event
 
     Returns:
@@ -479,6 +503,8 @@ def stream_agent_response(
     }
     if model:
         request_data["model"] = model
+    if reasoning_effort:
+        request_data["reasoning_effort"] = reasoning_effort
 
     full_response = ""
     all_messages = []
@@ -700,22 +726,58 @@ def main():
         default_api_url = os.getenv("AGENT_API_URL", "http://localhost:5002")
 
         model_options = {
-            "⚡ Gemini 3 Flash (default) ▾": "gemini-3-flash-preview",
-            "🧠 Gemini 3.1 Pro ▾": "gemini-3.1-pro-preview",
-            "🟣 Claude Opus 4.6 (Vertex AI) ▾": "claude-opus-4-6",
-            "🔵 Claude Sonnet 4.6 (Vertex AI) ▾": "claude-sonnet-4-6",
+            "⚡ Gemini 3.8 Flash (default) ▾": ("gemini-3.8-flash", None),
+            "🧠 Gemini 3.1 Pro ▾": ("gemini-3.1-pro-preview", None),
+            "🟢 GPT-6 Luna (extra-high thinking) ▾": ("openai:gpt-6-luna", "xhigh"),
+            "🟢 GPT-6 Sol (medium thinking) ▾": ("openai:gpt-6-sol", "medium"),
+            "🟣 Claude Opus 4.6 (Vertex AI) ▾": ("claude-opus-4-6", None),
+            "🔵 Claude Sonnet 4.6 (Vertex AI) ▾": ("claude-sonnet-4-6", None),
         }
+        openai_model = os.getenv("OPENAI_MODEL", "").strip().removeprefix("openai:")
+        if openai_model and openai_model not in {"gpt-6-luna", "gpt-6-sol"}:
+            model_options[f"🟢 OpenAI {openai_model} ▾"] = (
+                f"openai:{openai_model}",
+                None,
+            )
         selected_label = st.selectbox(
             "🤖 LLM Model",
             options=list(model_options.keys()),
             index=0,
-            help="Select the LLM model. Claude models require Vertex AI credentials.",
+            key="llm_model_selection",
+            disabled=st.session_state.is_streaming,
+            help=(
+                "Select the LLM model. Claude models require Vertex AI credentials; "
+                "OpenAI models require OPENAI_API_KEY on the agent."
+            ),
         )
-        selected_model = model_options[selected_label]
+        selected_model, reasoning_effort = model_options[selected_label]
+
+        selected_provider = _provider_for_model(selected_model)
+        previous_provider = st.session_state.get("conversation_model_provider")
+        provider_switch_notice = None
+        if previous_provider is None:
+            # Older Streamlit sessions do not know which provider created their
+            # checkpoint. Start a fresh thread once rather than risk reusing it.
+            if st.session_state.messages:
+                _start_new_conversation()
+                provider_switch_notice = (
+                    "Started a fresh conversation because this session's previous "
+                    "model provider could not be verified. Earlier messages are kept above."
+                )
+        elif previous_provider != selected_provider:
+            _start_new_conversation()
+            provider_switch_notice = (
+                f"Switched from {previous_provider.title()} to {selected_provider.title()}; "
+                "started a new conversation to keep provider-specific history separate. "
+                "Earlier messages are kept above."
+            )
+        st.session_state.conversation_model_provider = selected_provider
+        if provider_switch_notice:
+            st.info(provider_switch_notice)
 
         if selected_model == "gemini-3.1-pro-preview":
             st.warning(
-                "**Gemini 3 Flash** is the default and recommended model for most use cases. "
+                "**Gemini 3.8 Flash** is the default and recommended model for most use cases. "
                 "Use **Pro** only when you need deeper reasoning or higher quality output. "
                 "Pro has significantly higher latency and cost, please use it mindfully."
             )
@@ -724,6 +786,18 @@ def main():
                 "**Claude models** run via Google Vertex AI "
                 "Opus is best for complex architectural analysis; "
                 "Sonnet is a good balance of quality and speed. Claude Models have higher cost, please use them mindfully."
+            )
+        elif selected_model.startswith("openai:"):
+            selected_openai_model = selected_model.removeprefix("openai:")
+            reasoning_label = (
+                " with **extra-high** thinking"
+                if reasoning_effort == "xhigh"
+                else f" with **{reasoning_effort}** thinking"
+                if reasoning_effort
+                else ""
+            )
+            st.info(
+                f"**OpenAI {selected_openai_model}** runs{reasoning_label}"
             )
 
         # API status (cached to avoid flaky checks on every Streamlit re-render)
@@ -792,11 +866,7 @@ def main():
         st.text(f"User ID: {st.session_state.user_email}")
 
         if st.button("🔄 New Conversation", use_container_width=True, key="new_conv_sidebar", type="primary", disabled=st.session_state.is_streaming):
-            if st.session_state.messages:
-                st.session_state.messages.append({"role": "divider"})
-            st.session_state.thread_id = str(uuid.uuid4())
-            st.session_state.last_message_time = None
-            st.session_state.inactivity_dismissed = True
+            _start_new_conversation()
             st.rerun()
 
         st.divider()
@@ -952,11 +1022,7 @@ def main():
             )
         with tc_col3:
             if st.button("🔄 New Conversation", key="new_conv_main", use_container_width=True, type="primary", disabled=st.session_state.is_streaming):
-                if st.session_state.messages:
-                    st.session_state.messages.append({"role": "divider"})
-                st.session_state.thread_id = str(uuid.uuid4())
-                st.session_state.last_message_time = None
-                st.session_state.inactivity_dismissed = True
+                _start_new_conversation()
                 st.rerun()
 
     # Inactivity prompt - show if returning after 10+ minutes of silence
@@ -980,11 +1046,7 @@ def main():
                         st.rerun()
                 with c2:
                     if st.button("Start Fresh", key="start_fresh", use_container_width=True, type="primary"):
-                        if st.session_state.messages:
-                            st.session_state.messages.append({"role": "divider"})
-                        st.session_state.thread_id = str(uuid.uuid4())
-                        st.session_state.last_message_time = None
-                        st.session_state.inactivity_dismissed = True
+                        _start_new_conversation()
                         st.rerun()
 
     # Always show chat input (disabled while agent is working)
@@ -1087,6 +1149,7 @@ def main():
                 stream_tokens=stream_tokens,
                 api_url=api_url,
                 model=selected_model,
+                reasoning_effort=reasoning_effort,
                 status_callback=_on_status,
             )
 

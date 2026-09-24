@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage
 
+from psap_agent.src.core.model_factory import create_chat_model
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
@@ -269,7 +270,10 @@ class SkillDocumentStore:
                 return ""
 
             ranked = await self._rank_skills(query, all_skills, limit)
-            lines = ["Relevant skill recipes from past successful investigations:"]
+            lines = [
+                "Suggested (non-authoritative) tool recipes from past successful "
+                "investigations:"
+            ]
             kept = 0
             for skill, score in ranked:
                 if score < self._SKILL_RELEVANCE_THRESHOLD:
@@ -350,10 +354,8 @@ class SkillDocumentStore:
                 f"error_recovery={had_error_recovery}). Generating skill document."
             )
 
-            from langchain_google_genai import ChatGoogleGenerativeAI
-
-            model = ChatGoogleGenerativeAI(
-                model=settings.LLM_JUDGE_MODEL, temperature=0.0
+            model = create_chat_model(
+                settings.LLM_JUDGE_MODEL, temperature=0.0
             )
 
             deduped: list[tuple[str, int]] = []

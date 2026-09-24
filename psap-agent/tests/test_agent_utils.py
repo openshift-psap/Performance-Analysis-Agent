@@ -39,6 +39,21 @@ class TestAgentUtils:
         result = convert_message_content_to_string(content)
         assert result == "Hello world"
 
+    def test_convert_message_content_to_string_handles_response_lifecycle_blocks(self):
+        """Responses API lifecycle blocks without text must not break streaming."""
+        content = [
+            {"type": "text", "annotations": [{"type": "url_citation"}]},
+            {"type": "text", "id": "msg_123"},
+            {"type": "reasoning", "summary": []},
+            {"type": "function_call", "name": "lookup"},
+            {"type": "text", "text": "Hello"},
+            {"type": "output_text", "text": " world"},
+        ]
+
+        result = convert_message_content_to_string(content)
+
+        assert result == "Hello world"
+
     def test_remove_tool_calls_string(self):
         """Test remove_tool_calls with string content."""
         content = "Hello world"
@@ -56,6 +71,12 @@ class TestAgentUtils:
         content = ["Hello", {"type": "tool_use", "tool_use": {}}, " world"]
         result = remove_tool_calls(content)
         assert result == ["Hello", " world"]
+
+    def test_remove_tool_calls_handles_content_block_without_type(self):
+        """Text annotations and other partial blocks may not include a type."""
+        content = ["Hello", {"annotations": []}, " world"]
+        result = remove_tool_calls(content)
+        assert result == content
 
     def test_langchain_to_chat_message_human(self):
         """Test converting HumanMessage to ChatMessage."""

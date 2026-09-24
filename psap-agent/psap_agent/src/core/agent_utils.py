@@ -41,8 +41,17 @@ def convert_message_content_to_string(
         if isinstance(content_item, str):
             text.append(content_item)
             continue
-        if content_item["type"] == "text":
-            text.append(content_item["text"])
+        if not isinstance(content_item, dict):
+            continue
+
+        # Responses API streaming emits lifecycle blocks such as text
+        # annotations and text-completion markers. Those blocks have a
+        # ``type`` of ``text`` but intentionally do not carry a text value.
+        # Only append actual text-bearing blocks.
+        if content_item.get("type") in {"text", "output_text", "input_text"}:
+            value = content_item.get("text")
+            if isinstance(value, str):
+                text.append(value)
 
     return "".join(text)
 
@@ -157,5 +166,6 @@ def remove_tool_calls(
     return [
         content_item
         for content_item in content
-        if isinstance(content_item, str) or content_item["type"] != "tool_use"
+        if not isinstance(content_item, dict)
+        or content_item.get("type") != "tool_use"
     ]
