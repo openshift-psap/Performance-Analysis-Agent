@@ -18,7 +18,7 @@ This document describes the agent's self-improvement system: automated evaluatio
 
 ## Overview
 
-![Self-Improvement Architecture Workflow](images/self_improvement_workflow.png)
+![Self-Improvement Architecture Workflow](images/self_improvement_workflow_v2.png)
 
 The self-improvement system is organized into three tiers that run after every agent response, wrapped in runtime safety mechanisms that prevent runaway execution:
 
