@@ -7,7 +7,7 @@ This directory contains the Streamlit application for interacting with the PSAP 
 ### Performance Chat Interface (`streamlit_app.py`)
 
 A full-featured chat application built with Streamlit for performance analysis:
-- **Real-time chat interface** with message history and user authentication
+- **Real-time chat interface** with message history and a Red Hat email user identifier
 - **Performance-focused queries** with intelligent clarification
 - **Token streaming visualization** for responsive UX
 - **Session management** with thread and session persistence
@@ -22,7 +22,7 @@ A full-featured chat application built with Streamlit for performance analysis:
 - Example performance queries
 - Dashboard link generation
 - Feedback tracking via Langfuse
-- Email-based user authentication
+- Red Hat email identifier for conversation tracking (not authentication)
 - Session persistence across browser refreshes
 
 **To Run:**
@@ -140,11 +140,11 @@ curl http://localhost:5002/v1/health
 
 The PSAP Agent includes:
 
-- **User Authentication**: Red Hat email login required
+- **User Identification**: Red Hat email is collected for conversation tracking; it is not an authentication mechanism. Access control must be enforced by the deployment environment.
 - **Langfuse Tracing**: Automatic tracing, analytics, and feedback tracking
 - **PostgreSQL Persistence**: Conversation history and checkpointing
-- **Context Caching**: Gemini 2.5 Flash with explicit caching for cost savings
-- **MCP Tools**: 11 specialized tools for performance analysis
+- **Context Caching**: Gemini prompt caching when enabled and compatible with the selected workflow
+- **MCP Tools**: Specialized tools for benchmark, Grafana, profiler, vLLM source, and log analysis
 - **Error Monitoring**: Comprehensive error logging and recovery
 
 ## 📚 Additional Resources

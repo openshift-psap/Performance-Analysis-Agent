@@ -49,4 +49,3 @@ CMD ["streamlit", "run", "streamlit_app.py", \
      "--server.enableXsrfProtection=false", \
      "--server.runOnSave=false", \
      "--browser.gatherUsageStats=false"]
-
