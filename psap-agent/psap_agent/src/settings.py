@@ -134,7 +134,7 @@ class Settings(BaseSettings):
         default="gemini-3.1-pro-preview", json_schema_extra={"env": "CRITIC_MODEL"}
     )
     LLM_JUDGE_MODEL: str = Field(
-        default="gemini-3.5-flash", json_schema_extra={"env": "LLM_JUDGE_MODEL"}
+        default="gemini-3.8-flash", json_schema_extra={"env": "LLM_JUDGE_MODEL"}
     )
     ENABLE_REFLECTION: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_REFLECTION"}
