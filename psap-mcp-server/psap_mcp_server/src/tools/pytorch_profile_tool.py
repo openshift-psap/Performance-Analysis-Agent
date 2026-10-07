@@ -19,17 +19,19 @@ Example::
         trace_rank0_pid757_runisl1000_osl1000_range500-510.json
 """
 
+import asyncio
 import json
 import os
 import re
 import statistics
+import threading
 import time as _time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from psap_mcp_server.utils.pylogger import get_python_logger
 from psap_mcp_server.src.settings import settings
+from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
@@ -159,7 +161,9 @@ FUNCTIONAL_PIPELINES: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 _profile_index_cache: Optional[Dict] = None
 _profile_index_ts: float = 0.0
+_profile_model_index_cache: Dict[str, Tuple[float, Dict]] = {}
 _PROFILE_INDEX_TTL: int = 300  # seconds
+_profile_index_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # In-memory stats cache  (cache_key -> (timestamp, stats_dict))
@@ -275,7 +279,9 @@ def _match_all_models(user_model: Optional[str], available_models: List[str]) ->
     # 1b. Accelerator-normalized match: cluster-specific names like
     #     H200_ZEUS2/model share hardware with H200/model.
     if "/" in lower:
-        from psap_mcp_server.src.tools.performance_data_loader import get_base_accelerator
+        from psap_mcp_server.src.tools.performance_data_loader import (
+            get_base_accelerator,
+        )
         user_accel, user_bare = lower.split("/", 1)
         base_accel = get_base_accelerator(user_accel).lower()
         if base_accel != user_accel:
@@ -369,10 +375,10 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
 #  Profile discovery (S3 + local)                                        #
 # ===================================================================== #
 
-def _discover_profiles_s3() -> Optional[Dict]:
+def _discover_profiles_s3(model: Optional[str] = None) -> Optional[Dict]:
     """Discover available profiles from S3 by listing directories.
 
-    Walks the 6-level hierarchy::
+    Walks the profile hierarchy::
 
         s3://<bucket>/<prefix>/<accelerator>/<model>/<tp>/<version>/<workload>/
 
@@ -384,6 +390,7 @@ def _discover_profiles_s3() -> Optional[Dict]:
             }
         }
 
+    If *model* is provided, only descends into matching model folders.
     Returns ``None`` if S3 is not configured or unreachable.
     """
     bucket = settings.S3_BUCKET
@@ -402,7 +409,9 @@ def _discover_profiles_s3() -> Optional[Dict]:
         logger.warning("boto3 not installed -- S3 profile discovery unavailable")
         return None
     except Exception as exc:
-        logger.warning(f"Failed to create S3 client: {exc}")
+        logger.warning(
+            f"Failed to create S3 client: {exc}", exc_info=True
+        )
         return None
 
     index: Dict = {}
@@ -458,46 +467,57 @@ def _discover_profiles_s3() -> Optional[Dict]:
                 break
 
     try:
-        # 1. accelerator folders (H200/, B200/, MI300x/)
+        # Enumerate model folders first so filtered requests can avoid walking
+        # every model's TP/version/workload hierarchy.
         accel_prefixes = _list_prefixes(prefix)
+        model_prefixes_by_key: Dict[str, str] = {}
 
         for accel_prefix in accel_prefixes:
             accelerator = accel_prefix.rstrip("/").split("/")[-1]
-
-            # 2. model folders (deepseek-ai--DeepSeek-R1-0528/)
             model_prefixes = _list_prefixes(accel_prefix)
-
             for model_prefix in model_prefixes:
                 model_name = model_prefix.rstrip("/").split("/")[-1]
                 composite_key = f"{accelerator}/{model_name}"
+                model_prefixes_by_key[composite_key] = model_prefix
 
-                # 3. tp folders (tp2/, tp8/)
-                tp_prefixes = _list_prefixes(model_prefix)
+        selected_model_keys = sorted(model_prefixes_by_key)
+        if model is not None:
+            selected_model_keys = _match_all_models(model, selected_model_keys)
 
-                for tp_prefix in tp_prefixes:
-                    tp_name = tp_prefix.rstrip("/").split("/")[-1]
+        for composite_key in selected_model_keys:
+            model_prefix = model_prefixes_by_key[composite_key]
 
-                    # 4. vLLM version folders (vLLM-0.21.0/)
-                    version_prefixes = _list_prefixes(tp_prefix)
+            # TP folders (tp2/, tp8/)
+            tp_prefixes = _list_prefixes(model_prefix)
 
-                    for version_prefix in version_prefixes:
-                        version_name = version_prefix.rstrip("/").split("/")[-1]
+            for tp_prefix in tp_prefixes:
+                tp_name = tp_prefix.rstrip("/").split("/")[-1]
 
-                        # 5. workload folders (isl1000_osl1000/)
-                        workload_prefixes = _list_prefixes(version_prefix)
+                # vLLM version folders (vLLM-0.21.0/)
+                version_prefixes = _list_prefixes(tp_prefix)
 
-                        for workload_prefix in workload_prefixes:
-                            workload_name = workload_prefix.rstrip("/").split("/")[-1]
-                            _scan_workload_traces(
-                                workload_prefix, composite_key,
-                                tp_name, version_name, workload_name,
-                            )
+                for version_prefix in version_prefixes:
+                    version_name = version_prefix.rstrip("/").split("/")[-1]
+
+                    # Workload folders (isl1000_osl1000/)
+                    workload_prefixes = _list_prefixes(version_prefix)
+
+                    for workload_prefix in workload_prefixes:
+                        workload_name = workload_prefix.rstrip("/").split("/")[-1]
+                        _scan_workload_traces(
+                            workload_prefix, composite_key,
+                            tp_name, version_name, workload_name,
+                        )
 
         if index:
             summary = ", ".join(
                 f"{m} ({len(tps)} tp(s))" for m, tps in index.items()
             )
             logger.info(f"S3 profile discovery: {summary}")
+        elif model is not None and not selected_model_keys:
+            logger.info(f"S3 profile discovery: no model folders match {model!r}")
+        elif model is not None:
+            logger.info(f"S3 profile discovery: no traces found for {model!r}")
         else:
             logger.info(
                 f"S3 profile discovery: no profiles under s3://{bucket}/{prefix}"
@@ -506,7 +526,7 @@ def _discover_profiles_s3() -> Optional[Dict]:
         return index
 
     except Exception as exc:
-        logger.warning(f"S3 profile discovery failed: {exc}")
+        logger.warning(f"S3 profile discovery failed: {exc}", exc_info=True)
         return None
 
 
@@ -584,35 +604,89 @@ def _discover_profiles_local(base_dir: Optional[str] = None) -> Dict:
     return index
 
 
-def _discover_profiles(force_refresh: bool = False) -> Dict:
+def _discover_profiles(
+    force_refresh: bool = False, model: Optional[str] = None
+) -> Dict:
     """Discover available profiles from S3, with in-memory caching.
 
     Results are cached for ``_PROFILE_INDEX_TTL`` seconds.
+
+    This synchronous helper must run in a worker thread when called from an
+    async MCP tool because boto3's S3 calls are blocking.
     """
     global _profile_index_cache, _profile_index_ts
 
-    now = _time.time()
-    if (
-        not force_refresh
-        and _profile_index_cache is not None
-        and (now - _profile_index_ts) < _PROFILE_INDEX_TTL
-    ):
-        return _profile_index_cache
+    # Coalesce concurrent cache misses/refreshes. Re-check the TTL after
+    # acquiring the lock so only the first waiting caller performs the scan.
+    with _profile_index_lock:
+        now = _time.time()
+        if model is None:
+            if (
+                not force_refresh
+                and _profile_index_cache is not None
+                and (now - _profile_index_ts) < _PROFILE_INDEX_TTL
+            ):
+                return _profile_index_cache
+        else:
+            if (
+                not force_refresh
+                and _profile_index_cache is not None
+                and (now - _profile_index_ts) < _PROFILE_INDEX_TTL
+            ):
+                matches = _match_all_models(model, sorted(_profile_index_cache))
+                return {key: _profile_index_cache[key] for key in matches}
 
-    index = _discover_profiles_s3()
+            cache_key = _normalize_separator(model)
+            cached_model_index = _profile_model_index_cache.get(cache_key)
+            if (
+                not force_refresh
+                and cached_model_index is not None
+                and (now - cached_model_index[0]) < _PROFILE_INDEX_TTL
+            ):
+                return cached_model_index[1]
 
-    if index:
-        logger.info(f"Profile index built from S3: {len(index)} model(s)")
-    else:
-        logger.warning(
-            "No profile data found in S3. "
-            "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<tp>/<version>/<workload>/"
-        )
-        index = {}
+        index = _discover_profiles_s3(model=model)
 
-    _profile_index_cache = index
-    _profile_index_ts = now
-    return index
+        if index:
+            logger.info(f"Profile index built from S3: {len(index)} model(s)")
+        else:
+            if model is not None:
+                logger.warning(f"No profile data found for model filter {model!r}.")
+            else:
+                logger.warning(
+                    "No profile data found in S3. "
+                    "Upload traces to s3://<bucket>/<PROFILE_S3_PREFIX>/<accelerator>/<model>/<tp>/<version>/<workload>/"
+                )
+            index = {}
+
+        # Start the TTL when the refresh completes, not when the scan begins.
+        refreshed_at = _time.time()
+        if model is None:
+            _profile_index_cache = index
+            _profile_index_ts = refreshed_at
+            _profile_model_index_cache.clear()
+        else:
+            expired_keys = [
+                cache_key
+                for cache_key, (cached_at, _) in _profile_model_index_cache.items()
+                if refreshed_at - cached_at >= _PROFILE_INDEX_TTL
+            ]
+            for cache_key in expired_keys:
+                del _profile_model_index_cache[cache_key]
+            _profile_model_index_cache[_normalize_separator(model)] = (
+                refreshed_at,
+                index,
+            )
+        return index
+
+
+async def _discover_profiles_async(
+    force_refresh: bool = False, model: Optional[str] = None
+) -> Dict:
+    """Discover profiles without blocking the MCP event loop."""
+    return await asyncio.to_thread(
+        _discover_profiles, force_refresh=force_refresh, model=model
+    )
 
 
 # ===================================================================== #
@@ -732,6 +806,8 @@ def _load_or_extract_stats(
     workload: str,
     rank: int,
     force_reload: bool = False,
+    *,
+    index: Dict,
 ) -> Optional[Dict[str, Dict]]:
     """Load kernel stats for a given model/tp/version/workload/rank.
 
@@ -749,7 +825,6 @@ def _load_or_extract_stats(
             logger.debug(f"Stats cache hit: {cache_key}")
             return cached
 
-    index = _discover_profiles()
     entry = (
         index.get(model, {})
         .get(tp, {})
@@ -1332,6 +1407,8 @@ def _load_raw_events(
     version: str,
     workload: str,
     rank: int,
+    *,
+    index: Dict,
 ) -> Optional[List[Dict]]:
     """Load raw Chrome trace events for a model/tp/version/workload/rank.
 
@@ -1345,7 +1422,6 @@ def _load_raw_events(
             return evts
         del _raw_events_cache[cache_key]
 
-    index = _discover_profiles()
     entry = (
         index.get(model, {})
         .get(tp, {})
@@ -1373,7 +1449,7 @@ def _load_raw_events(
 #  Internal helpers for tool functions                                   #
 # ===================================================================== #
 
-def _resolve_profile(
+async def _resolve_profile(
     model: Optional[str],
     tp: Optional[str],
     version: str,
@@ -1384,9 +1460,11 @@ def _resolve_profile(
     Returns (model_key, matched_tp, matched_version, matched_workload, error_message, index).
     If error_message is not None the caller should return it.
     """
-    index = _discover_profiles()
+    index = await _discover_profiles_async(model=model)
 
     if not index:
+        if model is not None:
+            return None, None, None, None, f"Model '{model}' not found or has no profile data.", index
         return None, None, None, None, "No profile data available. Check S3 configuration or local profile directory.", index
 
     # --- model ---
@@ -1532,7 +1610,9 @@ async def analyze_pytorch_profile(
         - summary: Overall statistics
     """
     try:
-        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
+        model_key, matched_tp, matched_version, matched_workload, error, index = await _resolve_profile(
+            model, tp, version, workload
+        )
         if error:
             return {"status": "error", "message": error}
 
@@ -1547,7 +1627,10 @@ async def analyze_pytorch_profile(
             stats_list = []
             loaded_ranks = []
             for r in available_ranks:
-                s = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, r, force_reload)
+                s = _load_or_extract_stats(
+                    model_key, matched_tp, matched_version, matched_workload, r,
+                    force_reload, index=index,
+                )
                 if s:
                     stats_list.append(s)
                     loaded_ranks.append(r)
@@ -1568,7 +1651,10 @@ async def analyze_pytorch_profile(
                     "message": f"Rank {r} not available for {display_name} {matched_tp} {matched_version} {matched_workload}. Available ranks: {available_ranks}",
                 }
 
-            stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, r, force_reload)
+            stats = _load_or_extract_stats(
+                model_key, matched_tp, matched_version, matched_workload, r,
+                force_reload, index=index,
+            )
             if not stats:
                 return {
                     "status": "error",
@@ -1669,7 +1755,8 @@ async def compare_pytorch_profiles(
         - summary: Overall comparison statistics
     """
     try:
-        index = _discover_profiles(force_refresh=force_reload)
+        # force_reload controls trace-stat extraction, not profile-index refresh.
+        index = await _discover_profiles_async(model=model)
 
         if not index:
             return {"status": "error", "message": "No profile data available."}
@@ -1752,7 +1839,10 @@ async def compare_pytorch_profiles(
             if aggregate_ranks:
                 parts = []
                 for r in ranks:
-                    s = _load_or_extract_stats(model_key, matched_tp, version, matched_workload, r, force_reload)
+                    s = _load_or_extract_stats(
+                        model_key, matched_tp, version, matched_workload, r,
+                        force_reload, index=index,
+                    )
                     if s:
                         parts.append(s)
                 if parts:
@@ -1760,7 +1850,10 @@ async def compare_pytorch_profiles(
                 return None, ""
             else:
                 r = rank if rank is not None else 0
-                return _load_or_extract_stats(model_key, matched_tp, version, matched_workload, r, force_reload), f"rank {r}"
+                return _load_or_extract_stats(
+                    model_key, matched_tp, version, matched_workload, r,
+                    force_reload, index=index,
+                ), f"rank {r}"
 
         stats1, scope1 = load_version_stats(mv1, ranks_v1)
         stats2, scope2 = load_version_stats(mv2, ranks_v2)
@@ -2000,7 +2093,9 @@ async def analyze_performance_insights(
     """
     try:
         # Resolve v1 first to get model/tp/workload, then match v2
-        model_key, matched_tp, mv1, matched_workload, error, index = _resolve_profile(model, tp, version1, workload)
+        model_key, matched_tp, mv1, matched_workload, error, index = await _resolve_profile(
+            model, tp, version1, workload
+        )
         if error:
             return {"status": "error", "message": error}
         assert model_key is not None and matched_tp is not None and mv1 is not None and matched_workload is not None
@@ -2018,8 +2113,12 @@ async def analyze_performance_insights(
 
         display_name = _get_display_name(model_key)
 
-        stats1 = _load_or_extract_stats(model_key, matched_tp, mv1, matched_workload, rank)
-        stats2 = _load_or_extract_stats(model_key, matched_tp, mv2, matched_workload, rank)
+        stats1 = _load_or_extract_stats(
+            model_key, matched_tp, mv1, matched_workload, rank, index=index
+        )
+        stats2 = _load_or_extract_stats(
+            model_key, matched_tp, mv2, matched_workload, rank, index=index
+        )
 
         if not stats1 or not stats2:
             return {"status": "error", "message": "Missing profile data for comparison"}
@@ -2350,9 +2449,14 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
         - available_models: List of model names with profiles
     """
     try:
-        index = _discover_profiles(force_refresh=True)
+        index = await _discover_profiles_async(model=model)
 
         if not index:
+            if model is not None:
+                return {
+                    "status": "error",
+                    "message": f"Model '{model}' not found or has no profile data.",
+                }
             return {
                 "status": "success",
                 "available_models": [],
@@ -2436,7 +2540,7 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
         }
 
     except Exception as exc:
-        logger.error(f"Error listing profiles: {exc}")
+        logger.error(f"Error listing profiles: {exc}", exc_info=True)
         return {"status": "error", "message": f"Failed to list profiles: {exc}"}
 
 
@@ -2477,14 +2581,19 @@ async def get_kernel_call_stacks(
         Dictionary with call stacks or unavailability message.
     """
     try:
-        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
+        model_key, matched_tp, matched_version, matched_workload, error, index = await _resolve_profile(
+            model, tp, version, workload
+        )
         if error:
             return {"status": "error", "message": error}
         assert model_key is not None and matched_tp is not None and matched_version is not None and matched_workload is not None
 
         display_name = _get_display_name(model_key)
 
-        stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, rank)
+        stats = _load_or_extract_stats(
+            model_key, matched_tp, matched_version, matched_workload, rank,
+            index=index,
+        )
         if not stats:
             return {"status": "error", "message": f"No profile data for {display_name} {matched_version} rank {rank}"}
 
@@ -2575,7 +2684,7 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
         Dictionary with diagnostic information.
     """
     try:
-        index = _discover_profiles(force_refresh=True)
+        index = await _discover_profiles_async(model=model)
 
         if not index:
             return {
@@ -2698,14 +2807,19 @@ async def analyze_trace_structure(
         ordered pipeline breakdown, and overhead accounting.
     """
     try:
-        model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(model, tp, version, workload)
+        model_key, matched_tp, matched_version, matched_workload, error, index = await _resolve_profile(
+            model, tp, version, workload
+        )
         if error:
             return {"status": "error", "message": error}
         assert model_key is not None and matched_tp is not None and matched_version is not None and matched_workload is not None
 
         display_name = _get_display_name(model_key)
 
-        raw_events = _load_raw_events(model_key, matched_tp, matched_version, matched_workload, rank)
+        raw_events = _load_raw_events(
+            model_key, matched_tp, matched_version, matched_workload, rank,
+            index=index,
+        )
         if not raw_events:
             return {
                 "status": "error",
@@ -2821,7 +2935,9 @@ async def compare_trace_structures(
     """
     try:
         # Resolve v1 first, then match v2 under same model/tp/workload
-        model_key, matched_tp, mv1, matched_workload, error, index = _resolve_profile(model, tp, version1, workload)
+        model_key, matched_tp, mv1, matched_workload, error, index = await _resolve_profile(
+            model, tp, version1, workload
+        )
         if error:
             return {"status": "error", "message": error}
         assert model_key is not None and matched_tp is not None and mv1 is not None and matched_workload is not None
@@ -2838,8 +2954,12 @@ async def compare_trace_structures(
             wl_v2 = sorted(tp_data.get(mv2, {}).keys())
             return {"status": "error", "message": f"Workload '{matched_workload}' not found for {mv2}. Available: {wl_v2}"}
 
-        raw1 = _load_raw_events(model_key, matched_tp, mv1, matched_workload, rank)
-        raw2 = _load_raw_events(model_key, matched_tp, mv2, matched_workload, rank)
+        raw1 = _load_raw_events(
+            model_key, matched_tp, mv1, matched_workload, rank, index=index
+        )
+        raw2 = _load_raw_events(
+            model_key, matched_tp, mv2, matched_workload, rank, index=index
+        )
         if not raw1:
             return {"status": "error", "message": f"No trace found for {display_name} {mv1} rank {rank}"}
         if not raw2:
