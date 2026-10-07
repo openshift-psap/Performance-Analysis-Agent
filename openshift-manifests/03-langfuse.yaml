@@ -261,7 +261,7 @@ spec:
     spec:
       containers:
       - name: minio
-        image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        image: cgr.dev/chainguard/minio@sha256:e7ca559d9f7c0b5f24f5f669bb92f40f3ca88d56273b808bf3a7c116c17d2ffa
         ports:
         - containerPort: 9000
           name: api
