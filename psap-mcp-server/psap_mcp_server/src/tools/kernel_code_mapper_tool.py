@@ -308,17 +308,19 @@ async def map_kernel_to_vllm_code(
         if profile_model and not is_stdlib:
             try:
                 from psap_mcp_server.src.tools.pytorch_profile_tool import (
-                    _resolve_profile,
-                    _load_or_extract_stats,
                     _extract_bare_version,
-                    _match_version,
+                    _load_or_extract_stats,
+                    _resolve_profile,
                 )
                 bare_version = f"vLLM-{_extract_bare_version(version)}"
-                model_key, matched_tp, matched_version, matched_workload, error, index = _resolve_profile(
+                model_key, matched_tp, matched_version, matched_workload, error, index = await _resolve_profile(
                     profile_model, profile_tp, bare_version, profile_workload
                 )
                 if not error and model_key and matched_tp and matched_version and matched_workload:
-                    stats = _load_or_extract_stats(model_key, matched_tp, matched_version, matched_workload, 0)
+                    stats = _load_or_extract_stats(
+                        model_key, matched_tp, matched_version, matched_workload, 0,
+                        index=index,
+                    )
                     if stats and kernel_name in stats:
                         stacks = stats[kernel_name].get("call_stacks", {})
                         if stacks:
@@ -409,7 +411,7 @@ async def map_kernel_to_vllm_code(
             "github_urls": github_urls,
             "github_search_results": github_search_results,
             "search_suggestions": suggestions,
-            "message": f"Found {len(likely_files)} likely source location(s) for '{kernel_name}'" if likely_files 
+            "message": f"Found {len(likely_files)} likely source location(s) for '{kernel_name}'" if likely_files
                       else f"No specific mapping for '{kernel_name}' - try GitHub search",
             "github_manual_search_url": _build_github_search_url(kernel_name),
         }

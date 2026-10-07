@@ -94,7 +94,7 @@ spec:
         - name: CRITIC_MODEL
           value: "gemini-3.1-pro-preview"
         - name: LLM_JUDGE_MODEL
-          value: "gemini-3.5-flash"
+          value: "gemini-3.8-flash"
         - name: ENABLE_REFLECTION
           value: "true"
         - name: MAX_REFLECTION_ITERATIONS

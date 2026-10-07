@@ -20,6 +20,13 @@ from typing import Any, Dict, List
 import requests
 import streamlit as st
 
+AI_TRANSPARENCY_NOTICE = (
+    "You are about to interact with a Red Hat AI agent. This agent uses AI technology "
+    "to assist you by responding to queries, generating content, or performing tasks. "
+    "By proceeding, you acknowledge that all AI agent outputs are intended for internal "
+    "use only and must be reviewed prior to use."
+)
+
 
 def get_logo_base64():
     """Load and encode the Red Hat logo as base64.
@@ -676,6 +683,11 @@ def main():
             st.rerun()
 
     st.markdown("**AI-powered performance analysis for RHAIIS benchmarking data** • Compare models, versions, and accelerators with intelligent insights")
+    st.info(
+        f"**AI disclosure:** {AI_TRANSPARENCY_NOTICE} "
+        "AI-generated responses may be incomplete or inaccurate; verify important "
+        "findings against the source data before relying on them."
+    )
 
     apply_custom_css()
 
