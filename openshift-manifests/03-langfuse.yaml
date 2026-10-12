@@ -16,7 +16,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 16Gi
+      storage: 20Gi
 
 ---
 apiVersion: v1
@@ -69,6 +69,28 @@ data:
         </profiles>
     </clickhouse>
 
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-system-log-retention
+  namespace: psap-ai-agent
+data:
+  system-log-retention.xml: |
+    <clickhouse>
+        <!-- These are ClickHouse diagnostic logs, not Langfuse traces. -->
+        <asynchronous_metric_log>
+            <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        </asynchronous_metric_log>
+        <metric_log>
+            <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        </metric_log>
+        <trace_log>
+            <partition_by remove="1"/>
+            <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY DELETE</engine>
+        </trace_log>
+    </clickhouse>
+
 # --- ClickHouse ---
 
 ---
@@ -79,6 +101,8 @@ metadata:
   namespace: psap-ai-agent
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: langfuse-clickhouse
@@ -119,6 +143,9 @@ spec:
         - name: clickhouse-memory-config
           mountPath: /etc/clickhouse-server/config.d/memory-limit.xml
           subPath: memory-limit.xml
+        - name: clickhouse-system-log-retention
+          mountPath: /etc/clickhouse-server/config.d/system-log-retention.xml
+          subPath: system-log-retention.xml
         resources:
           requests:
             memory: "4Gi"
@@ -150,6 +177,9 @@ spec:
       - name: clickhouse-memory-config
         configMap:
           name: clickhouse-memory-config
+      - name: clickhouse-system-log-retention
+        configMap:
+          name: clickhouse-system-log-retention
 
 ---
 apiVersion: v1
