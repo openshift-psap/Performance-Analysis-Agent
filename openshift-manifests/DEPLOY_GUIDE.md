@@ -297,6 +297,20 @@ If any pod is failing:
 - Check logs for `SIGILL` (illegal instruction) -- this means a CPU architecture mismatch. The `clickhouse-server:24.3-alpine` image supports both amd64 and arm64, but verify your cluster architecture
 - Ensure the pod has enough memory (limit is 4Gi)
 
+### ClickHouse system-log retention
+
+The `clickhouse-system-log-retention` ConfigMap sets seven-day TTLs for ClickHouse's `system.asynchronous_metric_log`, `system.metric_log`, and `system.trace_log`. These are ClickHouse diagnostics; this policy does not delete Langfuse traces, observations, or scores in the `default` database. For `trace_log`, the ConfigMap removes the inherited `partition_by` setting and provides a full MergeTree engine definition with the partition key and TTL together.
+
+ClickHouse applies the configured TTL automatically when these tables are created. For an existing deployment, after applying the ConfigMap and restarting ClickHouse, run the following as a ClickHouse administrator to retrofit the TTL onto existing tables:
+
+```sql
+ALTER TABLE system.asynchronous_metric_log MODIFY TTL event_date + INTERVAL 7 DAY DELETE;
+ALTER TABLE system.metric_log MODIFY TTL event_date + INTERVAL 7 DAY DELETE;
+ALTER TABLE system.trace_log MODIFY TTL event_date + INTERVAL 7 DAY DELETE;
+```
+
+Expired rows are removed during background merges, so disk usage may not fall immediately. If the volume is already full, inspect available disk space and the exact old system-log partitions before attempting cleanup; do not truncate Langfuse's application tables.
+
 ### Langfuse Worker/Web Can't Connect to ClickHouse
 
 - Verify service `langfuse-clickhouse` exists and resolves
