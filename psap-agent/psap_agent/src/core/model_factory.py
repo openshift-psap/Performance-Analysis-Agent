@@ -12,6 +12,8 @@ _OPENAI_BARE_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4")
 _OPENAI_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
+_GEMINI_4_ARGON_PREFIX = "gemini-4-argon"
+_GEMINI_4_ARGON_MIN_OUTPUT_TOKENS = 32768
 
 
 def get_model_provider(model_name: str) -> str:
@@ -34,6 +36,14 @@ def get_model_provider(model_name: str) -> str:
 def is_gemini_model(model_name: str) -> bool:
     """Return whether ``model_name`` uses the existing Gemini provider path."""
     return get_model_provider(model_name) == "gemini"
+
+
+def supports_explicit_gemini_cache(model_name: str) -> bool:
+    """Return whether a model accepts Gemini's explicit cached-content option."""
+    normalized = model_name.strip().lower()
+    return is_gemini_model(normalized) and not normalized.startswith(
+        _GEMINI_4_ARGON_PREFIX
+    )
 
 
 def _get_openai_model_id(model_name: str) -> str:
@@ -131,11 +141,24 @@ def create_chat_model(
 
     from langchain_google_genai import ChatGoogleGenerativeAI
 
+    is_gemini_4_argon = model_name.strip().lower().startswith(
+        _GEMINI_4_ARGON_PREFIX
+    )
+    if cached_content and is_gemini_4_argon:
+        raise AppException(
+            "Gemini 4 Argon does not support explicit cached content",
+            AppExceptionCode.CONFIGURATION_VALIDATION_ERROR,
+        )
+
     kwargs: dict = {"model": model_name}
-    if temperature is not None:
+    if temperature is not None and not is_gemini_4_argon:
         kwargs["temperature"] = temperature
     if max_output_tokens is not None:
-        kwargs["max_output_tokens"] = max_output_tokens
+        kwargs["max_output_tokens"] = (
+            max(max_output_tokens, _GEMINI_4_ARGON_MIN_OUTPUT_TOKENS)
+            if is_gemini_4_argon
+            else max_output_tokens
+        )
     if cached_content:
         kwargs["model_kwargs"] = {"cached_content": cached_content}
     return ChatGoogleGenerativeAI(**kwargs)

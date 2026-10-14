@@ -131,7 +131,7 @@ class Settings(BaseSettings):
         default=True, json_schema_extra={"env": "ENABLE_LLM_JUDGE"}
     )
     CRITIC_MODEL: str = Field(
-        default="gemini-3.1-pro-preview", json_schema_extra={"env": "CRITIC_MODEL"}
+        default="gemini-4-argon", json_schema_extra={"env": "CRITIC_MODEL"}
     )
     LLM_JUDGE_MODEL: str = Field(
         default="gemini-3.8-flash", json_schema_extra={"env": "LLM_JUDGE_MODEL"}

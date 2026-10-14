@@ -11,7 +11,13 @@ from psap_agent.src.core import model_factory
 
 def test_get_model_provider_preserves_existing_model_names():
     assert model_factory.get_model_provider("gemini-3.8-flash") == "gemini"
+    assert model_factory.get_model_provider("gemini-4-argon") == "gemini"
     assert model_factory.get_model_provider("claude-sonnet-4-6") == "claude"
+
+
+def test_gemini_4_argon_does_not_use_explicit_cached_content():
+    assert not model_factory.supports_explicit_gemini_cache("gemini-4-argon")
+    assert model_factory.supports_explicit_gemini_cache("gemini-3.8-flash")
 
 
 def test_get_model_provider_detects_openai_prefix_and_common_model_ids():
@@ -88,3 +94,29 @@ def test_openai_model_requires_a_model_id(monkeypatch):
 
     with pytest.raises(AppException, match="model ID"):
         model_factory.create_chat_model("openai:")
+
+
+def test_gemini_4_argon_omits_temperature_and_raises_output_budget(monkeypatch):
+    class FakeChatGoogleGenerativeAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    fake_module = ModuleType("langchain_google_genai")
+    fake_module.ChatGoogleGenerativeAI = FakeChatGoogleGenerativeAI
+    monkeypatch.setitem(sys.modules, "langchain_google_genai", fake_module)
+
+    model = model_factory.create_chat_model(
+        "gemini-4-argon", temperature=0.0, max_output_tokens=16384
+    )
+
+    assert model.kwargs == {
+        "model": "gemini-4-argon",
+        "max_output_tokens": 32768,
+    }
+
+
+def test_gemini_4_argon_rejects_explicit_cached_content():
+    with pytest.raises(AppException, match="does not support explicit cached content"):
+        model_factory.create_chat_model(
+            "gemini-4-argon", cached_content="cached-content-id"
+        )

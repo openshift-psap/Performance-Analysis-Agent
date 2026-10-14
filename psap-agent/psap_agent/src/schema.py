@@ -53,7 +53,14 @@ class StreamRequest(UserInput):
     model: str | None = Field(
         description="Optional model override. Supports Gemini, OpenAI, and Claude (via Vertex AI) models. When not provided, the server default is used.",
         default=None,
-        examples=["gemini-3.8-flash", "openai:<model-id>", "gemini-3.1-pro-preview", "claude-opus-4-6", "claude-sonnet-4-6"],
+        examples=[
+            "gemini-3.8-flash",
+            "gemini-4-argon",
+            "openai:<model-id>",
+            "gemini-3.1-pro-preview",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ],
     )
     reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = Field(
         description="Optional OpenAI reasoning effort. Applies only to OpenAI models; xhigh is the API value for extra-high thinking.",
