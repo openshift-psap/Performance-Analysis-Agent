@@ -6,7 +6,7 @@ in Langfuse on correctness, tool efficiency, hallucination, and completeness.
 
 import asyncio
 import json
-from typing import Any
+import re
 
 from langfuse import get_client
 
@@ -15,6 +15,13 @@ from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
 
 logger = get_python_logger(log_level=settings.PYTHON_LOG_LEVEL)
+
+_LANGFUSE_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _is_valid_langfuse_trace_id(trace_id: str | None) -> bool:
+    """Return whether an ID is in Langfuse's 32-character W3C trace format."""
+    return isinstance(trace_id, str) and bool(_LANGFUSE_TRACE_ID_RE.fullmatch(trace_id))
 
 
 def _content_to_str(content) -> str:
@@ -145,7 +152,7 @@ def _build_judge_prompt(
     parts.extend([
         f"Tool Calls Made:\n{tool_calls_summary}\n",
         f"Agent Response:\n{agent_response}\n",
-        f"Respond with JSON: {{\"score\": <0.0-1.0>, \"reasoning\": \"<brief explanation>\"}}",
+        "Respond with JSON: {\"score\": <0.0-1.0>, \"reasoning\": \"<brief explanation>\"}",
     ])
     return "\n".join(parts)
 
@@ -179,6 +186,13 @@ async def _run_single_eval(
     Returns:
         (criterion_name, score) -- score is None if evaluation failed.
     """
+    if not _is_valid_langfuse_trace_id(trace_id):
+        logger.error(
+            f"Skipping LLM-Judge criterion={criterion_name}: invalid Langfuse "
+            "trace ID; no score submitted"
+        )
+        return criterion_name, None
+
     judge_model = create_chat_model(
         settings.LLM_JUDGE_MODEL,
         temperature=0.0,
@@ -328,6 +342,12 @@ async def evaluate_response(
         Empty dict if evaluation is disabled or fails entirely.
     """
     if not settings.ENABLE_LLM_JUDGE:
+        return {}
+
+    if not _is_valid_langfuse_trace_id(trace_id):
+        logger.error(
+            "Skipping LLM-Judge evaluation: invalid Langfuse trace ID; no scores submitted"
+        )
         return {}
 
     try:

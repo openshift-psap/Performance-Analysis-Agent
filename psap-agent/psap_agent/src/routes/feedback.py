@@ -4,15 +4,18 @@ This module provides endpoints for recording user feedback on agent responses
 using Langfuse for analytics and monitoring purposes.
 """
 
+import asyncio
+import re
 import sys
 import time
 
-from fastapi import APIRouter
-from langfuse import get_client
+from fastapi import APIRouter, HTTPException
+from langfuse import Langfuse, get_client
 
 from psap_agent.src.schema import FeedbackRequest, FeedbackResponse
 
 router = APIRouter()
+_LANGFUSE_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _log(msg: str) -> None:
@@ -23,9 +26,8 @@ def _log(msg: str) -> None:
 def _resolve_trace_id(client, run_id: str, retries: int = 3, delay: float = 2.0) -> str | None:
     """Resolve a LangGraph run_id to the actual Langfuse trace_id.
 
-    In Langfuse v3, the CallbackHandler generates OpenTelemetry trace IDs
-    that differ from the LangGraph run_id. The run_id is stored in the
-    trace metadata. We look it up via the API and return the real trace_id.
+    Legacy clients send only the LangGraph run_id. Resolve it through trace
+    metadata; callers must not use the run_id itself as a Langfuse trace ID.
 
     Because the trace may not be fully ingested when feedback arrives,
     this retries up to ``retries`` times with a ``delay`` second pause
@@ -52,13 +54,13 @@ def _resolve_trace_id(client, run_id: str, retries: int = 3, delay: float = 2.0)
 async def feedback(feedback: FeedbackRequest) -> FeedbackResponse:
     """Record feedback for a specific agent run to Langfuse.
 
-    This endpoint serves as a wrapper for the Langfuse create_feedback API,
+    This endpoint serves as a wrapper for Langfuse score ingestion,
     allowing credentials to be stored and managed in the service rather than
     requiring client-side credential management.
 
-    In Langfuse v3, the trace_id is an OTel-generated hex ID that differs
-    from the LangGraph run_id. This endpoint resolves the run_id to the
-    actual trace_id before creating the score.
+    New clients should provide ``langfuse_trace_id`` from the streamed agent
+    response. Legacy clients may provide only ``run_id``; that ID is looked up
+    in Langfuse metadata and is never used directly as a score trace ID.
 
     Args:
         feedback: The feedback request containing run_id, key, score, and
@@ -80,14 +82,35 @@ async def feedback(feedback: FeedbackRequest) -> FeedbackResponse:
         comment_parts.append(f"{k}: {v}")
     comment = "\n".join(comment_parts) if comment_parts else None
 
-    # Resolve the LangGraph run_id to the actual Langfuse trace_id.
-    # In v3, these are different (OTel hex IDs vs UUID).
-    trace_id = _resolve_trace_id(client, feedback.run_id)
-    if trace_id:
-        _log(f"Resolved run_id={feedback.run_id} -> trace_id={trace_id}")
+    trace_id = feedback.langfuse_trace_id
+    if trace_id is not None:
+        if not _LANGFUSE_TRACE_ID_RE.fullmatch(trace_id):
+            raise HTTPException(
+                status_code=422,
+                detail="langfuse_trace_id must be 32 lowercase hexadecimal characters",
+            )
+        expected_trace_id = Langfuse.create_trace_id(seed=feedback.run_id)
+        if trace_id != expected_trace_id:
+            raise HTTPException(
+                status_code=422,
+                detail="langfuse_trace_id does not match the supplied run_id",
+            )
+        _log(f"Using explicit Langfuse trace ID for run_id={feedback.run_id}")
     else:
-        _log(f"Could not resolve run_id={feedback.run_id}, using as-is")
-        trace_id = feedback.run_id
+        trace_id = await asyncio.to_thread(_resolve_trace_id, client, feedback.run_id)
+        if trace_id is None:
+            _log(f"Could not resolve run_id={feedback.run_id}; feedback was not submitted")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not resolve the Langfuse trace for this response; retry feedback",
+            )
+        if not _LANGFUSE_TRACE_ID_RE.fullmatch(trace_id):
+            _log(f"Resolved trace for run_id={feedback.run_id} had an invalid ID")
+            raise HTTPException(
+                status_code=503,
+                detail="Resolved Langfuse trace ID is invalid; feedback was not submitted",
+            )
+        _log(f"Resolved legacy run_id={feedback.run_id} to a Langfuse trace")
 
     client.create_score(
         trace_id=trace_id,

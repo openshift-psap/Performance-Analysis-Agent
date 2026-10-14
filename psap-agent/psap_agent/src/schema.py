@@ -108,6 +108,11 @@ class ChatMessage(BaseModel):
         default=None,
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
     )
+    langfuse_trace_id: str | None = Field(
+        description="Langfuse trace ID associated with this message.",
+        default=None,
+        examples=["0123456789abcdef0123456789abcdef"],
+    )
     thread_id: str | None = Field(
         description="Thread ID associated with this message for conversation tracking.",
         default=None,
@@ -143,6 +148,11 @@ class FeedbackRequest(BaseModel):
     run_id: str = Field(
         description="Run ID to record feedback for.",
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
+    )
+    langfuse_trace_id: str | None = Field(
+        description="Explicit Langfuse trace ID. Preferred over run-ID lookup.",
+        default=None,
+        examples=["0123456789abcdef0123456789abcdef"],
     )
     key: str = Field(
         description="Feedback key identifier.",
