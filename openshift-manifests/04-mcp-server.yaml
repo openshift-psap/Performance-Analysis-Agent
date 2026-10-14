@@ -109,6 +109,11 @@ spec:
               name: psap-secrets
               key: AWS_SECRET_ACCESS_KEY
               optional: true
+        # S3 configuration for vLLM server logs
+        - name: LOG_S3_BUCKET
+          value: "psap-model-furnace"
+        - name: LOG_S3_PREFIX
+          value: "logs"
         # PyTorch profile S3 prefix (<accel>/<model>/<tp>/<version>/<workload>/trace_*.json)
         - name: PROFILE_S3_PREFIX
           value: "pytorch-profiles/rhaiis"
