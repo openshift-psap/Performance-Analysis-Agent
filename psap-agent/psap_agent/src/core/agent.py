@@ -17,7 +17,12 @@ from psap_agent.src.core.cache_manager import get_cache_manager
 from psap_agent.src.core.curated_skills import create_load_skill_tool
 from psap_agent.src.core.exceptions.exceptions import AppException, AppExceptionCode
 from psap_agent.src.core.memory import MemoryManager
-from psap_agent.src.core.model_factory import create_chat_model, get_model_provider, is_gemini_model
+from psap_agent.src.core.model_factory import (
+    create_chat_model,
+    get_model_provider,
+    is_gemini_model,
+    supports_explicit_gemini_cache,
+)
 from psap_agent.src.core.prompt import get_system_prompt
 from psap_agent.src.core.storage import get_global_checkpoint
 from psap_agent.src.settings import settings
@@ -111,7 +116,12 @@ async def get_psap_agent(
 
     # Initialize the language model
     provider = get_model_provider(effective_model)
-    if is_gemini_model(effective_model) and settings.ENABLE_PROMPT_CACHING and not tools:
+    if (
+        is_gemini_model(effective_model)
+        and supports_explicit_gemini_cache(effective_model)
+        and settings.ENABLE_PROMPT_CACHING
+        and not tools
+    ):
         # Gemini-specific: cached_content not supported with tools/system_instruction
         try:
             cache_manager = get_cache_manager()
@@ -141,6 +151,13 @@ async def get_psap_agent(
             logger.info("Using OpenAI model; Gemini prompt caching is unavailable")
         elif provider == "claude":
             logger.info("Using Claude model via Vertex AI")
+        elif is_gemini_model(effective_model) and not supports_explicit_gemini_cache(
+            effective_model
+        ):
+            logger.info(
+                "Explicit caching unsupported for %s; using uncached requests",
+                effective_model,
+            )
         elif tools:
             logger.info("Caching disabled: Gemini API doesn't support cached_content with tools")
         else:

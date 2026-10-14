@@ -77,7 +77,7 @@ This system implements a **Tool-Augmented AI Agent** that uses the **Model Conte
 - **What it is:** Multi-model support -- Google Gemini (default), OpenAI, and Anthropic Claude via Vertex AI
 - **Role:** Natural language understanding, query intent parsing, response generation, tool calling
 - **Default model:** `gemini-3.8-flash` (configurable via `GEMINI_MODEL` env var)
-- **Available models:** `gemini-3.8-flash`, `gemini-3.1-pro-preview`, `gpt-6-luna` (extra-high thinking), `gpt-6-sol` (medium thinking), `openai:<model-id>`, `claude-opus-4-6`, `claude-sonnet-4-6`
+- **Available models:** `gemini-3.8-flash` (Streamlit default), `gemini-4-argon`, `gemini-3.1-pro-preview`, `gpt-6-luna` (extra-high thinking), `gpt-6-sol` (medium thinking), `openai:<model-id>`, `claude-opus-4-6`, `claude-sonnet-4-6`
 - **Per-request model selection:** Users can switch models from the Streamlit UI dropdown; the `model` field in `StreamRequest` overrides the server default, and OpenAI selections may provide `reasoning_effort` (for example, `xhigh`) for that request
 - **Claude integration:** Uses `ChatAnthropicVertex` via `langchain-google-vertexai`, requires `ANTHROPIC_VERTEX_PROJECT_ID` and GCP auth
 - **OpenAI integration:** Uses `ChatOpenAI` via `langchain-openai`, requires `OPENAI_API_KEY`; Streamlit includes fixed GPT-6 Luna and Sol choices, while `OPENAI_MODEL` optionally adds another choice. GPT-6 requests use the Responses API so tools work with their selected reasoning effort

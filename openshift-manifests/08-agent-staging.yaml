@@ -92,7 +92,7 @@ spec:
         - name: ENABLE_LLM_JUDGE
           value: "true"
         - name: CRITIC_MODEL
-          value: "gemini-3.1-pro-preview"
+          value: "gemini-4-argon"
         - name: LLM_JUDGE_MODEL
           value: "gemini-3.8-flash"
         - name: ENABLE_REFLECTION

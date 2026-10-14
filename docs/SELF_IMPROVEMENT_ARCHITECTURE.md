@@ -561,7 +561,7 @@ All settings are in `psap_agent/src/settings.py` and can be overridden via envir
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `CRITIC_MODEL` | `gemini-3.1-pro-preview` | Model used for the inline critic (blocks response delivery); OpenAI models use `openai:<model-id>` |
+| `CRITIC_MODEL` | `gemini-4-argon` | Model used for the inline critic (blocks response delivery); OpenAI models use `openai:<model-id>`. Argon uses implicit caching only. |
 | `LLM_JUDGE_MODEL` | `gemini-3.8-flash` | Model used for post-hoc judge and skill extraction; OpenAI models use `openai:<model-id>` |
 | `MAX_REFLECTION_ITERATIONS` | `2` | Max revision loops before delivering response |
 | `AGENT_RESPONSE_TIMEOUT_SECONDS` | `600` | Timeout per agent pass (seconds) |

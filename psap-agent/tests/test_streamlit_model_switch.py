@@ -16,7 +16,15 @@ def test_provider_for_model_recognizes_openai_gemini_and_claude():
     assert streamlit_app._provider_for_model("openai:gpt-6-luna") == "openai"
     assert streamlit_app._provider_for_model("o4-mini") == "openai"
     assert streamlit_app._provider_for_model("gemini-3.8-flash") == "gemini"
+    assert streamlit_app._provider_for_model("gemini-4-argon") == "gemini"
     assert streamlit_app._provider_for_model("claude-opus-4-6") == "claude"
+
+
+def test_gemini_selector_keeps_flash_default_and_offers_argon():
+    options = streamlit_app._get_model_options()
+
+    assert next(iter(options.values())) == ("gemini-3.8-flash", None)
+    assert options["🧠 Gemini 4 Argon ▾"] == ("gemini-4-argon", None)
 
 
 def test_start_new_conversation_creates_thread_and_keeps_prior_messages():

@@ -26,6 +26,7 @@ class TestSettings:
         assert settings.POSTGRES_PORT == 5432
         assert settings.LANGFUSE_TRACING_ENVIRONMENT == "development"
         assert settings.GEMINI_MODEL == "gemini-3.8-flash"
+        assert settings.CRITIC_MODEL == "gemini-4-argon"
         assert settings.OPENAI_API_KEY is None
         assert settings.OPENAI_MODEL is None
 

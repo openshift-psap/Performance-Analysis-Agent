@@ -121,10 +121,11 @@ Environment variables (see `.env.example`):
 To enable OpenAI in the Streamlit UI, set `OPENAI_API_KEY` in the ignored local
 `.env`. The selector includes `gpt-6-luna` with extra-high (`xhigh`) thinking
 and `gpt-6-sol` with medium thinking; `OPENAI_MODEL` optionally adds one more
-model. API clients can select any configured OpenAI model with
-`"model": "openai:<model-id>"` and may send `"reasoning_effort": "xhigh"`
-or another supported value. The same model format also works for `CRITIC_MODEL`
-and `LLM_JUDGE_MODEL`.
+model. Gemini 3.8 Flash remains the UI default, and Gemini 4 Argon is available
+as an optional selection. API clients can select any configured OpenAI model
+with `"model": "openai:<model-id>"` and may send
+`"reasoning_effort": "xhigh"` or another supported value. The same model
+format also works for `CRITIC_MODEL` and `LLM_JUDGE_MODEL`.
 
 ## Local Development
 

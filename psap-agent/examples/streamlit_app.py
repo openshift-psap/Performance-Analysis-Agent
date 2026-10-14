@@ -93,6 +93,25 @@ def _provider_for_model(model_name: str) -> str:
     return "gemini"
 
 
+def _get_model_options(openai_model: str = "") -> dict[str, tuple[str, str | None]]:
+    """Build the UI model selector options, keeping Flash as the default."""
+    model_options = {
+        "⚡ Gemini 3.8 Flash (default) ▾": ("gemini-3.8-flash", None),
+        "🧠 Gemini 4 Argon ▾": ("gemini-4-argon", None),
+        "🧠 Gemini 3.1 Pro ▾": ("gemini-3.1-pro-preview", None),
+        "🟢 GPT-6 Luna (extra-high thinking) ▾": ("openai:gpt-6-luna", "xhigh"),
+        "🟢 GPT-6 Sol (medium thinking) ▾": ("openai:gpt-6-sol", "medium"),
+        "🟣 Claude Opus 4.6 (Vertex AI) ▾": ("claude-opus-4-6", None),
+        "🔵 Claude Sonnet 4.6 (Vertex AI) ▾": ("claude-sonnet-4-6", None),
+    }
+    if openai_model and openai_model not in {"gpt-6-luna", "gpt-6-sol"}:
+        model_options[f"🟢 OpenAI {openai_model} ▾"] = (
+            f"openai:{openai_model}",
+            None,
+        )
+    return model_options
+
+
 def _start_new_conversation() -> None:
     """Start a fresh agent checkpoint while keeping prior chat visible."""
     messages = st.session_state.messages
@@ -740,20 +759,8 @@ def main():
         # Get API URL from environment variable (for containers) or use localhost as default
         default_api_url = os.getenv("AGENT_API_URL", "http://localhost:5002")
 
-        model_options = {
-            "⚡ Gemini 3.8 Flash (default) ▾": ("gemini-3.8-flash", None),
-            "🧠 Gemini 3.1 Pro ▾": ("gemini-3.1-pro-preview", None),
-            "🟢 GPT-6 Luna (extra-high thinking) ▾": ("openai:gpt-6-luna", "xhigh"),
-            "🟢 GPT-6 Sol (medium thinking) ▾": ("openai:gpt-6-sol", "medium"),
-            "🟣 Claude Opus 4.6 (Vertex AI) ▾": ("claude-opus-4-6", None),
-            "🔵 Claude Sonnet 4.6 (Vertex AI) ▾": ("claude-sonnet-4-6", None),
-        }
         openai_model = os.getenv("OPENAI_MODEL", "").strip().removeprefix("openai:")
-        if openai_model and openai_model not in {"gpt-6-luna", "gpt-6-sol"}:
-            model_options[f"🟢 OpenAI {openai_model} ▾"] = (
-                f"openai:{openai_model}",
-                None,
-            )
+        model_options = _get_model_options(openai_model)
         selected_label = st.selectbox(
             "🤖 LLM Model",
             options=list(model_options.keys()),
@@ -795,6 +802,11 @@ def main():
                 "**Gemini 3.8 Flash** is the default and recommended model for most use cases. "
                 "Use **Pro** only when you need deeper reasoning or higher quality output. "
                 "Pro has significantly higher latency and cost, please use it mindfully."
+            )
+        elif selected_model == "gemini-4-argon":
+            st.info(
+                "**Gemini 4 Argon** is designed for complex reasoning and agentic tasks. "
+                "It can be slower and use more tokens than Flash."
             )
         elif selected_model.startswith("claude-"):
             st.info(
