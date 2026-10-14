@@ -183,11 +183,12 @@ def _get_github_headers() -> Dict[str, str]:
     return headers
 
 
-def _normalize_version(version: str) -> str:
+async def _normalize_version(version: str) -> str:
     """Normalize version string to a vLLM GitHub tag.
 
     Handles RHAIIS product versions (e.g. ``RHAIIS-3.3``) by resolving them
-    through the version mappings file, as well as plain vLLM versions
+    through the cached GitHub mapping (with the bundled JSON as fallback), as
+    well as plain vLLM versions
     (e.g. ``0.13.0`` or ``v0.13.0``).
     """
     version = version.strip()
@@ -197,7 +198,7 @@ def _normalize_version(version: str) -> str:
             from psap_mcp_server.src.tools.vllm_release_notes_tool import (
                 _resolve_to_vllm_version,
             )
-            resolved, _, was_mapped = _resolve_to_vllm_version(version)
+            resolved, _, was_mapped = await _resolve_to_vllm_version(version)
             if was_mapped:
                 return resolved
             logger.warning(
@@ -298,7 +299,7 @@ async def map_kernel_to_vllm_code(
         - search_suggestions: How to find more information
     """
     try:
-        version = _normalize_version(version)
+        version = await _normalize_version(version)
         
         # Check if it's a standard PyTorch op
         is_stdlib = _is_pytorch_stdlib(kernel_name)
@@ -541,8 +542,8 @@ async def correlate_kernel_with_changes(
         Dictionary with correlation analysis and investigation suggestions.
     """
     try:
-        version1 = _normalize_version(version1)
-        version2 = _normalize_version(version2)
+        version1 = await _normalize_version(version1)
+        version2 = await _normalize_version(version2)
         
         # Get kernel mapping
         mapping_result = await map_kernel_to_vllm_code(kernel_name, version2)
@@ -659,7 +660,7 @@ async def fetch_vllm_source(
     try:
         target_repo = repo or VLLM_REPO
         if target_repo == VLLM_REPO:
-            version = _normalize_version(version)
+            version = await _normalize_version(version)
         file_path = file_path.lstrip("/")
 
         url = f"{GITHUB_API_BASE}/repos/{target_repo}/contents/{file_path}"
@@ -781,8 +782,8 @@ async def get_vllm_code_diff(
         - github_compare_url: Link to the full comparison on GitHub
     """
     try:
-        version1 = _normalize_version(version1)
-        version2 = _normalize_version(version2)
+        version1 = await _normalize_version(version1)
+        version2 = await _normalize_version(version2)
 
         url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/compare/{version1}...{version2}"
 

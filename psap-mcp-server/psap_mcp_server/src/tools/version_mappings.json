@@ -1,6 +1,6 @@
 {
   "_description": "Mapping of RHAIIS product versions to upstream vLLM versions. Update this file as new RHAIIS versions are released.",
-  "_last_updated": "2026-06-25",
+  "_last_updated": "2026-10-14",
   "_instructions": "Add new mappings in the format: 'RHAIIS-X.Y.Z': 'vX.Y.Z'. The vLLM version should match GitHub release tags.",
   
   "rhaiis_to_vllm": {
@@ -19,7 +19,9 @@
     "RHAIIS-3.4-GA": "v0.18.0",
     "RHAIIS-3.5-EA1": "v0.19.1",
     "RHAIIS-3.5-EA2": "v0.21.0",
-    "RHAIIS-3.5-GA": "v0.24.0"
+    "RHAIIS-3.5-GA": "v0.24.0",
+    "RHAIIS-3.6-fast1": "v0.26.0",
+    "RHAIIS-3.6-fast2": "v0.28.0"
   },
   
   "_notes": {

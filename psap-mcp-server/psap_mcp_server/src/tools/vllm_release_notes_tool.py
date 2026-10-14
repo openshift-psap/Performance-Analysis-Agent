@@ -4,13 +4,15 @@ This tool fetches release information and changelogs from the vLLM GitHub reposi
 to help explain performance changes between different vLLM versions.
 
 Supports automatic resolution of RHAIIS product versions to upstream vLLM versions
-using a configurable mapping file.
+using the mapping on GitHub, with a cached bundled-file fallback.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
+import asyncio
 import json
 import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -23,27 +25,129 @@ logger = get_python_logger()
 GITHUB_API_BASE = "https://api.github.com"
 VLLM_REPO = "vllm-project/vllm"
 
-# Version mappings file path
+# The checked-in file is the fallback if GitHub cannot be reached.
 VERSION_MAPPINGS_PATH = Path(__file__).parent / "version_mappings.json"
+VERSION_MAPPINGS_RETRY_SECONDS = 60
+
+_version_mappings_cache: Dict[str, str] = {}
+_version_mappings_expires_at = 0.0
+_version_mappings_etag: Optional[str] = None
+_version_mappings_last_modified: Optional[str] = None
+_version_mappings_source = "bundled fallback"
+_version_mappings_lock = asyncio.Lock()
 
 
-def _load_version_mappings() -> Dict[str, str]:
-    """Load RHAIIS to vLLM version mappings from config file.
-    
-    Returns:
-        Dictionary mapping RHAIIS versions to vLLM versions.
-    """
+def _validate_version_mappings(data: Any) -> Dict[str, str]:
+    """Validate and extract the mapping payload from the JSON document."""
+    if not isinstance(data, dict):
+        raise ValueError("Version mapping document must be a JSON object")
+
+    mappings = data.get("rhaiis_to_vllm")
+    if not isinstance(mappings, dict) or not mappings:
+        raise ValueError("Version mapping document has no mappings")
+
+    validated: Dict[str, str] = {}
+    for rhaiis_version, vllm_version in mappings.items():
+        if (
+            not isinstance(rhaiis_version, str)
+            or not rhaiis_version.strip()
+            or not isinstance(vllm_version, str)
+            or not vllm_version.strip()
+        ):
+            raise ValueError("Version mappings must contain non-empty string pairs")
+        validated[rhaiis_version.strip()] = vllm_version.strip()
+
+    return validated
+
+
+def _load_bundled_version_mappings() -> Dict[str, str]:
+    """Load the checked-in mapping used when GitHub is unavailable."""
     try:
         if VERSION_MAPPINGS_PATH.exists():
-            with open(VERSION_MAPPINGS_PATH) as f:
-                data = json.load(f)
-                return data.get("rhaiis_to_vllm", {})
+            with VERSION_MAPPINGS_PATH.open(encoding="utf-8") as mapping_file:
+                return _validate_version_mappings(json.load(mapping_file))
     except Exception as e:
-        logger.warning(f"Could not load version mappings: {e}")
+        logger.warning(f"Could not load bundled version mappings ({type(e).__name__})")
     return {}
 
 
-def _resolve_to_vllm_version(version: str) -> Tuple[str, Optional[str], bool]:
+async def _fetch_remote_version_mappings(
+) -> Tuple[Optional[Dict[str, str]], Optional[str], Optional[str]]:
+    """Fetch the current mapping document, using validators when available.
+
+    A ``None`` mapping indicates that GitHub returned ``304 Not Modified``.
+    """
+    headers = {"Accept": "application/json"}
+    if _version_mappings_etag:
+        headers["If-None-Match"] = _version_mappings_etag
+    if _version_mappings_last_modified:
+        headers["If-Modified-Since"] = _version_mappings_last_modified
+
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        response = await client.get(settings.RHAIIS_VERSION_MAPPINGS_URL, headers=headers)
+
+    if response.status_code == 304:
+        return None, _version_mappings_etag, _version_mappings_last_modified
+
+    response.raise_for_status()
+    mappings = _validate_version_mappings(response.json())
+    return mappings, response.headers.get("ETag"), response.headers.get("Last-Modified")
+
+
+async def _load_version_mappings() -> Dict[str, str]:
+    """Load fresh GitHub mappings with cached and bundled fallbacks.
+
+    The remote document is refreshed at most once per cache TTL across concurrent
+    requests. If refresh fails, the last-known-good mappings are retained; the
+    packaged JSON is used when no remote copy has yet been loaded.
+    """
+    global _version_mappings_cache
+    global _version_mappings_expires_at
+    global _version_mappings_etag
+    global _version_mappings_last_modified
+    global _version_mappings_source
+
+    now = time.monotonic()
+    if _version_mappings_cache and now < _version_mappings_expires_at:
+        return dict(_version_mappings_cache)
+
+    async with _version_mappings_lock:
+        now = time.monotonic()
+        if _version_mappings_cache and now < _version_mappings_expires_at:
+            return dict(_version_mappings_cache)
+
+        try:
+            remote_mappings, etag, last_modified = await _fetch_remote_version_mappings()
+            if remote_mappings is not None:
+                _version_mappings_cache = remote_mappings
+                _version_mappings_etag = etag
+                _version_mappings_last_modified = last_modified
+                _version_mappings_source = "GitHub"
+            elif not _version_mappings_cache:
+                raise ValueError("GitHub returned not-modified without a cached mapping")
+
+            ttl = settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS
+            _version_mappings_expires_at = time.monotonic() + ttl
+            return dict(_version_mappings_cache)
+        except Exception as e:
+            logger.warning(
+                "Could not refresh GitHub version mappings "
+                f"({type(e).__name__}); using cached or bundled mappings"
+            )
+
+            if not _version_mappings_cache:
+                _version_mappings_cache = _load_bundled_version_mappings()
+                _version_mappings_source = "bundled fallback"
+
+            retry_delay = min(
+                VERSION_MAPPINGS_RETRY_SECONDS,
+                max(1, settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS),
+            )
+            _version_mappings_expires_at = time.monotonic() + retry_delay
+            return dict(_version_mappings_cache)
+
+
+async def _resolve_to_vllm_version(version: str) -> Tuple[str, Optional[str], bool]:
     """Resolve a version string to an upstream vLLM version.
     
     Handles both RHAIIS product versions (e.g., "RHAIIS-3.2.5") and 
@@ -66,7 +170,7 @@ def _resolve_to_vllm_version(version: str) -> Tuple[str, Optional[str], bool]:
         normalized = version.upper().replace("RHAIIS", "RHAIIS")
         
         # Load mappings
-        mappings = _load_version_mappings()
+        mappings = await _load_version_mappings()
         
         # Try exact match first
         if normalized in mappings:
@@ -109,10 +213,13 @@ async def get_version_mappings() -> Dict[str, Any]:
         - status: "success"
         - mappings: Dictionary of RHAIIS version -> vLLM version
         - available_rhaiis_versions: List of RHAIIS versions with mappings
-        - mapping_file: Path to the mappings config file
+        - mapping_file: Path to the bundled fallback mapping file
+        - mapping_source: Whether mappings came from GitHub or the fallback file
+        - mapping_url: Configured GitHub raw URL
+        - cache_ttl_seconds: Cache duration before refreshing from GitHub
         - instructions: How to add new mappings
     """
-    mappings = _load_version_mappings()
+    mappings = await _load_version_mappings()
     
     return {
         "status": "success",
@@ -120,7 +227,10 @@ async def get_version_mappings() -> Dict[str, Any]:
         "available_rhaiis_versions": list(mappings.keys()),
         "count": len(mappings),
         "mapping_file": str(VERSION_MAPPINGS_PATH),
-        "instructions": "To add a new mapping, edit version_mappings.json and add an entry like: \"RHAIIS-X.Y.Z\": \"vA.B.C\"",
+        "mapping_source": _version_mappings_source,
+        "mapping_url": settings.RHAIIS_VERSION_MAPPINGS_URL,
+        "cache_ttl_seconds": settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS,
+        "instructions": "To add a mapping, update version_mappings.json in the configured GitHub repository; it will be picked up after the cache expires.",
         "note": "RHAIIS versions are automatically resolved to vLLM versions when using get_vllm_release_notes() or compare_vllm_versions()",
     }
 
@@ -259,16 +369,18 @@ async def get_vllm_release_notes(
             
             if version:
                 # Resolve version (handles RHAIIS -> vLLM mapping)
-                resolved_version, rhaiis_version, was_mapped = _resolve_to_vllm_version(version)
+                resolved_version, rhaiis_version, was_mapped = await _resolve_to_vllm_version(
+                    version
+                )
                 
                 # Check if RHAIIS version couldn't be mapped
                 if rhaiis_version and not was_mapped:
-                    available_mappings = _load_version_mappings()
+                    available_mappings = await _load_version_mappings()
                     return {
                         "status": "error",
                         "message": f"RHAIIS version '{rhaiis_version}' not found in version mappings.",
                         "available_rhaiis_versions": list(available_mappings.keys()),
-                        "suggestion": "Update version_mappings.json with the correct RHAIIS to vLLM mapping, or provide the vLLM version directly (e.g., 'v0.8.0')",
+                        "suggestion": "Update version_mappings.json in the configured GitHub repository and retry after the cache expires, or provide the vLLM version directly (e.g., 'v0.8.0')",
                         "mapping_file": str(VERSION_MAPPINGS_PATH),
                     }
                 
@@ -426,8 +538,8 @@ async def compare_vllm_versions(
     """
     try:
         # Resolve versions (handles RHAIIS -> vLLM mapping)
-        resolved1, rhaiis1, mapped1 = _resolve_to_vllm_version(version1)
-        resolved2, rhaiis2, mapped2 = _resolve_to_vllm_version(version2)
+        resolved1, rhaiis1, mapped1 = await _resolve_to_vllm_version(version1)
+        resolved2, rhaiis2, mapped2 = await _resolve_to_vllm_version(version2)
         
         # Check for unmapped RHAIIS versions
         unmapped = []
@@ -437,12 +549,12 @@ async def compare_vllm_versions(
             unmapped.append(rhaiis2)
         
         if unmapped:
-            available_mappings = _load_version_mappings()
+            available_mappings = await _load_version_mappings()
             return {
                 "status": "error",
                 "message": f"RHAIIS version(s) not found in mappings: {', '.join(unmapped)}",
                 "available_rhaiis_versions": list(available_mappings.keys()),
-                "suggestion": "Update version_mappings.json with the correct RHAIIS to vLLM mapping, or provide vLLM versions directly",
+                "suggestion": "Update version_mappings.json in the configured GitHub repository and retry after the cache expires, or provide vLLM versions directly",
                 "mapping_file": str(VERSION_MAPPINGS_PATH),
             }
         
