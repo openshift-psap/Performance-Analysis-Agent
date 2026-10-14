@@ -580,11 +580,13 @@ def send_feedback(
     assistant_response: str,
     api_url: str = "http://localhost:5002",
     comment: str = "",
+    langfuse_trace_id: str | None = None,
 ) -> bool:
     """Send feedback for an agent response to the API.
     
     Args:
         run_id: The run_id of the agent response
+        langfuse_trace_id: The explicit Langfuse trace ID, when available
         score: 1.0 for thumbs up, 0.0 for thumbs down
         user_query: The user's original question
         assistant_response: The agent's response
@@ -605,6 +607,7 @@ def send_feedback(
 
         feedback_data = {
             "run_id": run_id,
+            "langfuse_trace_id": langfuse_trace_id,
             "key": "user-feedback",
             "score": score,
             "kwargs": kwargs,
@@ -950,11 +953,14 @@ def main():
             with st.chat_message("assistant"):
                 content = message["content"]
                 
+                st.markdown("**AI-generated**")
+
                 # Display the main response
                 display_message(content, "assistant")
                 
                 # Add feedback buttons below the message
                 run_id = content.get("run_id")
+                langfuse_trace_id = content.get("langfuse_trace_id")
                 
                 if run_id:
                     feedback_key = f"feedback_{idx}_{run_id}"
@@ -974,27 +980,29 @@ def main():
                         c1, c2, _ = st.columns([1, 1, 6])
                         with c1:
                             if st.button("Submit", key=f"submit_fb_{idx}", use_container_width=True, disabled=st.session_state.is_streaming):
-                                send_feedback(
+                                if send_feedback(
                                     pending["run_id"], 0.0,
                                     pending["user_query"],
                                     pending["assistant_response"],
                                     api_url,
                                     comment=comment,
-                                )
-                                st.session_state.feedback_given.add(feedback_key)
-                                st.session_state.pending_negative_feedback = None
-                                st.rerun()
+                                    langfuse_trace_id=pending.get("langfuse_trace_id"),
+                                ):
+                                    st.session_state.feedback_given.add(feedback_key)
+                                    st.session_state.pending_negative_feedback = None
+                                    st.rerun()
                         with c2:
                             if st.button("Skip", key=f"skip_fb_{idx}", use_container_width=True, disabled=st.session_state.is_streaming):
-                                send_feedback(
+                                if send_feedback(
                                     pending["run_id"], 0.0,
                                     pending["user_query"],
                                     pending["assistant_response"],
                                     api_url,
-                                )
-                                st.session_state.feedback_given.add(feedback_key)
-                                st.session_state.pending_negative_feedback = None
-                                st.rerun()
+                                    langfuse_trace_id=pending.get("langfuse_trace_id"),
+                                ):
+                                    st.session_state.feedback_given.add(feedback_key)
+                                    st.session_state.pending_negative_feedback = None
+                                    st.rerun()
 
                     else:
                         col1, col2, col3 = st.columns([1, 1, 10])
@@ -1006,7 +1014,10 @@ def main():
                         if thumbs_up:
                             user_query = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
                             assistant_response = content.get("content", "")
-                            if send_feedback(run_id, 1.0, user_query, assistant_response, api_url):
+                            if send_feedback(
+                                run_id, 1.0, user_query, assistant_response, api_url,
+                                langfuse_trace_id=langfuse_trace_id,
+                            ):
                                 st.session_state.feedback_given.add(feedback_key)
                                 st.rerun()
 
@@ -1016,6 +1027,7 @@ def main():
                             st.session_state.pending_negative_feedback = {
                                 "feedback_key": feedback_key,
                                 "run_id": run_id,
+                                "langfuse_trace_id": langfuse_trace_id,
                                 "user_query": user_query,
                                 "assistant_response": assistant_response,
                             }
@@ -1129,6 +1141,7 @@ def main():
             )
 
         with st.chat_message("assistant"):
+            ai_generated_label_placeholder = st.empty()
             response_placeholder = st.empty()
             status_placeholder = st.empty()
 
@@ -1168,12 +1181,15 @@ def main():
             status_placeholder.empty()
 
             if full_response:
+                ai_generated_label_placeholder.markdown("**AI-generated**")
                 response_placeholder.write(full_response)
 
                 run_id = None
+                langfuse_trace_id = None
                 for msg in reversed(all_messages):
                     if msg.get("type") == "ai" and msg.get("run_id"):
                         run_id = msg["run_id"]
+                        langfuse_trace_id = msg.get("langfuse_trace_id")
                         break
 
                 st.session_state.messages.append(
@@ -1183,6 +1199,7 @@ def main():
                             "type": "ai",
                             "content": full_response,
                             "run_id": run_id,
+                            "langfuse_trace_id": langfuse_trace_id,
                             "messages": all_messages,
                         },
                     }

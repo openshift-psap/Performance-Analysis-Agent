@@ -96,6 +96,7 @@ class TestChatMessage:
         assert message.tool_calls == []
         assert message.tool_call_id is None
         assert message.run_id is None
+        assert message.langfuse_trace_id is None
         assert message.response_metadata == {}
         assert message.custom_data == {}
 
@@ -138,6 +139,15 @@ class TestFeedbackRequest:
         assert feedback.key == "response_quality"
         assert feedback.score == 4.5
         assert feedback.kwargs == {}
+
+    def test_feedback_request_accepts_langfuse_trace_id(self):
+        feedback = FeedbackRequest(
+            run_id="run_123",
+            langfuse_trace_id="0123456789abcdef0123456789abcdef",
+            key="response_quality",
+            score=1.0,
+        )
+        assert feedback.langfuse_trace_id == "0123456789abcdef0123456789abcdef"
 
     def test_feedback_request_with_kwargs(self):
         """Test creating FeedbackRequest with kwargs."""

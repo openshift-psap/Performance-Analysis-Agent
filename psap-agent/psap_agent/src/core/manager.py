@@ -39,9 +39,13 @@ from psap_agent.utils.pylogger import get_python_logger
 
 Langfuse()
 
-langfuse_handler = CallbackHandler()
-
 app_logger = get_python_logger(settings.PYTHON_LOG_LEVEL)
+
+
+def _langfuse_context_for_run(run_id: str) -> tuple[str, CallbackHandler]:
+    """Create the authoritative Langfuse trace context for one LangGraph run."""
+    trace_id = Langfuse.create_trace_id(seed=str(run_id))
+    return trace_id, CallbackHandler(trace_context={"trace_id": trace_id})
 
 
 # Keys that carry the most signal for a revision; checked in order.
@@ -144,12 +148,18 @@ class AgentManager:
             reasoning_effort=request.reasoning_effort,
         ) as persistent_agent:
             try:
-                kwargs, run_id, thread_id, memory_context = await self._handle_input(
-                    request, persistent_agent
-                )
+                (
+                    kwargs,
+                    run_id,
+                    thread_id,
+                    memory_context,
+                    langfuse_trace_id,
+                ) = await self._handle_input(request, persistent_agent)
 
                 app_logger.info(
-                    f"AgentManager streaming response for run_id: {run_id}, thread_id: {thread_id}"
+                    "AgentManager streaming response for "
+                    f"run_id={run_id}, langfuse_trace_id={langfuse_trace_id}, "
+                    f"thread_id={thread_id}"
                 )
 
                 self._current_tool_call_id = None
@@ -197,6 +207,7 @@ class AgentManager:
                                 formatted = self._format_events(
                                     sm, ev, request.stream_tokens,
                                     run_id, thread_id, effective_session_id,
+                                    langfuse_trace_id,
                                 )
                                 for fe in formatted:
                                     if fe:
@@ -468,11 +479,15 @@ class AgentManager:
                             await asyncio.to_thread(get_client().flush)
                         except Exception:
                             pass
-                        trace_id = await self._resolve_trace_id_for_eval(run_id)
-                        app_logger.info(f"Post-processing: eval trace_id={trace_id}, user={effective_user_id}")
+                        app_logger.info(
+                            "Post-processing: evaluating "
+                            f"run_id={run_id}, langfuse_trace_id={langfuse_trace_id}, "
+                            f"user={effective_user_id}"
+                        )
 
                         scores = await evaluate_response(
-                            collected_messages, trace_id,
+                            collected_messages,
+                            langfuse_trace_id,
                             user_query=request.message,
                             memory_context=memory_context,
                         )
@@ -526,9 +541,10 @@ class AgentManager:
 
     async def _handle_input(
         self, request: StreamRequest, agent: Pregel
-    ) -> tuple[Dict[str, Any], str, str, str]:
+    ) -> tuple[Dict[str, Any], str, str, str, str]:
         """Handle input preparation and configuration (preserving existing logic)."""
         run_id = uuid4()
+        langfuse_trace_id, callback_handler = _langfuse_context_for_run(str(run_id))
 
         thread_id = request.thread_id
         if thread_id is None:
@@ -559,7 +575,7 @@ class AgentManager:
         config = RunnableConfig(
             configurable=configurable,
             run_id=run_id,
-            callbacks=[langfuse_handler],
+            callbacks=[callback_handler],
         )
 
         state = await agent.aget_state(config=config)
@@ -599,30 +615,11 @@ class AgentManager:
         }
 
         app_logger.info(
-            f"AgentManager configured with run_id: {run_id}, thread_id: {thread_id}, session_id: {effective_session_id}"
+            "AgentManager configured with "
+            f"run_id={run_id}, langfuse_trace_id={langfuse_trace_id}, "
+            f"thread_id={thread_id}, session_id={effective_session_id}"
         )
-        return kwargs, str(run_id), thread_id, memory_context
-
-    async def _resolve_trace_id_for_eval(self, run_id: str, retries: int = 3, delay: float = 5.0) -> str:
-        """Resolve a run_id to a Langfuse trace_id for evaluation scoring.
-
-        Retries with delay to handle the race where the Langfuse SDK
-        hasn't flushed the trace yet when post-processing starts.
-        """
-        client = get_client()
-        for attempt in range(retries):
-            try:
-                traces = client.api.trace.list(limit=30)
-                for trace in traces.data:
-                    metadata = trace.metadata or {}
-                    if metadata.get("run_id") == run_id:
-                        return trace.id
-            except Exception as e:
-                app_logger.debug(f"Trace resolve attempt {attempt + 1} failed: {e}")
-            if attempt < retries - 1:
-                await asyncio.sleep(delay)
-        app_logger.warning(f"Could not resolve Langfuse trace for run_id={run_id} after {retries} attempts")
-        return run_id
+        return kwargs, str(run_id), thread_id, memory_context, langfuse_trace_id
 
     async def _prepare_streaming_input_with_history(
         self, request: StreamRequest, existing_state, run_id: str, thread_id: str
@@ -655,7 +652,7 @@ class AgentManager:
         config = RunnableConfig(
             configurable=configurable,
             run_id=run_id,
-            callbacks=[langfuse_handler],
+            callbacks=[_langfuse_context_for_run(str(run_id))[1]],
         )
 
         return {
@@ -698,6 +695,7 @@ class AgentManager:
         run_id: str,
         thread_id: str,
         session_id: str | None,
+        langfuse_trace_id: str | None = None,
     ) -> list[Dict[str, Any]]:
         """Convert LangGraph events to simplified streaming format.
 
@@ -708,7 +706,9 @@ class AgentManager:
 
         if stream_mode == "updates":
             formatted_events.extend(
-                self._handle_update_events(event, run_id, thread_id, session_id)
+                self._handle_update_events(
+                    event, run_id, thread_id, session_id, langfuse_trace_id
+                )
             )
         elif stream_mode == "messages" and stream_tokens:
             token_event = self._handle_token_events(event)
@@ -716,7 +716,7 @@ class AgentManager:
                 formatted_events.append(token_event)
         elif stream_mode == "custom":
             custom_event = self._handle_custom_events(
-                event, run_id, thread_id, session_id
+                event, run_id, thread_id, session_id, langfuse_trace_id
             )
             if custom_event:
                 formatted_events.append(custom_event)
@@ -724,7 +724,12 @@ class AgentManager:
         return formatted_events
 
     def _handle_update_events(
-        self, event: Dict[str, Any], run_id: str, thread_id: str, session_id: str | None
+        self,
+        event: Dict[str, Any],
+        run_id: str,
+        thread_id: str,
+        session_id: str | None,
+        langfuse_trace_id: str | None = None,
     ) -> list[Dict[str, Any]]:
         """Handle update events from LangGraph (preserving existing logic)."""
         formatted_events = []
@@ -767,6 +772,8 @@ class AgentManager:
             try:
                 chat_message = langchain_to_chat_message(message)
                 chat_message.run_id = run_id
+                if chat_message.type == "ai":
+                    chat_message.langfuse_trace_id = langfuse_trace_id
 
                 # Convert to simplified format
                 formatted_event = {
@@ -821,12 +828,19 @@ class AgentManager:
         return None
 
     def _handle_custom_events(
-        self, event: Any, run_id: str, thread_id: str, session_id: str | None
+        self,
+        event: Any,
+        run_id: str,
+        thread_id: str,
+        session_id: str | None,
+        langfuse_trace_id: str | None = None,
     ) -> Dict[str, Any] | None:
         """Handle custom events from LangGraph."""
         try:
             chat_message = langchain_to_chat_message(event)
             chat_message.run_id = run_id
+            if chat_message.type == "ai":
+                chat_message.langfuse_trace_id = langfuse_trace_id
 
             return {
                 "type": "message",
@@ -883,6 +897,8 @@ class AgentManager:
             content["tool_call_id"] = chat_message.tool_call_id
         if chat_message.run_id:
             content["run_id"] = chat_message.run_id
+        if chat_message.langfuse_trace_id:
+            content["langfuse_trace_id"] = chat_message.langfuse_trace_id
         if thread_id:
             content["thread_id"] = thread_id
         if session_id:
