@@ -21,6 +21,10 @@ class TestSettings:
         assert settings.MCP_PORT == 8080
         assert settings.MCP_TRANSPORT_PROTOCOL == "http"
         assert settings.PYTHON_LOG_LEVEL == "INFO"
+        assert settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS == 300
+        assert settings.RHAIIS_VERSION_MAPPINGS_URL.endswith(
+            "version_mappings.json"
+        )
         assert settings.MCP_SSL_KEYFILE is None
         assert settings.MCP_SSL_CERTFILE is None
 
@@ -34,6 +38,8 @@ class TestSettings:
             "PYTHON_LOG_LEVEL": "DEBUG",
             "MCP_SSL_KEYFILE": "/path/to/key.pem",
             "MCP_SSL_CERTFILE": "/path/to/cert.pem",
+            "RHAIIS_VERSION_MAPPINGS_URL": "https://example.com/mappings.json",
+            "RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS": "600",
         }
 
         # Act
@@ -47,6 +53,8 @@ class TestSettings:
         assert settings.PYTHON_LOG_LEVEL == "DEBUG"
         assert settings.MCP_SSL_KEYFILE == "/path/to/key.pem"
         assert settings.MCP_SSL_CERTFILE == "/path/to/cert.pem"
+        assert settings.RHAIIS_VERSION_MAPPINGS_URL == "https://example.com/mappings.json"
+        assert settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS == 600
 
     def test_port_validation(self):
         """Test port validation constraints."""

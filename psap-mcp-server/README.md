@@ -68,6 +68,8 @@ Environment variables (see `.env.example`):
 | `GRAFANA_URL` | -- | Grafana server URL |
 | `GRAFANA_TOKEN` | -- | Grafana API token |
 | `GITHUB_TOKEN` | -- | GitHub token (optional, for higher API rate limits) |
+| `RHAIIS_VERSION_MAPPINGS_URL` | Upstream `master` raw JSON | GitHub raw URL for the RHAIIS-to-vLLM mappings |
+| `RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS` | `300` | Seconds to cache mappings before refreshing; bundled JSON is used if GitHub is unavailable |
 | `MCP_SSL_KEYFILE` | -- | SSL private key path |
 | `MCP_SSL_CERTFILE` | -- | SSL certificate path |
 

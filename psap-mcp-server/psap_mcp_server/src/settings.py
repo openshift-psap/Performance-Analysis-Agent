@@ -78,6 +78,25 @@ class Settings(BaseSettings):
             "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         },
     )
+    RHAIIS_VERSION_MAPPINGS_URL: str = Field(
+        default=(
+            "https://raw.githubusercontent.com/openshift-psap/AI-Analysis-Agent/"
+            "master/psap-mcp-server/psap_mcp_server/src/tools/version_mappings.json"
+        ),
+        json_schema_extra={
+            "env": "RHAIIS_VERSION_MAPPINGS_URL",
+            "description": "GitHub raw URL for the RHAIIS-to-vLLM version mapping JSON",
+        },
+    )
+    RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS: int = Field(
+        default=300,
+        ge=0,
+        le=86400,
+        json_schema_extra={
+            "env": "RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS",
+            "description": "Seconds to cache the GitHub version mapping before refreshing",
+        },
+    )
     CORS_ENABLED: bool = Field(
         default=False,
         json_schema_extra={
