@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 from psap_mcp_server.src.settings import settings
+from psap_mcp_server.src.tools.benchmark_row_selection import select_latest_run_rows
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.utils.pylogger import get_python_logger
 
@@ -72,7 +73,9 @@ def _find_uuid_for_run(
         if filtered.empty:
             # Cluster-specific names like H200_ZEUS2 share hardware with the
             # base GPU type H200.  Try the base type as a fallback.
-            from psap_mcp_server.src.tools.performance_data_loader import get_base_accelerator
+            from psap_mcp_server.src.tools.performance_data_loader import (
+                get_base_accelerator,
+            )
             base = get_base_accelerator(accelerator)
             if base.lower() != accelerator.lower():
                 filtered = pre_accel[pre_accel["accelerator"].str.contains(base, case=False, na=False)]
@@ -115,6 +118,8 @@ def _find_uuid_for_run(
             f"Found {len(filtered)} matching row(s) but none have a UUID. "
             "Log file unavailable for this run."
         )
+
+    valid = select_latest_run_rows(valid)
 
     unique_uuids = valid["uuid"].unique().tolist()
     if len(unique_uuids) > 1:

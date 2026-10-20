@@ -16,6 +16,9 @@ from typing import Optional
 import pandas as pd
 
 from psap_mcp_server.src.settings import settings
+from psap_mcp_server.src.tools.benchmark_row_selection import (
+    exclude_per_turn_rows,
+)
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -252,6 +255,9 @@ def _clean_rhaiis_data(df: pd.DataFrame) -> pd.DataFrame:
     df["model"] = df["model"].str.strip()
     df["version"] = df["version"].str.strip()
     df["TP"] = pd.to_numeric(df["TP"], errors="coerce")
+
+    # Current MCP tools analyze aggregate rows only.
+    df = exclude_per_turn_rows(df)
     
     # Add derived columns
     if "output_tok/sec" in df.columns and "TP" in df.columns:

@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from psap_mcp_server.src.tools.benchmark_row_selection import select_latest_run_rows
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
@@ -97,6 +98,8 @@ async def query_performance_metrics(
                         filters_applied["profile"] = profile
                     except (ValueError, AttributeError, KeyError):
                         pass
+
+        filtered_df = select_latest_run_rows(filtered_df)
 
         if filtered_df.empty:
             return {
