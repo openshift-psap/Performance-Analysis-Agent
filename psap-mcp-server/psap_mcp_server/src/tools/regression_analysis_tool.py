@@ -91,36 +91,46 @@ async def analyze_regression(
         if profile:
             # Parse profile (e.g., "1k/1k" or "512/2048")
             profile_clean = profile.strip().lower()
-            
-            # Handle shorthand notation (k = 1024)
-            def parse_profile_value(val: str) -> int:
+
+            # Accept both decimal (1000-based) and binary (1024-based) "k".
+            def parse_profile_values(val: str) -> set[int]:
                 val = val.strip()
                 if val.endswith('k'):
-                    # Support both 1000-based and 1024-based
                     num = float(val[:-1])
-                    # Try 1024-based first (more common in computing)
-                    return int(num * 1024)
-                return int(val)
-            
+                    return {int(num * 1000), int(num * 1024)}
+                return {int(val)}
+
             if '/' in profile_clean:
                 parts = profile_clean.split('/')
                 if len(parts) == 2:
                     try:
-                        prompt_val = parse_profile_value(parts[0])
-                        output_val = parse_profile_value(parts[1])
-                        
-                        # Filter by prompt toks and output toks
+                        prompt_values = parse_profile_values(parts[0])
+                        output_values = parse_profile_values(parts[1])
+
+                        # Datasets use both decimal and binary shorthand conventions.
                         v1_df = v1_df[
-                            (v1_df["prompt toks"] == prompt_val) & 
-                            (v1_df["output toks"] == output_val)
+                            v1_df["prompt toks"].isin(prompt_values)
+                            & v1_df["output toks"].isin(output_values)
                         ]
                         v2_df = v2_df[
-                            (v2_df["prompt toks"] == prompt_val) & 
-                            (v2_df["output toks"] == output_val)
+                            v2_df["prompt toks"].isin(prompt_values)
+                            & v2_df["output toks"].isin(output_values)
                         ]
-                        filters_applied["profile"] = f"{prompt_val}/{output_val}"
+                        filters_applied["profile"] = profile
                     except (ValueError, KeyError):
                         pass  # Invalid profile format, skip filter
+
+        if v1_df.empty or v2_df.empty:
+            return {
+                "status": "error",
+                "error": "No matching benchmark data",
+                "message": (
+                    f"After applying filters, found {len(v1_df)} matching records for "
+                    f"{version1} and {len(v2_df)} for {version2}. Check the requested "
+                    "model, accelerator, and profile."
+                ),
+                "filters_applied": filters_applied,
+            }
 
         # Create matching key for comparison
         # Use actual column names from CSV: "prompt toks", "output toks"
@@ -270,4 +280,3 @@ async def analyze_regression(
             "error": str(e),
             "message": "Failed to analyze regression",
         }
-
