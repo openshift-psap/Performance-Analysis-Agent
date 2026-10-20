@@ -1,9 +1,12 @@
 """Tool to compare vLLM and DCGM metrics between two benchmark runs."""
 
-from typing import Dict, Any, List, Optional
-from .performance_data_loader import load_rhaiis_data
-from .grafana_metrics_tool import query_grafana_metrics
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
+
+from .grafana_metrics_tool import query_grafana_metrics
+from .performance_data_loader import load_rhaiis_data
+from .profile_utils import parse_profile
 
 
 async def compare_grafana_metrics(
@@ -62,9 +65,10 @@ async def compare_grafana_metrics(
             
             # Parse profile
             if '/' in profile:
-                parts = profile.split('/')
-                isl = int(parts[0].replace('k', '000').replace('K', '000'))
-                osl = int(parts[1].replace('k', '000').replace('K', '000'))
+                try:
+                    isl, osl = parse_profile(profile)
+                except ValueError:
+                    return None, f"Invalid profile format for {run_label}: {profile}"
             else:
                 return None, f"Invalid profile format for {run_label}: {profile}"
             
@@ -233,4 +237,3 @@ async def compare_grafana_metrics(
             "status": "error",
             "message": f"Error comparing Grafana metrics: {str(e)}"
         }
-

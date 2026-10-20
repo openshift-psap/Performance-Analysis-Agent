@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -91,36 +92,33 @@ async def analyze_regression(
         if profile:
             # Parse profile (e.g., "1k/1k" or "512/2048")
             profile_clean = profile.strip().lower()
-            
-            # Handle shorthand notation (k = 1024)
-            def parse_profile_value(val: str) -> int:
-                val = val.strip()
-                if val.endswith('k'):
-                    # Support both 1000-based and 1024-based
-                    num = float(val[:-1])
-                    # Try 1024-based first (more common in computing)
-                    return int(num * 1024)
-                return int(val)
-            
+
             if '/' in profile_clean:
-                parts = profile_clean.split('/')
-                if len(parts) == 2:
-                    try:
-                        prompt_val = parse_profile_value(parts[0])
-                        output_val = parse_profile_value(parts[1])
-                        
-                        # Filter by prompt toks and output toks
-                        v1_df = v1_df[
-                            (v1_df["prompt toks"] == prompt_val) & 
-                            (v1_df["output toks"] == output_val)
-                        ]
-                        v2_df = v2_df[
-                            (v2_df["prompt toks"] == prompt_val) & 
-                            (v2_df["output toks"] == output_val)
-                        ]
-                        filters_applied["profile"] = f"{prompt_val}/{output_val}"
-                    except (ValueError, KeyError):
-                        pass  # Invalid profile format, skip filter
+                try:
+                    prompt_value, output_value = parse_profile(profile_clean)
+                    v1_df = v1_df[
+                        (v1_df["prompt toks"] == prompt_value)
+                        & (v1_df["output toks"] == output_value)
+                    ]
+                    v2_df = v2_df[
+                        (v2_df["prompt toks"] == prompt_value)
+                        & (v2_df["output toks"] == output_value)
+                    ]
+                    filters_applied["profile"] = profile
+                except (ValueError, KeyError):
+                    pass  # Invalid profile format, skip filter
+
+        if v1_df.empty or v2_df.empty:
+            return {
+                "status": "error",
+                "error": "No matching benchmark data",
+                "message": (
+                    f"After applying filters, found {len(v1_df)} matching records for "
+                    f"{version1} and {len(v2_df)} for {version2}. Check the requested "
+                    "model, accelerator, and profile."
+                ),
+                "filters_applied": filters_applied,
+            }
 
         # Create matching key for comparison
         # Use actual column names from CSV: "prompt toks", "output toks"
@@ -270,4 +268,3 @@ async def analyze_regression(
             "error": str(e),
             "message": "Failed to analyze regression",
         }
-

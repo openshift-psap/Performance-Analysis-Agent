@@ -3,11 +3,10 @@
 This tool provides information about available options in the dataset.
 """
 
-from typing import Any, Dict, List
-
-import pandas as pd
+from typing import Any, Dict
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import format_profile_shorthand
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -80,22 +79,7 @@ async def get_dataset_metadata(
                     # Create both formats
                     exact_format = f"{prompt_tok}/{output_tok}"
                     
-                    # Create shorthand format
-                    if prompt_tok >= 1000 and prompt_tok % 1000 == 0:
-                        prompt_short = f"{prompt_tok // 1000}k"
-                    elif prompt_tok >= 1024 and prompt_tok % 1024 == 0:
-                        prompt_short = f"{prompt_tok // 1024}k"
-                    else:
-                        prompt_short = str(prompt_tok)
-                    
-                    if output_tok >= 1000 and output_tok % 1000 == 0:
-                        output_short = f"{output_tok // 1000}k"
-                    elif output_tok >= 1024 and output_tok % 1024 == 0:
-                        output_short = f"{output_tok // 1024}k"
-                    else:
-                        output_short = str(output_tok)
-                    
-                    shorthand_format = f"{prompt_short}/{output_short}"
+                    shorthand_format = format_profile_shorthand(prompt_tok, output_tok)
                     
                     profiles.append({
                         "ISL_prompt_tokens": prompt_tok,
@@ -154,4 +138,3 @@ async def get_dataset_metadata(
             "error": str(e),
             "message": "Failed to retrieve dataset metadata",
         }
-

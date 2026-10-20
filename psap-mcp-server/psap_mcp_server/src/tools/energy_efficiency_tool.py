@@ -11,6 +11,7 @@ import pandas as pd
 
 from psap_mcp_server.src.tools.grafana_metrics_tool import query_grafana_metrics
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -45,22 +46,9 @@ def _concurrency_duration_seconds(version: str) -> int:
 
 
 def _parse_profile_tokens(profile: str):
-    """Parse a profile string like '1k/1k' into (prompt_toks, output_toks) candidate lists."""
-    if "/" not in profile:
-        return None, None
-    parts = profile.lower().split("/")
-    if len(parts) != 2:
-        return None, None
-
-    def parse_token_count(s):
-        s = s.strip()
-        if "k" in s:
-            num = float(s.replace("k", ""))
-            return [int(num * 1000), int(num * 1024)]
-        return [int(s)]
-
+    """Parse a profile into decimal prompt/output token counts."""
     try:
-        return parse_token_count(parts[0]), parse_token_count(parts[1])
+        return parse_profile(profile)
     except (ValueError, AttributeError):
         return None, None
 
@@ -158,23 +146,13 @@ async def calculate_energy_efficiency(
 
         if profile:
             if "prompt toks" in filtered_df.columns and "output toks" in filtered_df.columns:
-                prompt_candidates, output_candidates = _parse_profile_tokens(profile)
-                if prompt_candidates and output_candidates:
-                    match_found = False
-                    for p_tok in prompt_candidates:
-                        for o_tok in output_candidates:
-                            matched_df = filtered_df[
-                                (filtered_df["prompt toks"] == p_tok)
-                                & (filtered_df["output toks"] == o_tok)
-                            ]
-                            if not matched_df.empty:
-                                filtered_df = matched_df
-                                match_found = True
-                                break
-                        if match_found:
-                            break
-                    if match_found:
-                        filters_applied["profile"] = profile
+                prompt_tokens, output_tokens = _parse_profile_tokens(profile)
+                if prompt_tokens is not None and output_tokens is not None:
+                    filtered_df = filtered_df[
+                        (filtered_df["prompt toks"] == prompt_tokens)
+                        & (filtered_df["output toks"] == output_tokens)
+                    ]
+                    filters_applied["profile"] = profile
 
         if filtered_df.empty:
             return {

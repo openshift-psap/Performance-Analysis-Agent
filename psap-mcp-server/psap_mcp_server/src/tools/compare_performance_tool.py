@@ -5,13 +5,13 @@ Supports geometric mean calculations for comprehensive comparisons.
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
-import math
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -193,34 +193,14 @@ async def compare_configurations(
             if config.get("profile"):
                 profile = config["profile"]
                 if "/" in profile:
-                    parts = profile.lower().split("/")
-                    if len(parts) == 2:
-                        try:
-                            def parse_token_count(s):
-                                s = s.strip()
-                                if 'k' in s:
-                                    num = float(s.replace('k', ''))
-                                    return [int(num * 1000), int(num * 1024)]
-                                return [int(s)]
-
-                            prompt_candidates = parse_token_count(parts[0])
-                            output_candidates = parse_token_count(parts[1])
-
-                            match_found = False
-                            for p_tok in prompt_candidates:
-                                for o_tok in output_candidates:
-                                    matched_df = filtered_df[
-                                        (filtered_df["prompt toks"] == p_tok) &
-                                        (filtered_df["output toks"] == o_tok)
-                                    ]
-                                    if not matched_df.empty:
-                                        filtered_df = matched_df
-                                        match_found = True
-                                        break
-                                if match_found:
-                                    break
-                        except (ValueError, AttributeError):
-                            pass
+                    try:
+                        prompt_tokens, output_tokens = parse_profile(profile)
+                        filtered_df = filtered_df[
+                            (filtered_df["prompt toks"] == prompt_tokens)
+                            & (filtered_df["output toks"] == output_tokens)
+                        ]
+                    except (ValueError, AttributeError, KeyError):
+                        pass
 
             config_filtered_dfs.append((i, config, filtered_df))
 
@@ -545,26 +525,18 @@ async def compare_versions_comprehensive(
             df_newer = df_newer[df_newer["accelerator"].str.contains(accelerator, case=False, na=False)]
         
         if profile and "/" in profile:
-            parts = profile.lower().split("/")
-            if len(parts) == 2:
-                def parse_token_count(s):
-                    s = s.strip()
-                    if 'k' in s:
-                        num = float(s.replace('k', ''))
-                        return [int(num * 1000), int(num * 1024)]
-                    return [int(s)]
-                
-                prompt_candidates = parse_token_count(parts[0])
-                output_candidates = parse_token_count(parts[1])
-                
-                for p_tok in prompt_candidates:
-                    for o_tok in output_candidates:
-                        df_b_filtered = df_baseline[(df_baseline["prompt toks"] == p_tok) & (df_baseline["output toks"] == o_tok)]
-                        df_n_filtered = df_newer[(df_newer["prompt toks"] == p_tok) & (df_newer["output toks"] == o_tok)]
-                        if not df_b_filtered.empty and not df_n_filtered.empty:
-                            df_baseline = df_b_filtered
-                            df_newer = df_n_filtered
-                            break
+            try:
+                prompt_tokens, output_tokens = parse_profile(profile)
+                df_baseline = df_baseline[
+                    (df_baseline["prompt toks"] == prompt_tokens)
+                    & (df_baseline["output toks"] == output_tokens)
+                ]
+                df_newer = df_newer[
+                    (df_newer["prompt toks"] == prompt_tokens)
+                    & (df_newer["output toks"] == output_tokens)
+                ]
+            except (ValueError, AttributeError, KeyError):
+                pass
         
         if tp is not None:
             df_baseline = df_baseline[df_baseline["TP"] == tp]
@@ -836,4 +808,3 @@ async def compare_versions_comprehensive(
             "error": str(e),
             "message": "Failed to compare versions",
         }
-
