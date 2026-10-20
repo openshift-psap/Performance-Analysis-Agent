@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -92,32 +93,20 @@ async def analyze_regression(
             # Parse profile (e.g., "1k/1k" or "512/2048")
             profile_clean = profile.strip().lower()
 
-            # Benchmark profile shorthand uses decimal units: 1k means 1000 tokens.
-            def parse_profile_value(val: str) -> int:
-                val = val.strip()
-                if val.endswith("k"):
-                    num = float(val[:-1])
-                    return int(num * 1000)
-                return int(val)
-
             if '/' in profile_clean:
-                parts = profile_clean.split('/')
-                if len(parts) == 2:
-                    try:
-                        prompt_value = parse_profile_value(parts[0])
-                        output_value = parse_profile_value(parts[1])
-
-                        v1_df = v1_df[
-                            (v1_df["prompt toks"] == prompt_value)
-                            & (v1_df["output toks"] == output_value)
-                        ]
-                        v2_df = v2_df[
-                            (v2_df["prompt toks"] == prompt_value)
-                            & (v2_df["output toks"] == output_value)
-                        ]
-                        filters_applied["profile"] = profile
-                    except (ValueError, KeyError):
-                        pass  # Invalid profile format, skip filter
+                try:
+                    prompt_value, output_value = parse_profile(profile_clean)
+                    v1_df = v1_df[
+                        (v1_df["prompt toks"] == prompt_value)
+                        & (v1_df["output toks"] == output_value)
+                    ]
+                    v2_df = v2_df[
+                        (v2_df["prompt toks"] == prompt_value)
+                        & (v2_df["output toks"] == output_value)
+                    ]
+                    filters_applied["profile"] = profile
+                except (ValueError, KeyError):
+                    pass  # Invalid profile format, skip filter
 
         if v1_df.empty or v2_df.empty:
             return {

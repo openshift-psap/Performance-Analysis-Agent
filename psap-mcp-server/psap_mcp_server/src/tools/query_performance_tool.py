@@ -3,11 +3,12 @@
 This tool allows querying specific performance metrics for models, accelerators, and configurations.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -87,40 +88,15 @@ async def query_performance_metrics(
             # Match profile based on prompt/output token counts
             if "prompt toks" in filtered_df.columns and "output toks" in filtered_df.columns:
                 if "/" in profile:  # Format: "1k/1k", "2k/128", or "512/2k"
-                    parts = profile.lower().split("/")
-                    if len(parts) == 2:
-                        try:
-                            # Helper function to parse token counts with k notation
-                            def parse_token_count(s):
-                                s = s.strip()
-                                if 'k' in s:
-                                    num = float(s.replace('k', ''))
-                                    # Try both decimal (k=1000) and binary (k=1024) interpretations
-                                    return [int(num * 1000), int(num * 1024)]
-                                return [int(s)]
-                            
-                            prompt_candidates = parse_token_count(parts[0])
-                            output_candidates = parse_token_count(parts[1])
-                            
-                            # Try all combinations and find matches
-                            match_found = False
-                            for p_tok in prompt_candidates:
-                                for o_tok in output_candidates:
-                                    matched_df = filtered_df[
-                                        (filtered_df["prompt toks"] == p_tok) &
-                                        (filtered_df["output toks"] == o_tok)
-                                    ]
-                                    if not matched_df.empty:
-                                        filtered_df = matched_df
-                                        match_found = True
-                                        break
-                                if match_found:
-                                    break
-                            
-                            if match_found:
-                                filters_applied["profile"] = profile
-                        except (ValueError, AttributeError):
-                            pass
+                    try:
+                        prompt_tokens, output_tokens = parse_profile(profile)
+                        filtered_df = filtered_df[
+                            (filtered_df["prompt toks"] == prompt_tokens)
+                            & (filtered_df["output toks"] == output_tokens)
+                        ]
+                        filters_applied["profile"] = profile
+                    except (ValueError, AttributeError, KeyError):
+                        pass
 
         if filtered_df.empty:
             return {
@@ -219,4 +195,3 @@ async def query_performance_metrics(
             "error": str(e),
             "message": "Failed to query performance metrics",
         }
-

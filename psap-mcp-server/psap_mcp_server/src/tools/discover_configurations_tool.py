@@ -4,11 +4,15 @@ This tool discovers what configurations (models, accelerators, profiles, etc.)
 were actually tested for specific filters.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
+from psap_mcp_server.src.tools.profile_utils import (
+    format_profile_shorthand,
+    parse_profile,
+)
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
@@ -86,26 +90,15 @@ async def discover_configurations(
         if profile:
             # Parse profile (e.g., "1k/1k" or "2048/128")
             if "/" in profile:
-                parts = profile.lower().split("/")
-                # Parse prompt tokens
-                prompt_str = parts[0].strip()
-                if prompt_str.endswith("k"):
-                    prompt_toks = int(float(prompt_str[:-1]) * 1000)
-                else:
-                    prompt_toks = int(prompt_str)
-                
-                # Parse output tokens
-                output_str = parts[1].strip()
-                if output_str.endswith("k"):
-                    output_toks = int(float(output_str[:-1]) * 1000)
-                else:
-                    output_toks = int(output_str)
-                
-                df = df[
-                    (df["prompt toks"] == prompt_toks) & 
-                    (df["output toks"] == output_toks)
-                ]
-                filters_applied["profile"] = profile
+                try:
+                    prompt_toks, output_toks = parse_profile(profile)
+                    df = df[
+                        (df["prompt toks"] == prompt_toks)
+                        & (df["output toks"] == output_toks)
+                    ]
+                    filters_applied["profile"] = profile
+                except ValueError:
+                    pass
         
         if tp is not None:
             df = df[df["TP"] == tp]
@@ -118,7 +111,7 @@ async def discover_configurations(
                 "filters_applied": filters_applied,
                 "count": 0,
                 "unique_values": [],
-                "message": f"No benchmark runs found matching the specified filters",
+                "message": "No benchmark runs found matching the specified filters",
                 "total_records_matching_filters": 0,
                 "original_total_records": original_count,
             }
@@ -158,22 +151,7 @@ async def discover_configurations(
                     # Create both formats
                     exact_format = f"{prompt_tok}/{output_tok}"
                     
-                    # Create shorthand format
-                    if prompt_tok >= 1000 and prompt_tok % 1000 == 0:
-                        prompt_short = f"{prompt_tok // 1000}k"
-                    elif prompt_tok >= 1024 and prompt_tok % 1024 == 0:
-                        prompt_short = f"{prompt_tok // 1024}k"
-                    else:
-                        prompt_short = str(prompt_tok)
-                    
-                    if output_tok >= 1000 and output_tok % 1000 == 0:
-                        output_short = f"{output_tok // 1000}k"
-                    elif output_tok >= 1024 and output_tok % 1024 == 0:
-                        output_short = f"{output_tok // 1024}k"
-                    else:
-                        output_short = str(output_tok)
-                    
-                    shorthand_format = f"{prompt_short}/{output_short}"
+                    shorthand_format = format_profile_shorthand(prompt_tok, output_tok)
                     
                     profiles.append({
                         "ISL_prompt_tokens": prompt_tok,
@@ -218,4 +196,3 @@ async def discover_configurations(
             "error": str(e),
             "message": "Failed to discover configurations",
         }
-
