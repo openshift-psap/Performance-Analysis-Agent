@@ -92,29 +92,28 @@ async def analyze_regression(
             # Parse profile (e.g., "1k/1k" or "512/2048")
             profile_clean = profile.strip().lower()
 
-            # Accept both decimal (1000-based) and binary (1024-based) "k".
-            def parse_profile_values(val: str) -> set[int]:
+            # Benchmark profile shorthand uses decimal units: 1k means 1000 tokens.
+            def parse_profile_value(val: str) -> int:
                 val = val.strip()
-                if val.endswith('k'):
+                if val.endswith("k"):
                     num = float(val[:-1])
-                    return {int(num * 1000), int(num * 1024)}
-                return {int(val)}
+                    return int(num * 1000)
+                return int(val)
 
             if '/' in profile_clean:
                 parts = profile_clean.split('/')
                 if len(parts) == 2:
                     try:
-                        prompt_values = parse_profile_values(parts[0])
-                        output_values = parse_profile_values(parts[1])
+                        prompt_value = parse_profile_value(parts[0])
+                        output_value = parse_profile_value(parts[1])
 
-                        # Datasets use both decimal and binary shorthand conventions.
                         v1_df = v1_df[
-                            v1_df["prompt toks"].isin(prompt_values)
-                            & v1_df["output toks"].isin(output_values)
+                            (v1_df["prompt toks"] == prompt_value)
+                            & (v1_df["output toks"] == output_value)
                         ]
                         v2_df = v2_df[
-                            v2_df["prompt toks"].isin(prompt_values)
-                            & v2_df["output toks"].isin(output_values)
+                            (v2_df["prompt toks"] == prompt_value)
+                            & (v2_df["output toks"] == output_value)
                         ]
                         filters_applied["profile"] = profile
                     except (ValueError, KeyError):

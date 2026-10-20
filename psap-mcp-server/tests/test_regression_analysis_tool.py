@@ -32,12 +32,11 @@ def _benchmark_data(prompt_tokens: int, output_tokens: int) -> pd.DataFrame:
     "token_count,profile",
     [
         (1000, "1k/1k"),
-        (1024, "1k/1k"),
         (1000, "1000/1000"),
     ],
 )
 @pytest.mark.asyncio
-async def test_profile_filter_matches_decimal_and_binary_k_conventions(
+async def test_profile_filter_uses_decimal_k_convention(
     monkeypatch, token_count, profile
 ):
     data = _benchmark_data(token_count, token_count)
@@ -55,6 +54,26 @@ async def test_profile_filter_matches_decimal_and_binary_k_conventions(
 
     assert result["status"] == "success"
     assert result["summary"]["total_configurations_compared"] == 1
+
+
+@pytest.mark.asyncio
+async def test_profile_filter_does_not_treat_k_as_1024(monkeypatch):
+    data = _benchmark_data(1024, 1024)
+    monkeypatch.setattr(
+        regression_analysis_tool, "load_rhaiis_data", lambda: data.copy()
+    )
+
+    result = await regression_analysis_tool.analyze_regression(
+        "RHAIIS-3.6-fast2",
+        "vLLM-0.28.0",
+        accelerator="H200",
+        model="openai/gpt-oss-120b",
+        profile="1k/1k",
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == "No matching benchmark data"
+    assert "0 matching records" in result["message"]
 
 
 @pytest.mark.asyncio
