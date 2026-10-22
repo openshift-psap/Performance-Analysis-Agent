@@ -15,6 +15,9 @@ def reset_profile_index_cache():
         pytorch_profile_tool._profile_index_cache = None
         pytorch_profile_tool._profile_index_ts = 0.0
         pytorch_profile_tool._profile_model_index_cache.clear()
+    with pytorch_profile_tool._profile_catalog_lock:
+        pytorch_profile_tool._profile_catalog_cache = None
+        pytorch_profile_tool._profile_catalog_ts = 0.0
 
     yield
 
@@ -22,6 +25,9 @@ def reset_profile_index_cache():
         pytorch_profile_tool._profile_index_cache = None
         pytorch_profile_tool._profile_index_ts = 0.0
         pytorch_profile_tool._profile_model_index_cache.clear()
+    with pytorch_profile_tool._profile_catalog_lock:
+        pytorch_profile_tool._profile_catalog_cache = None
+        pytorch_profile_tool._profile_catalog_ts = 0.0
 
 
 def test_profile_discovery_uses_ttl_cache_and_honors_forced_refresh(monkeypatch):
@@ -70,6 +76,86 @@ def test_model_filtered_discovery_uses_separate_cache(monkeypatch):
 
     assert pytorch_profile_tool._discover_profiles() == full_index
     assert calls == ["example-model", None]
+
+
+def test_exact_model_reuses_recent_broad_filtered_index(monkeypatch):
+    calls = []
+    index = {
+        "H200/openai--gpt-oss-120b": {},
+        "MI355X/openai--gpt-oss-120b": {},
+    }
+
+    def discover_from_s3(model=None):
+        calls.append(model)
+        return index
+
+    monkeypatch.setattr(pytorch_profile_tool, "_discover_profiles_s3", discover_from_s3)
+
+    assert pytorch_profile_tool._discover_profiles(model="gpt-oss-120b") == index
+    assert pytorch_profile_tool._discover_profiles(
+        model="mi355x/openai--gpt-oss-120b"
+    ) == {"MI355X/openai--gpt-oss-120b": {}}
+    assert calls == ["gpt-oss-120b"]
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_listing_uses_fast_catalog_not_full_index(monkeypatch):
+    monkeypatch.setattr(
+        pytorch_profile_tool, "settings", SimpleNamespace(S3_BUCKET="test-bucket")
+    )
+    monkeypatch.setattr(
+        pytorch_profile_tool,
+        "_profile_model_catalog",
+        lambda: [f"H200/model-{i}" for i in range(65)],
+    )
+
+    async def fail_full_discovery(model=None):
+        raise AssertionError("unfiltered catalog should not scan profile files")
+
+    monkeypatch.setattr(pytorch_profile_tool, "_discover_profiles_async", fail_full_discovery)
+    first = await pytorch_profile_tool.list_available_profiles()
+    second = await pytorch_profile_tool.list_available_profiles(offset=50)
+
+    assert first["total_models"] == 65
+    assert len(first["available_models"]) == 50
+    assert first["next_offset"] == 50
+    assert len(second["available_models"]) == 15
+    assert second["next_offset"] is None
+
+
+def test_fast_s3_catalog_only_lists_accelerator_and_model_prefixes(monkeypatch):
+    calls = []
+
+    class FakeS3:
+        def list_objects_v2(self, **kwargs):
+            calls.append(kwargs)
+            prefix = kwargs["Prefix"]
+            if prefix == "profiles/":
+                return {"CommonPrefixes": [{"Prefix": "profiles/MI355X/"}]}
+            if prefix == "profiles/MI355X/" and not kwargs.get("ContinuationToken"):
+                return {
+                    "CommonPrefixes": [{"Prefix": "profiles/MI355X/model-a/"}],
+                    "IsTruncated": True,
+                    "NextContinuationToken": "page-2",
+                }
+            return {"CommonPrefixes": [{"Prefix": "profiles/MI355X/model-b/"}]}
+
+    monkeypatch.setattr(
+        pytorch_profile_tool,
+        "settings",
+        SimpleNamespace(S3_BUCKET="test-bucket", PROFILE_S3_PREFIX="profiles"),
+    )
+    monkeypatch.setattr(s3_utils, "get_s3_client", lambda: FakeS3())
+
+    assert pytorch_profile_tool._profile_model_catalog() == [
+        "MI355X/model-a", "MI355X/model-b"
+    ]
+    assert pytorch_profile_tool._profile_model_catalog() == [
+        "MI355X/model-a", "MI355X/model-b"
+    ]
+    assert [call["Prefix"] for call in calls] == [
+        "profiles/", "profiles/MI355X/", "profiles/MI355X/"
+    ]
 
 
 @pytest.mark.asyncio

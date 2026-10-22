@@ -3,6 +3,7 @@
 This tool detects performance improvements or degradations across different versions.
 """
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -22,6 +23,8 @@ async def analyze_regression(
     model: Optional[str] = None,
     profile: Optional[str] = None,
     metrics: Optional[List[str]] = None,
+    max_results: int = 10,
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """Analyze performance changes between two versions.
 
@@ -29,8 +32,8 @@ async def analyze_regression(
     DISPLAY_NAME=Analyze Performance Regression
     USECASE=Detect performance improvements or degradations between software versions
     INSTRUCTIONS=1. Specify two versions to compare, 2. Optionally filter by accelerator/model/profile, 3. Choose metrics to analyze
-    INPUT_DESCRIPTION=version1 (str): First version (e.g., "3.2.2"); version2 (str): Second version (e.g., "3.2.3"); accelerator (str, optional): Filter by accelerator; model (str, optional): Filter by model; profile (str, optional): Filter by profile (e.g., "1k/1k", "512/2048"); metrics (list, optional): Metrics to compare
-    OUTPUT_DESCRIPTION=Dictionary with detailed regression analysis, improvements, and degradations
+    INPUT_DESCRIPTION=version1 (str): Baseline; version2 (str): New version; accelerator/model/profile (optional): Filters; metrics (list, optional): Metrics; max_results (int): Per-category page size (max 25); offset (int): Per-category page offset
+    OUTPUT_DESCRIPTION=Dictionary with full summary counts and paginated improvements, regressions, and no-change details
     EXAMPLES=analyze_regression("3.2.2", "3.2.3"), analyze_regression("3.2.2", "3.2.3", accelerator="H200", model="Llama", profile="512/2048")
     PREREQUISITES=RHAIIS performance data with multiple versions
     RELATED_TOOLS=query_performance_metrics, compare_configurations
@@ -54,7 +57,10 @@ async def analyze_regression(
         - summary: Overall analysis summary
     """
     try:
-        df = load_rhaiis_data()
+        if max_results < 1 or offset < 0:
+            return {"status": "error", "message": "max_results must be positive and offset must be non-negative"}
+        page_size = min(max_results, 25)
+        df = await asyncio.to_thread(load_rhaiis_data)
         if df is None:
             return {
                 "status": "error",
@@ -133,7 +139,9 @@ async def analyze_regression(
         v2_df["match_key"] = v2_df[match_cols].astype(str).agg("-".join, axis=1)
 
         # Find configurations present in both versions
-        common_keys = set(v1_df["match_key"]) & set(v2_df["match_key"])
+        v1_rows = v1_df.drop_duplicates("match_key").set_index("match_key")
+        v2_rows = v2_df.drop_duplicates("match_key").set_index("match_key")
+        common_keys = sorted(set(v1_rows.index) & set(v2_rows.index))
 
         if not common_keys:
             return {
@@ -150,8 +158,8 @@ async def analyze_regression(
         no_change = []
 
         for key in common_keys:
-            v1_row = v1_df[v1_df["match_key"] == key].iloc[0]
-            v2_row = v2_df[v2_df["match_key"] == key].iloc[0]
+            v1_row = v1_rows.loc[key]
+            v2_row = v2_rows.loc[key]
 
             # Create profile string from prompt and output tokens
             profile_str = f"{int(v1_row['prompt toks'])}/{int(v1_row['output toks'])}" if pd.notna(v1_row.get('prompt toks')) and pd.notna(v1_row.get('output toks')) else None
@@ -261,9 +269,18 @@ async def analyze_regression(
             "status": "success",
             "baseline_version": version1,
             "new_version": version2,
-            "improvements": improvements,
-            "regressions": regressions,
-            "no_change": no_change,
+            "improvements": improvements[offset : offset + page_size],
+            "regressions": regressions[offset : offset + page_size],
+            "no_change": no_change[offset : offset + page_size],
+            "pagination": {
+                "offset": offset,
+                "page_size": page_size,
+                "next_offsets": {
+                    "improvements": offset + page_size if offset + page_size < len(improvements) else None,
+                    "regressions": offset + page_size if offset + page_size < len(regressions) else None,
+                    "no_change": offset + page_size if offset + page_size < len(no_change) else None,
+                },
+            },
             "summary": summary,
             "filters_applied": filters_applied,
             "metrics_analyzed": metrics,

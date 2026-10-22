@@ -3,6 +3,7 @@
 This tool allows querying specific performance metrics for models, accelerators, and configurations.
 """
 
+import asyncio
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -14,6 +15,9 @@ from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
 
+_MAX_PAGE_SIZE = 25
+_MAX_RUNTIME_ARGS_CHARS = 1_000
+
 
 async def query_performance_metrics(
     model: Optional[str] = None,
@@ -22,6 +26,8 @@ async def query_performance_metrics(
     tp: Optional[int] = None,
     profile: Optional[str] = None,
     top_n: int = 10,
+    offset: int = 0,
+    include_full_runtime_args: bool = False,
 ) -> Dict[str, Any]:
     """Query performance metrics from RHAIIS benchmarks.
 
@@ -29,7 +35,7 @@ async def query_performance_metrics(
     DISPLAY_NAME=Query Performance Metrics
     USECASE=Get detailed performance metrics for AI models on different accelerators
     INSTRUCTIONS=1. Provide filters (model, accelerator, version, TP), 2. Get performance data, 3. Analyze results
-    INPUT_DESCRIPTION=model (str, optional): Model name; accelerator (str, optional): H200/MI300X/TPU; version (str, optional): RHAIIS version; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile; top_n (int): Number of results to return
+    INPUT_DESCRIPTION=model (str, optional): Model name; accelerator (str, optional): H200/MI300X/TPU; version (str, optional): RHAIIS version; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile; top_n (int): Page size (max 25); offset (int): Rows to skip; include_full_runtime_args (bool): Explicitly include full runtime arguments
     OUTPUT_DESCRIPTION=Dictionary with filtered performance data including throughput, latency, error rates, and configuration details
     EXAMPLES=query_performance_metrics(model="Llama-3.3-70B", accelerator="H200"), query_performance_metrics(accelerator="MI300X", tp=8)
     PREREQUISITES=RHAIIS performance data must be loaded
@@ -41,7 +47,9 @@ async def query_performance_metrics(
         version: RHAIIS version to filter
         tp: Tensor parallelism value
         profile: Benchmark profile (e.g., "1k/1k", "512/2k")
-        top_n: Maximum number of results to return
+        top_n: Number of results to return, capped at 25
+        offset: Start row for pagination
+        include_full_runtime_args: Include unabridged runtime arguments when needed
 
     Returns:
         Dictionary containing:
@@ -51,7 +59,10 @@ async def query_performance_metrics(
         - filters_applied: Dictionary of filters used
     """
     try:
-        df = load_rhaiis_data()
+        if top_n < 1 or offset < 0:
+            return {"status": "error", "message": "top_n must be positive and offset must be non-negative"}
+        page_size = min(top_n, _MAX_PAGE_SIZE)
+        df = await asyncio.to_thread(load_rhaiis_data)
         if df is None:
             return {
                 "status": "error",
@@ -114,7 +125,7 @@ async def query_performance_metrics(
         if "output_tok/sec" in filtered_df.columns:
             filtered_df = filtered_df.sort_values("output_tok/sec", ascending=False)
 
-        limited_df = filtered_df.head(top_n)
+        limited_df = filtered_df.iloc[offset : offset + page_size]
 
         # Prepare results
         results = []
@@ -126,6 +137,8 @@ async def query_performance_metrics(
                 pd.notna(row.get("guidellm_end_time_ms"))
             )
             
+            runtime_args = row.get("runtime_args")
+            runtime_args = str(runtime_args) if pd.notna(runtime_args) else None
             result = {
                 "model": row.get("model"),
                 "accelerator": row.get("accelerator"),
@@ -167,7 +180,12 @@ async def query_performance_metrics(
                     "output_tokens": int(row.get("output toks")) if pd.notna(row.get("output toks")) else None,
                 },
                 "efficiency_ratio": float(row.get("efficiency_ratio")) if pd.notna(row.get("efficiency_ratio")) else None,
-                "runtime_args": row.get("runtime_args") if pd.notna(row.get("runtime_args")) else None,
+                "runtime_args": (
+                    runtime_args if include_full_runtime_args else runtime_args[:_MAX_RUNTIME_ARGS_CHARS]
+                ) if runtime_args else None,
+                "runtime_args_truncated": bool(
+                    runtime_args and not include_full_runtime_args and len(runtime_args) > _MAX_RUNTIME_ARGS_CHARS
+                ),
             }
             results.append(result)
 
@@ -175,6 +193,9 @@ async def query_performance_metrics(
         summary = {
             "total_results": len(filtered_df),
             "results_shown": len(results),
+            "offset": offset,
+            "next_offset": offset + len(results) if offset + len(results) < len(filtered_df) else None,
+            "page_size": page_size,
             "avg_throughput": float(filtered_df["output_tok/sec"].mean()) if "output_tok/sec" in filtered_df.columns else None,
             "max_throughput": float(filtered_df["output_tok/sec"].max()) if "output_tok/sec" in filtered_df.columns else None,
             "min_throughput": float(filtered_df["output_tok/sec"].min()) if "output_tok/sec" in filtered_df.columns else None,

@@ -329,6 +329,8 @@ async def get_vllm_release_notes(
     include_all_releases: bool = False,
     max_releases: int = 10,
     performance_only: bool = False,
+    page: int = 1,
+    include_full_body: bool = False,
 ) -> Dict[str, Any]:
     """Get vLLM release notes from GitHub.
     
@@ -340,7 +342,7 @@ async def get_vllm_release_notes(
     DISPLAY_NAME=Get vLLM Release Notes
     USECASE=Fetch release notes and changelogs from vLLM GitHub repository to understand what changed in specific versions. Supports RHAIIS versions (auto-mapped to upstream vLLM) and direct vLLM versions.
     INSTRUCTIONS=1. Specify a version (RHAIIS like "RHAIIS-3.2.5" or vLLM like "0.8.0"), 2. Set performance_only=True to filter for performance-related changes only, 3. Use to correlate version changes with benchmark results
-    INPUT_DESCRIPTION=version (str, optional): Version - supports RHAIIS format "RHAIIS-3.2.5" or vLLM format "0.8.0"/"v0.8.0"; include_all_releases (bool): Get multiple releases; max_releases (int): Max releases to return; performance_only (bool): Filter for performance changes only
+    INPUT_DESCRIPTION=version (str, optional): RHAIIS or vLLM version; max_releases (int): Page size, max 10; page (int): GitHub release page; performance_only (bool): Filter for performance changes; include_full_body (bool): Fuller body for a single version only
     OUTPUT_DESCRIPTION=Dictionary with release information including version, date, release notes body, and performance-related changes. For RHAIIS versions, includes the mapping used.
     EXAMPLES=get_vllm_release_notes(version="RHAIIS-3.2.5"), get_vllm_release_notes(version="0.8.0"), get_vllm_release_notes(performance_only=True)
     PREREQUISITES=Internet access to GitHub API. Optional: GITHUB_TOKEN for higher rate limits
@@ -362,6 +364,9 @@ async def get_vllm_release_notes(
         - message: Status message
     """
     try:
+        if max_releases < 1 or page < 1:
+            return {"status": "error", "message": "max_releases and page must be positive"}
+        page_size = min(max_releases, 10)
         async with httpx.AsyncClient(timeout=30.0) as client:
             headers = _get_github_headers()
             
@@ -415,7 +420,7 @@ async def get_vllm_release_notes(
             else:
                 # Fetch multiple releases
                 url = f"{GITHUB_API_BASE}/repos/{VLLM_REPO}/releases"
-                params = {"per_page": min(max_releases, 100)}
+                params = {"per_page": page_size, "page": page}
                 
                 response = await client.get(url, headers=headers, params=params)
                 
@@ -426,7 +431,7 @@ async def get_vllm_release_notes(
                         "details": response.text[:500],
                     }
                 
-                releases = response.json()[:max_releases]
+                releases = response.json()[:page_size]
             
             # Process releases
             processed_releases = []
@@ -444,15 +449,15 @@ async def get_vllm_release_notes(
                     "published_at": release.get("published_at"),
                     "html_url": release.get("html_url"),
                     "prerelease": release.get("prerelease", False),
-                    "performance_changes": performance_changes,
+                    "performance_changes": performance_changes[:30],
                     "performance_change_count": len(performance_changes),
                 }
                 
                 # Include full body if not filtering for performance only
                 if not performance_only:
-                    _BODY_CHAR_LIMIT = 40000
-                    release_info["body"] = body[:_BODY_CHAR_LIMIT] if len(body) > _BODY_CHAR_LIMIT else body
-                    release_info["body_truncated"] = len(body) > _BODY_CHAR_LIMIT
+                    body_limit = 40_000 if version and include_full_body else 4_000
+                    release_info["body"] = body[:body_limit]
+                    release_info["body_truncated"] = len(body) > body_limit
                 
                 processed_releases.append(release_info)
             
@@ -476,6 +481,7 @@ async def get_vllm_release_notes(
                     " with performance-related changes" if performance_only else ""
                 ),
                 "github_repo": f"https://github.com/{VLLM_REPO}",
+                "page": page if not version else None,
             }
             if version_mapping_info:
                 result["version_mapping"] = version_mapping_info

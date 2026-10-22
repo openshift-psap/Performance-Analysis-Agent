@@ -5,6 +5,7 @@ by fetching real GPU power data from Grafana/Prometheus. Falls back to estimated
 power values when Grafana data is unavailable.
 """
 
+import asyncio
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -83,6 +84,7 @@ async def calculate_energy_efficiency(
     version: Optional[str] = None,
     profile: Optional[str] = None,
     top_n: int = 10,
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """Calculate energy efficiency (energy per million tokens) for GPU inference benchmarks.
 
@@ -94,7 +96,7 @@ async def calculate_energy_efficiency(
     DISPLAY_NAME=Calculate Energy Efficiency for GPU Inference
     USECASE=Calculate GPU energy consumption (kWh) and energy per million tokens (Wh) using measured GPU power from Grafana metrics
     INSTRUCTIONS=1. Optionally filter by accelerator, model, version, and profile, 2. Tool fetches GPU power from Grafana for each benchmark group, 3. Returns energy metrics ranked by efficiency (lowest Wh/1M tokens first)
-    INPUT_DESCRIPTION=accelerator (str, optional): Filter by accelerator (e.g., "H200", "MI300X"); model (str, optional): Filter by model name; version (str, optional): Filter by RHAIIS version; profile (str, optional): Workload profile (e.g., "1k/1k", "512/2k"); top_n (int): Number of results to return
+    INPUT_DESCRIPTION=accelerator/model/version/profile (optional): Filters; top_n (int): Page size (max 25); offset (int): Page offset
     OUTPUT_DESCRIPTION=Dictionary with energy analysis per configuration including GPU power (kW), total energy (kWh), energy per 1M tokens (Wh), and whether power was measured from Grafana or estimated
     EXAMPLES=calculate_energy_efficiency(accelerator="H200", version="RHAIIS-3.2.5"), calculate_energy_efficiency(model="Llama-3.3-70B", profile="1k/1k"), calculate_energy_efficiency(accelerator="MI300X", profile="512/2k", top_n=5)
     PREREQUISITES=RHAIIS performance data with throughput metrics; Grafana access for measured GPU power (optional, falls back to estimates)
@@ -116,7 +118,10 @@ async def calculate_energy_efficiency(
         - filters_applied: Filters that were used
     """
     try:
-        df = load_rhaiis_data()
+        if top_n < 1 or offset < 0:
+            return {"status": "error", "message": "top_n must be positive and offset must be non-negative"}
+        page_size = min(top_n, 25)
+        df = await asyncio.to_thread(load_rhaiis_data)
         if df is None:
             return {
                 "status": "error",
@@ -176,9 +181,33 @@ async def calculate_energy_efficiency(
             concurrency_col = None
 
         energy_results = []
+        groups = list(filtered_df.groupby(["model", "accelerator", "TP"]))
+        grafana_slots = asyncio.Semaphore(4)
+        power_tasks = {}
 
-        for (grp_model, grp_acc, grp_tp), group in filtered_df.groupby(
-            ["model", "accelerator", "TP"]
+        async def get_power(uuid: str) -> Optional[float]:
+            if uuid not in power_tasks:
+                async def query():
+                    async with grafana_slots:
+                        return await _get_gpu_power_from_grafana(uuid)
+                power_tasks[uuid] = asyncio.create_task(query())
+            return await power_tasks[uuid]
+
+        async def group_power(group):
+            if "uuid" in group.columns:
+                for uuid_candidate in group["uuid"].dropna().unique():
+                    uuid = str(uuid_candidate)
+                    measured = await get_power(uuid)
+                    if measured is not None:
+                        return measured, uuid
+            return None, None
+
+        power_results = await asyncio.gather(
+            *(group_power(group) for _, group in groups)
+        )
+
+        for ((grp_model, grp_acc, grp_tp), group), (power_watts, uuid_used) in zip(
+            groups, power_results
         ):
             gpu_count = int(grp_tp)
             grp_version = group["version"].iloc[0] if "version" in group.columns else ""
@@ -200,18 +229,7 @@ async def calculate_energy_efficiency(
 
             # --- Fetch GPU power from Grafana ---
             # Pick a representative UUID from the group (first non-null)
-            power_watts = None
-            power_source = "fallback_estimate"
-            uuid_used = None
-
-            if "uuid" in group.columns:
-                uuids = group["uuid"].dropna().unique()
-                for uuid_candidate in uuids:
-                    power_watts = await _get_gpu_power_from_grafana(str(uuid_candidate))
-                    if power_watts is not None:
-                        uuid_used = str(uuid_candidate)
-                        power_source = "grafana"
-                        break
+            power_source = "grafana" if power_watts is not None else "fallback_estimate"
 
             if power_watts is None:
                 # Fallback to estimated values
@@ -275,7 +293,7 @@ async def calculate_energy_efficiency(
         with_efficiency.sort(key=lambda x: x["energy_per_1m_tokens_wh"])
 
         sorted_results = with_efficiency + without_efficiency
-        top_results = sorted_results[:top_n]
+        top_results = sorted_results[offset : offset + page_size]
 
         most_efficient = with_efficiency[0] if with_efficiency else None
 
@@ -286,6 +304,8 @@ async def calculate_energy_efficiency(
         statistics = {
             "total_configurations": len(energy_results),
             "results_shown": len(top_results),
+            "offset": offset,
+            "next_offset": offset + len(top_results) if offset + len(top_results) < len(sorted_results) else None,
             "grafana_measured_count": grafana_count,
             "fallback_estimated_count": len(energy_results) - grafana_count,
             "lowest_energy_per_1m_tokens_wh": min(all_efficiency_values) if all_efficiency_values else None,

@@ -164,12 +164,23 @@ _profile_index_ts: float = 0.0
 _profile_model_index_cache: Dict[str, Tuple[float, Dict]] = {}
 _PROFILE_INDEX_TTL: int = 300  # seconds
 _profile_index_lock = threading.Lock()
+_profile_catalog_cache: Optional[List[str]] = None
+_profile_catalog_ts: float = 0.0
+_profile_catalog_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # In-memory stats cache  (cache_key -> (timestamp, stats_dict))
 # ---------------------------------------------------------------------------
 _stats_cache: Dict[str, Tuple[float, Dict]] = {}
 _STATS_CACHE_TTL: int = 300  # seconds
+_STATS_CACHE_MAX_ENTRIES = 16
+_stats_cache_lock = threading.Lock()
+
+# Avoid repeatedly downloading and parsing the same malformed, potentially
+# very large, profiler artifact while an agent is trying multiple tools.
+_malformed_trace_cache: Dict[str, float] = {}
+_MALFORMED_TRACE_CACHE_TTL: int = 300  # seconds
+_malformed_trace_cache_lock = threading.Lock()
 
 
 # ===================================================================== #
@@ -374,6 +385,59 @@ def _get_model_info(model_key: str, num_ranks: int) -> Dict[str, Any]:
 # ===================================================================== #
 #  Profile discovery (S3 + local)                                        #
 # ===================================================================== #
+
+def _list_profile_model_keys_s3() -> Optional[List[str]]:
+    """List only accelerator/model folders, without walking every trace file."""
+    bucket = settings.S3_BUCKET
+    if not bucket:
+        return None
+    prefix = getattr(settings, "PROFILE_S3_PREFIX", "pytorch-profiles/rhaiis").rstrip("/") + "/"
+    try:
+        from psap_mcp_server.src.tools.s3_utils import get_s3_client
+
+        client = get_s3_client()
+
+        def prefixes(parent: str) -> List[str]:
+            found: List[str] = []
+            token = None
+            while True:
+                args: Dict[str, Any] = {
+                    "Bucket": bucket, "Prefix": parent, "Delimiter": "/",
+                }
+                if token:
+                    args["ContinuationToken"] = token
+                response = client.list_objects_v2(**args)
+                found.extend(item["Prefix"] for item in response.get("CommonPrefixes", []))
+                token = response.get("NextContinuationToken") if response.get("IsTruncated") else None
+                if not token:
+                    return found
+
+        keys = [
+            f"{accelerator.rstrip('/').split('/')[-1]}/{model.rstrip('/').split('/')[-1]}"
+            for accelerator in prefixes(prefix)
+            for model in prefixes(accelerator)
+        ]
+        return sorted(set(keys))
+    except Exception as exc:
+        logger.warning(f"Could not list profile model folders from S3: {exc}", exc_info=True)
+        return None
+
+
+def _profile_model_catalog() -> Optional[List[str]]:
+    """Coalesce catalog requests and cache their much cheaper S3 result."""
+    global _profile_catalog_cache, _profile_catalog_ts
+    with _profile_catalog_lock:
+        if (
+            _profile_catalog_cache is not None
+            and _time.time() - _profile_catalog_ts < _PROFILE_INDEX_TTL
+        ):
+            return _profile_catalog_cache
+        models = _list_profile_model_keys_s3()
+        if models is not None:
+            _profile_catalog_cache = models
+            _profile_catalog_ts = _time.time()
+        return models
+
 
 def _discover_profiles_s3(model: Optional[str] = None) -> Optional[Dict]:
     """Discover available profiles from S3 by listing directories.
@@ -645,6 +709,17 @@ def _discover_profiles(
             ):
                 return cached_model_index[1]
 
+            # A prior broad model search can satisfy a later exact
+            # accelerator/model lookup without another S3 hierarchy walk.
+            requested_key = _normalize_separator(model).lower()
+            if not force_refresh:
+                for cached_at, cached_index in _profile_model_index_cache.values():
+                    if now - cached_at >= _PROFILE_INDEX_TTL:
+                        continue
+                    for key in cached_index:
+                        if _normalize_separator(key).lower() == requested_key:
+                            return {key: cached_index[key]}
+
         index = _discover_profiles_s3(model=model)
 
         if index:
@@ -695,17 +770,22 @@ async def _discover_profiles_async(
 
 def _get_cached_stats(cache_key: str) -> Optional[Dict[str, Dict]]:
     """Return stats from in-memory cache if still valid."""
-    if cache_key in _stats_cache:
-        ts, stats = _stats_cache[cache_key]
-        if (_time.time() - ts) < _STATS_CACHE_TTL:
-            return stats
-        del _stats_cache[cache_key]
+    with _stats_cache_lock:
+        if cache_key in _stats_cache:
+            ts, stats = _stats_cache[cache_key]
+            if (_time.time() - ts) < _STATS_CACHE_TTL:
+                return stats
+            del _stats_cache[cache_key]
     return None
 
 
 def _put_cached_stats(cache_key: str, stats: Dict[str, Dict]) -> None:
     """Store stats in the in-memory cache."""
-    _stats_cache[cache_key] = (_time.time(), stats)
+    with _stats_cache_lock:
+        if len(_stats_cache) >= _STATS_CACHE_MAX_ENTRIES and cache_key not in _stats_cache:
+            oldest = min(_stats_cache, key=lambda key: _stats_cache[key][0])
+            del _stats_cache[oldest]
+        _stats_cache[cache_key] = (_time.time(), stats)
 
 
 # ===================================================================== #
@@ -753,10 +833,55 @@ def _extract_kernel_stats(trace: dict) -> Dict[str, Dict]:
     return dict(stats)
 
 
+def _is_malformed_trace_cached(cache_key: str) -> bool:
+    """Return whether this artifact recently failed JSON/trace validation."""
+    now = _time.monotonic()
+    with _malformed_trace_cache_lock:
+        failed_at = _malformed_trace_cache.get(cache_key)
+        if failed_at is None:
+            return False
+        if now - failed_at < _MALFORMED_TRACE_CACHE_TTL:
+            return True
+        del _malformed_trace_cache[cache_key]
+        return False
+
+
+def _remember_malformed_trace(cache_key: str) -> None:
+    """Short-cache malformed artifacts to prevent repeat large downloads."""
+    now = _time.monotonic()
+    with _malformed_trace_cache_lock:
+        expired = [
+            key
+            for key, failed_at in _malformed_trace_cache.items()
+            if now - failed_at >= _MALFORMED_TRACE_CACHE_TTL
+        ]
+        for key in expired:
+            del _malformed_trace_cache[key]
+        _malformed_trace_cache[cache_key] = now
+
+
+def _forget_malformed_trace(cache_key: str) -> None:
+    with _malformed_trace_cache_lock:
+        _malformed_trace_cache.pop(cache_key, None)
+
+
+def _is_chrome_trace(trace: Any) -> bool:
+    """Check the minimum Chrome trace shape required by these tools."""
+    return isinstance(trace, dict) and isinstance(trace.get("traceEvents"), list)
+
+
 def _load_trace_from_s3(s3_key: str) -> Optional[dict]:
     """Download and parse a Chrome trace JSON from S3."""
     bucket = settings.S3_BUCKET
     if not bucket:
+        return None
+
+    cache_key = f"s3://{bucket}/{s3_key}"
+    if _is_malformed_trace_cached(cache_key):
+        logger.warning(
+            f"Skipping recently detected malformed S3 trace {cache_key}; "
+            f"will retry after {_MALFORMED_TRACE_CACHE_TTL}s"
+        )
         return None
 
     try:
@@ -766,11 +891,22 @@ def _load_trace_from_s3(s3_key: str) -> Optional[dict]:
         logger.info(f"Downloading trace from S3: s3://{bucket}/{s3_key}")
         response = s3.get_object(Bucket=bucket, Key=s3_key)
         body = response["Body"].read()
-        return json.loads(body)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Corrupted JSON in S3 trace {s3_key}: {exc}")
+        trace = json.loads(body)
+        if not _is_chrome_trace(trace):
+            _remember_malformed_trace(cache_key)
+            logger.warning(
+                f"Skipping invalid Chrome trace structure in {cache_key}: "
+                "expected an object with a traceEvents array"
+            )
+            return None
+        _forget_malformed_trace(cache_key)
+        return trace
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _remember_malformed_trace(cache_key)
+        logger.warning(f"Skipping malformed JSON in S3 trace {cache_key}: {exc}")
         return None
     except MemoryError:
+        _remember_malformed_trace(cache_key)
         logger.error(f"Out of memory loading S3 trace {s3_key}")
         return None
     except Exception as exc:
@@ -784,14 +920,33 @@ def _load_trace_from_local(filepath: Path) -> Optional[dict]:
         logger.warning(f"Trace file not found: {filepath}")
         return None
 
+    cache_key = f"file://{filepath.resolve()}"
+    if _is_malformed_trace_cached(cache_key):
+        logger.warning(
+            f"Skipping recently detected malformed local trace {filepath.name}; "
+            f"will retry after {_MALFORMED_TRACE_CACHE_TTL}s"
+        )
+        return None
+
     logger.info(f"Loading local trace: {filepath.name}")
     try:
         with open(filepath, "r") as fh:
-            return json.load(fh)
-    except json.JSONDecodeError as exc:
-        logger.error(f"Corrupted JSON in {filepath.name}: {exc}")
+            trace = json.load(fh)
+        if not _is_chrome_trace(trace):
+            _remember_malformed_trace(cache_key)
+            logger.warning(
+                f"Skipping invalid Chrome trace structure in {filepath.name}: "
+                "expected an object with a traceEvents array"
+            )
+            return None
+        _forget_malformed_trace(cache_key)
+        return trace
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _remember_malformed_trace(cache_key)
+        logger.warning(f"Skipping malformed JSON in {filepath.name}: {exc}")
         return None
     except MemoryError:
+        _remember_malformed_trace(cache_key)
         logger.error(f"Out of memory loading {filepath.name}")
         return None
     except Exception as exc:
@@ -894,6 +1049,15 @@ def _format_duration(us: float) -> str:
         return f"{us:.2f}\u00b5s"
 
 
+def _short_stack(stack: str, limit: int = 1_000) -> str:
+    """Retain both ends of a call path without flooding a tool response."""
+    if len(stack) <= limit:
+        return stack
+    marker = "\n...[call stack shortened]...\n"
+    head = (limit - len(marker)) // 2
+    return stack[:head] + marker + stack[-(limit - len(marker) - head):]
+
+
 def _filter_by_category(stats: Dict[str, Dict], category: Optional[str]) -> Dict[str, Dict]:
     """Filter stats to only include a specified category."""
     if category is None or category == "all":
@@ -932,12 +1096,57 @@ def _get_top_kernels(stats: Dict[str, Dict], n: int = 30, sort_by: str = "total_
         if call_stacks:
             primary_stack = max(call_stacks, key=call_stacks.get)
             entry["source_attribution"] = {
-                "call_stack": primary_stack,
+                "call_stack": _short_stack(primary_stack),
                 "confidence": "profile_stack_trace",
                 "unique_stacks": len(call_stacks),
             }
         result.append(entry)
 
+    return result
+
+
+def _profile_trace_summary(stats: Dict[str, Dict]) -> Dict[str, Any]:
+    """Return a compact summary for a valid side of an incomplete comparison."""
+    return {
+        "unique_kernels": len(stats),
+        "top_kernels": _get_top_kernels(stats, n=5),
+    }
+
+
+def _profile_trace_unavailable_result(
+    operation: str,
+    unavailable_traces: List[Dict[str, Any]],
+    available_trace_summaries: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    comparison: bool = False,
+) -> Dict[str, Any]:
+    """Build a non-throwing tool result when one or more trace files are unusable."""
+    summaries = available_trace_summaries or {}
+    unavailable_labels = [
+        f"{trace.get('version', 'unknown version')} rank {trace.get('rank', 0)}"
+        for trace in unavailable_traces
+    ]
+    unavailable_text = ", ".join(unavailable_labels) or "the requested profile"
+    result = {
+        "status": "partial" if summaries else "unavailable",
+        "operation_completed": False,
+        "unavailable_traces": unavailable_traces,
+        "available_trace_summaries": summaries,
+        "message": (
+            f"{operation} could not be completed because profiler trace data for "
+            f"{unavailable_text} is missing, malformed, or unreadable. No "
+            "cross-version result was inferred from the incomplete data."
+        ),
+        "agent_guidance": (
+            "Continue the user request with benchmark metrics, logs, or other "
+            "valid traces. Clearly disclose that profiler evidence is unavailable "
+            "for the listed trace and do not infer a profiler comparison."
+        ),
+    }
+    if comparison:
+        result["comparison_performed"] = False
+    else:
+        result["analysis_performed"] = False
     return result
 
 
@@ -1399,6 +1608,9 @@ def _build_structured_root_causes(
 
 _raw_events_cache: Dict[str, Tuple[float, List[Dict]]] = {}
 _RAW_EVENTS_CACHE_TTL: int = 300
+_RAW_EVENTS_CACHE_MAX_ENTRIES = 2
+_RAW_EVENTS_CACHE_MAX_EVENTS = 25_000
+_raw_events_cache_lock = threading.Lock()
 
 
 def _load_raw_events(
@@ -1416,11 +1628,12 @@ def _load_raw_events(
     JSON from S3 or local storage.
     """
     cache_key = f"raw:{model}/{tp}/{version}/{workload}/rank{rank}"
-    if cache_key in _raw_events_cache:
-        ts, evts = _raw_events_cache[cache_key]
-        if (_time.time() - ts) < _RAW_EVENTS_CACHE_TTL:
-            return evts
-        del _raw_events_cache[cache_key]
+    with _raw_events_cache_lock:
+        if cache_key in _raw_events_cache:
+            ts, evts = _raw_events_cache[cache_key]
+            if (_time.time() - ts) < _RAW_EVENTS_CACHE_TTL:
+                return evts
+            del _raw_events_cache[cache_key]
 
     entry = (
         index.get(model, {})
@@ -1441,7 +1654,12 @@ def _load_raw_events(
         return None
 
     evts = _extract_raw_events(trace)
-    _raw_events_cache[cache_key] = (_time.time(), evts)
+    if len(evts) <= _RAW_EVENTS_CACHE_MAX_EVENTS:
+        with _raw_events_cache_lock:
+            if len(_raw_events_cache) >= _RAW_EVENTS_CACHE_MAX_ENTRIES and cache_key not in _raw_events_cache:
+                oldest = min(_raw_events_cache, key=lambda key: _raw_events_cache[key][0])
+                del _raw_events_cache[oldest]
+            _raw_events_cache[cache_key] = (_time.time(), evts)
     return evts
 
 
@@ -1581,7 +1799,7 @@ async def analyze_pytorch_profile(
     TOOL_NAME=analyze_pytorch_profile
     DISPLAY_NAME=Analyze PyTorch Profile
     USECASE=Analyze PyTorch profiler traces from vLLM benchmark runs to understand kernel-level performance. Use to identify slow operations, see time breakdown by category, and understand inference bottlenecks.
-    INSTRUCTIONS=1. Specify a vLLM version (e.g., "0.21.0"), 2. Specify model, tp, and workload to select the profile, 3. Optionally specify a rank or set aggregate_ranks=True, 4. Use category filter to focus on specific operation types
+    INSTRUCTIONS=1. Specify a vLLM version (e.g., "0.21.0"), 2. Specify model, tp, and workload to select the profile, 3. Optionally specify a rank or set aggregate_ranks=True, 4. Use category filter to focus on specific operation types. If a trace is malformed or unreadable, return the partial/unavailable result and continue with other evidence.
     INPUT_DESCRIPTION=version (str): vLLM version like "0.21.0"; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int, optional): GPU rank, defaults to 0; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of top kernels; category (str, optional): Filter by category
     OUTPUT_DESCRIPTION=Dictionary with top kernels by time, category breakdown, and summary statistics
     EXAMPLES=analyze_pytorch_profile(version="0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -1610,6 +1828,7 @@ async def analyze_pytorch_profile(
         - summary: Overall statistics
     """
     try:
+        top_n = max(1, min(top_n, 30))
         model_key, matched_tp, matched_version, matched_workload, error, index = await _resolve_profile(
             model, tp, version, workload
         )
@@ -1627,7 +1846,7 @@ async def analyze_pytorch_profile(
             stats_list = []
             loaded_ranks = []
             for r in available_ranks:
-                s = _load_or_extract_stats(
+                s = await asyncio.to_thread(_load_or_extract_stats,
                     model_key, matched_tp, matched_version, matched_workload, r,
                     force_reload, index=index,
                 )
@@ -1636,13 +1855,32 @@ async def analyze_pytorch_profile(
                     loaded_ranks.append(r)
 
             if not stats_list:
-                return {
-                    "status": "error",
-                    "message": f"No trace files could be loaded for {display_name} {matched_tp} {matched_version} {matched_workload}",
-                }
+                return _profile_trace_unavailable_result(
+                    "PyTorch profile analysis",
+                    [
+                        {
+                            "model": display_name,
+                            "tp": matched_tp,
+                            "version": matched_version,
+                            "workload": matched_workload,
+                            "rank": r,
+                        }
+                        for r in available_ranks
+                    ] or [{
+                        "model": display_name,
+                        "tp": matched_tp,
+                        "version": matched_version,
+                        "workload": matched_workload,
+                        "rank": rank if rank is not None else 0,
+                    }],
+                )
 
             stats = _merge_stats(stats_list)
-            scope = f"all ranks ({len(loaded_ranks)} loaded)"
+            scope = (
+                f"{len(loaded_ranks)} of {len(available_ranks)} ranks"
+                if len(loaded_ranks) < len(available_ranks)
+                else f"all {len(loaded_ranks)} ranks"
+            )
         else:
             r = rank if rank is not None else 0
             if r not in available_ranks:
@@ -1651,15 +1889,21 @@ async def analyze_pytorch_profile(
                     "message": f"Rank {r} not available for {display_name} {matched_tp} {matched_version} {matched_workload}. Available ranks: {available_ranks}",
                 }
 
-            stats = _load_or_extract_stats(
+            stats = await asyncio.to_thread(_load_or_extract_stats,
                 model_key, matched_tp, matched_version, matched_workload, r,
                 force_reload, index=index,
             )
             if not stats:
-                return {
-                    "status": "error",
-                    "message": f"No trace file found for {display_name} {matched_tp} {matched_version} {matched_workload} rank {r}",
-                }
+                return _profile_trace_unavailable_result(
+                    "PyTorch profile analysis",
+                    [{
+                        "model": display_name,
+                        "tp": matched_tp,
+                        "version": matched_version,
+                        "workload": matched_workload,
+                        "rank": r,
+                    }],
+                )
             scope = f"rank {r}"
 
         filtered_stats = _filter_by_category(stats, category)
@@ -1669,7 +1913,7 @@ async def analyze_pytorch_profile(
         total_time = sum(d["total_dur"] for d in stats.values())
         filtered_time = sum(d["total_dur"] for d in filtered_stats.values())
 
-        return {
+        result = {
             "status": "success",
             "version": matched_version,
             "model": display_name,
@@ -1698,6 +1942,18 @@ async def analyze_pytorch_profile(
                 "note": model_info["note"],
             },
         }
+        if aggregate_ranks and len(loaded_ranks) < len(available_ranks):
+            skipped_ranks = sorted(set(available_ranks) - set(loaded_ranks))
+            result["status"] = "partial"
+            result["warnings"] = [
+                f"Skipped malformed or unreadable profiler trace(s) for rank(s) {skipped_ranks}; "
+                f"results include {len(loaded_ranks)} of {len(available_ranks)} available ranks."
+            ]
+            result["agent_guidance"] = (
+                "Continue with the valid-rank profile summary and other benchmark/log evidence; "
+                "disclose that some rank traces were skipped."
+            )
+        return result
 
     except Exception as exc:
         logger.error(f"Error analyzing PyTorch profile: {exc}")
@@ -1725,7 +1981,7 @@ async def compare_pytorch_profiles(
     TOOL_NAME=compare_pytorch_profiles
     DISPLAY_NAME=Compare PyTorch Profiles
     USECASE=Compare kernel performance between two vLLM versions to identify regressions and improvements. Use this when investigating performance changes between releases or trying to understand why one version is slower/faster.
-    INSTRUCTIONS=1. Specify two versions to compare, 2. Specify model, tp, and workload to select profiles, 3. Results show which kernels got slower (regressions) and faster (improvements)
+    INSTRUCTIONS=1. Specify two versions to compare, 2. Specify model, tp, and workload to select profiles, 3. Results show which kernels got slower (regressions) and faster (improvements). If a trace is malformed or unreadable, report partial/unavailable profiler evidence and continue with other evidence; do not infer missing deltas.
     INPUT_DESCRIPTION=version1 (str): First/baseline version; version2 (str): Second/comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int, optional): GPU rank; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of results; category (str, optional): Filter by category
     OUTPUT_DESCRIPTION=Dictionary with regressions, improvements, new/removed kernels, and summary comparison
     EXAMPLES=compare_pytorch_profiles("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -1755,6 +2011,7 @@ async def compare_pytorch_profiles(
         - summary: Overall comparison statistics
     """
     try:
+        top_n = max(1, min(top_n, 30))
         # force_reload controls trace-stat extraction, not profile-index refresh.
         index = await _discover_profiles_async(model=model)
 
@@ -1835,9 +2092,12 @@ async def compare_pytorch_profiles(
         num_ranks = len(ranks_v1)
         model_info = _get_model_info(model_key, num_ranks)
 
-        def load_version_stats(version: str, ranks: List[int]) -> Tuple[Optional[Dict], str]:
+        def load_version_stats(
+            version: str, ranks: List[int]
+        ) -> Tuple[Optional[Dict], str, List[int]]:
             if aggregate_ranks:
                 parts = []
+                loaded_ranks = []
                 for r in ranks:
                     s = _load_or_extract_stats(
                         model_key, matched_tp, version, matched_workload, r,
@@ -1845,23 +2105,53 @@ async def compare_pytorch_profiles(
                     )
                     if s:
                         parts.append(s)
+                        loaded_ranks.append(r)
+                unavailable_ranks = sorted(set(ranks) - set(loaded_ranks))
                 if parts:
-                    return _merge_stats(parts), f"all {len(parts)} ranks"
-                return None, ""
+                    scope = (
+                        f"{len(loaded_ranks)} of {len(ranks)} ranks"
+                        if unavailable_ranks
+                        else f"all {len(loaded_ranks)} ranks"
+                    )
+                    return _merge_stats(parts), scope, unavailable_ranks
+                return None, "", unavailable_ranks or list(ranks)
             else:
                 r = rank if rank is not None else 0
-                return _load_or_extract_stats(
+                stats = _load_or_extract_stats(
                     model_key, matched_tp, version, matched_workload, r,
                     force_reload, index=index,
-                ), f"rank {r}"
+                )
+                return stats, f"rank {r}", [] if stats else [r]
 
-        stats1, scope1 = load_version_stats(mv1, ranks_v1)
-        stats2, scope2 = load_version_stats(mv2, ranks_v2)
+        stats1, scope1, unavailable_ranks1 = await asyncio.to_thread(load_version_stats, mv1, ranks_v1)
+        stats2, scope2, unavailable_ranks2 = await asyncio.to_thread(load_version_stats, mv2, ranks_v2)
 
-        if not stats1:
-            return {"status": "error", "message": f"No trace files found for {display_name} {matched_tp} {mv1} {matched_workload}"}
-        if not stats2:
-            return {"status": "error", "message": f"No trace files found for {display_name} {matched_tp} {mv2} {matched_workload}"}
+        if not stats1 or not stats2:
+            unavailable_traces = []
+            available_summaries = {}
+            for version_name, stats, unavailable_ranks in (
+                (mv1, stats1, unavailable_ranks1),
+                (mv2, stats2, unavailable_ranks2),
+            ):
+                if stats:
+                    available_summaries[version_name] = _profile_trace_summary(stats)
+                    continue
+                for unavailable_rank in unavailable_ranks or [rank if rank is not None else 0]:
+                    unavailable_traces.append({
+                        "model": display_name,
+                        "tp": matched_tp,
+                        "version": version_name,
+                        "workload": matched_workload,
+                        "rank": unavailable_rank,
+                    })
+            return _profile_trace_unavailable_result(
+                "PyTorch profile comparison",
+                unavailable_traces,
+                available_summaries,
+                comparison=True,
+            )
+
+        incomplete_rank_data = bool(unavailable_ranks1 or unavailable_ranks2)
 
         # Apply category filter
         filtered1 = _filter_by_category(stats1, category)
@@ -1915,7 +2205,7 @@ async def compare_pytorch_profiles(
                 if active_stacks:
                     primary_stack = max(active_stacks, key=active_stacks.get)
                     diff_entry["source_attribution"] = {
-                        "call_stack": primary_stack,
+                        "call_stack": _short_stack(primary_stack),
                         "confidence": "profile_stack_trace",
                     }
 
@@ -1986,8 +2276,9 @@ async def compare_pytorch_profiles(
         event_counts_v1 = _event_counts(stats1)
         event_counts_v2 = _event_counts(stats2)
 
-        return {
-            "status": "success",
+        result = {
+            "status": "partial" if incomplete_rank_data else "success",
+            "comparison_performed": True,
             "comparison": {
                 "version1": mv1,
                 "version2": mv2,
@@ -2040,10 +2331,28 @@ async def compare_pytorch_profiles(
                 "Use map_kernel_to_vllm_code to find source files for top regressions",
                 f"Use compare_vllm_versions('{mv1}', '{mv2}') to see release notes between versions",
                 "Use get_vllm_pull_request to investigate specific PRs mentioned in release notes",
-                f"Use fetch_vllm_source to read actual implementation of changed kernels",
+                "Use fetch_vllm_source to read actual implementation of changed kernels",
                 f"Use get_vllm_code_diff('{mv1}', '{mv2}', '<file_path>') to see exact code changes",
             ],
         }
+        if incomplete_rank_data:
+            warnings = []
+            if unavailable_ranks1:
+                warnings.append(
+                    f"Skipped malformed or unreadable {mv1} trace(s) for rank(s) "
+                    f"{unavailable_ranks1}; results include {scope1}."
+                )
+            if unavailable_ranks2:
+                warnings.append(
+                    f"Skipped malformed or unreadable {mv2} trace(s) for rank(s) "
+                    f"{unavailable_ranks2}; results include {scope2}."
+                )
+            result["warnings"] = warnings
+            result["agent_guidance"] = (
+                "Use the computed comparison only for the valid traces represented in each scope. "
+                "Disclose skipped traces and avoid claims about their missing ranks."
+            )
+        return result
 
     except Exception as exc:
         logger.error(f"Error comparing PyTorch profiles: {exc}")
@@ -2072,7 +2381,7 @@ async def analyze_performance_insights(
     TOOL_NAME=analyze_performance_insights
     DISPLAY_NAME=Analyze Performance Insights
     USECASE=Get expert-level analysis explaining WHY performance changed between versions. Use this when you need to understand the root cause of performance differences, especially when benchmark results seem to contradict profile data.
-    INSTRUCTIONS=1. Provide two versions to compare, 2. Specify model, tp, and workload, 3. Set benchmark_shows_improvement based on your actual benchmark results
+    INSTRUCTIONS=1. Provide two versions to compare, 2. Specify model, tp, and workload, 3. Set benchmark_shows_improvement based on your actual benchmark results. If a trace is malformed or unreadable, report profiler evidence as partial/unavailable and continue with benchmark/log evidence.
     INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0); benchmark_shows_improvement (bool): Whether actual benchmarks show version2 is faster
     OUTPUT_DESCRIPTION=Dictionary with deep analysis including compute vs overhead breakdown, synchronization analysis, kernel fusion detection, and expert conclusions
     EXAMPLES=analyze_performance_insights("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -2113,15 +2422,33 @@ async def analyze_performance_insights(
 
         display_name = _get_display_name(model_key)
 
-        stats1 = _load_or_extract_stats(
+        stats1 = await asyncio.to_thread(_load_or_extract_stats,
             model_key, matched_tp, mv1, matched_workload, rank, index=index
         )
-        stats2 = _load_or_extract_stats(
+        stats2 = await asyncio.to_thread(_load_or_extract_stats,
             model_key, matched_tp, mv2, matched_workload, rank, index=index
         )
 
         if not stats1 or not stats2:
-            return {"status": "error", "message": "Missing profile data for comparison"}
+            unavailable_traces = []
+            available_summaries = {}
+            for version_name, stats in ((mv1, stats1), (mv2, stats2)):
+                if stats:
+                    available_summaries[version_name] = _profile_trace_summary(stats)
+                else:
+                    unavailable_traces.append({
+                        "model": display_name,
+                        "tp": matched_tp,
+                        "version": version_name,
+                        "workload": matched_workload,
+                        "rank": rank,
+                    })
+            return _profile_trace_unavailable_result(
+                "Performance insights analysis",
+                unavailable_traces,
+                available_summaries,
+                comparison=True,
+            )
 
         # 1. Compute vs Overhead Analysis
         def categorize_time(stats: Dict) -> Dict[str, float]:
@@ -2426,7 +2753,10 @@ async def analyze_performance_insights(
         return {"status": "error", "message": f"Failed to analyze: {exc}"}
 
 
-async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]:
+async def list_available_profiles(
+    model: Optional[str] = None, offset: int = 0, max_profiles: int = 50,
+    include_details: bool = False,
+) -> Dict[str, Any]:
     """List all available PyTorch profile traces.
     
     Discover what profile data is available for analysis. Returns information
@@ -2435,8 +2765,8 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
     TOOL_NAME=list_available_profiles
     DISPLAY_NAME=List Available Profiles
     USECASE=Discover what PyTorch profile traces are available for analysis. Use this first to see which models, TP configs, versions, and workloads have profile data.
-    INSTRUCTIONS=Call without arguments to see all available profiles across all models, or specify a model to filter
-    INPUT_DESCRIPTION=model (str, optional): Filter by model name. If not specified, shows all models.
+    INSTRUCTIONS=Call without arguments for a fast model catalog. Specify a model to see its TP/version/workload details. Avoid repeated unfiltered calls. Use include_details only when full hierarchy pagination is actually needed.
+    INPUT_DESCRIPTION=model (str, optional): Filter by model name; offset (int): Skip model folders in catalog mode or profile entries in detail mode; max_profiles (int): Page size, at most 50; include_details (bool): Request full hierarchy even without a model (slow on S3).
     OUTPUT_DESCRIPTION=Dictionary with available models, tp configs, versions, workloads, ranks, and file information
     EXAMPLES=list_available_profiles(), list_available_profiles(model="deepseek")
     PREREQUISITES=None
@@ -2449,6 +2779,24 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
         - available_models: List of model names with profiles
     """
     try:
+        if offset < 0 or max_profiles < 1:
+            return {"status": "error", "message": "offset must be non-negative and max_profiles must be positive"}
+        page_size = min(max_profiles, 50)
+        if model is None and not include_details and settings.S3_BUCKET:
+            catalog = await asyncio.to_thread(_profile_model_catalog)
+            if catalog is None:
+                return {"status": "error", "message": "Could not list profile model folders from S3."}
+            page = catalog[offset:offset + page_size]
+            return {
+                "status": "success",
+                "available_models": page,
+                "models": {},
+                "total_models": len(catalog),
+                "offset": offset,
+                "next_offset": offset + len(page) if offset + len(page) < len(catalog) else None,
+                "data_source": "S3",
+                "message": "Model catalog only; specify model for TP, version, and workload details.",
+            }
         index = await _discover_profiles_async(model=model)
 
         if not index:
@@ -2480,6 +2828,7 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
         models_data: Dict[str, Any] = {}
         available: List[str] = []
         total_profiles = 0
+        shown_profiles = 0
 
         for model_key, tp_data in sorted(models_to_show.items()):
             available.append(model_key)
@@ -2490,10 +2839,13 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                 for version_name, workloads in sorted(versions.items()):
                     workload_list: List[Dict] = []
                     for workload_name, ranks in sorted(workloads.items()):
+                        total_profiles += 1
+                        if not offset <= total_profiles - 1 < offset + page_size:
+                            continue
                         rank_list = sorted(ranks.keys())
                         first_entry = ranks[rank_list[0]]
                         size_mb = first_entry.get("size_bytes", 0) / (1024 * 1024)
-                        total_profiles += 1
+                        shown_profiles += 1
                         workload_list.append({
                             "workload": workload_name,
                             "ranks_available": rank_list,
@@ -2502,25 +2854,28 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
                             "example_file": first_entry["filename"],
                             "file_size_approx_mb": round(size_mb, 1),
                         })
-                    version_list.append({
-                        "version": version_name,
-                        "workloads": workload_list,
-                        "available_workloads": sorted(workloads.keys()),
+                    if workload_list:
+                        version_list.append({
+                            "version": version_name,
+                            "workloads": workload_list,
+                            "available_workloads": sorted(workloads.keys()),
+                        })
+                if version_list:
+                    tp_list.append({
+                        "tp": tp_name,
+                        "versions": version_list,
+                        "available_versions": sorted(versions.keys()),
                     })
-                tp_list.append({
-                    "tp": tp_name,
-                    "versions": version_list,
-                    "available_versions": sorted(versions.keys()),
-                })
 
             model_info = _get_model_info(model_key, 1)
-            models_data[model_key] = {
-                "display_name": model_info["display_name"],
-                "model_id": model_info["model_id"],
-                "accelerator": _key_accelerator(model_key),
-                "available_tps": sorted(tp_data.keys()),
-                "tp_configs": tp_list,
-            }
+            if tp_list:
+                models_data[model_key] = {
+                    "display_name": model_info["display_name"],
+                    "model_id": model_info["model_id"],
+                    "accelerator": _key_accelerator(model_key),
+                    "available_tps": sorted(tp_data.keys()),
+                    "tp_configs": tp_list,
+                }
 
         data_source = "S3" if settings.S3_BUCKET else "local"
 
@@ -2528,6 +2883,10 @@ async def list_available_profiles(model: Optional[str] = None) -> Dict[str, Any]
             "status": "success",
             "available_models": available,
             "models": models_data,
+            "total_profiles": total_profiles,
+            "profiles_shown": shown_profiles,
+            "offset": offset,
+            "next_offset": offset + shown_profiles if offset + shown_profiles < total_profiles else None,
             "data_source": data_source,
             "message": (
                 f"Found profiles for {len(available)} model(s) with "
@@ -2562,7 +2921,7 @@ async def get_kernel_call_stacks(
     TOOL_NAME=get_kernel_call_stacks
     DISPLAY_NAME=Get Kernel Call Stacks
     USECASE=Look up the real Python/C++ call path for a kernel from a profile trace. Use this to get ground-truth source attribution for any kernel identified by analyze_pytorch_profile or compare_pytorch_profiles. Only available for profiles collected with stack traces enabled.
-    INSTRUCTIONS=1. Provide a kernel name from profiler output, 2. Specify the version and optionally model/tp/workload, 3. Returns deduplicated call stacks ranked by frequency
+    INSTRUCTIONS=1. Provide a kernel name from profiler output, 2. Specify the version and optionally model/tp/workload, 3. Returns deduplicated call stacks ranked by frequency. If the trace is malformed or unreadable, report the stack evidence as unavailable and continue with other evidence.
     INPUT_DESCRIPTION=kernel_name (str): Exact kernel name from profiler; version (str): vLLM version; model (str, optional): Model name; tp (str, optional): TP config; workload (str, optional): ISL/OSL workload; rank (int): GPU rank (default 0)
     OUTPUT_DESCRIPTION=Dictionary with call stacks ranked by invocation count, or a message indicating stacks are not available
     EXAMPLES=get_kernel_call_stacks("fused_moe_kernel", "0.22.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -2590,12 +2949,21 @@ async def get_kernel_call_stacks(
 
         display_name = _get_display_name(model_key)
 
-        stats = _load_or_extract_stats(
+        stats = await asyncio.to_thread(_load_or_extract_stats,
             model_key, matched_tp, matched_version, matched_workload, rank,
             index=index,
         )
         if not stats:
-            return {"status": "error", "message": f"No profile data for {display_name} {matched_version} rank {rank}"}
+            return _profile_trace_unavailable_result(
+                "Kernel call-stack lookup",
+                [{
+                    "model": display_name,
+                    "tp": matched_tp,
+                    "version": matched_version,
+                    "workload": matched_workload,
+                    "rank": rank,
+                }],
+            )
 
         if kernel_name not in stats:
             similar = [k for k in stats if kernel_name.lower() in k.lower()][:10]
@@ -2634,7 +3002,7 @@ async def get_kernel_call_stacks(
         stacks_result = []
         for stack_str, count in sorted_stacks[:10]:
             stacks_result.append({
-                "call_stack": stack_str,
+                "call_stack": _short_stack(stack_str, limit=2_000),
                 "invocation_count": count,
                 "percentage": round(count / total_invocations * 100, 1),
             })
@@ -2664,7 +3032,9 @@ async def get_kernel_call_stacks(
         return {"status": "error", "message": f"Failed to get call stacks: {exc}"}
 
 
-async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
+async def check_profile_status(
+    model: Optional[str] = None, include_workloads: bool = False
+) -> Dict[str, Any]:
     """Quick diagnostic check of profile data availability.
     
     Returns immediately with information about available profiles and data
@@ -2673,9 +3043,9 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
     TOOL_NAME=check_profile_status
     DISPLAY_NAME=Check Profile Status
     USECASE=Quick diagnostic check to see if profile data is available. Use this first to verify setup before running expensive comparisons.
-    INSTRUCTIONS=Call without arguments to check all models, or specify a model name
-    INPUT_DESCRIPTION=model (str, optional): Model to check. If not specified, checks all models.
-    OUTPUT_DESCRIPTION=Dictionary with profile availability for each model
+    INSTRUCTIONS=Call without arguments for a compact readiness summary; specify a model to narrow it. Use list_available_profiles for paginated trace details.
+    INPUT_DESCRIPTION=model (str, optional): Model to check; include_workloads (bool): Include full workload/rank details when needed.
+    OUTPUT_DESCRIPTION=Dictionary with profile readiness and version/workload counts for each model
     EXAMPLES=check_profile_status(), check_profile_status(model="deepseek")
     PREREQUISITES=None
     RELATED_TOOLS=list_available_profiles, analyze_pytorch_profile
@@ -2721,18 +3091,20 @@ async def check_profile_status(model: Optional[str] = None) -> Dict[str, Any]:
                 version_status: Dict[str, Any] = {}
                 for vname, workloads in sorted(versions.items()):
                     workload_status: Dict[str, Any] = {}
-                    for wname, ranks in sorted(workloads.items()):
-                        rank_list = sorted(ranks.keys())
-                        first_entry = ranks[rank_list[0]]
-                        workload_status[wname] = {
-                            "ranks_available": rank_list,
-                            "rank_count": len(rank_list),
-                            "source": first_entry["source"],
-                            "file_size_mb": round(first_entry.get("size_bytes", 0) / (1024 * 1024), 1),
-                            "ready": True,
-                        }
+                    if include_workloads:
+                        for wname, ranks in sorted(workloads.items()):
+                            rank_list = sorted(ranks.keys())
+                            first_entry = ranks[rank_list[0]]
+                            workload_status[wname] = {
+                                "ranks_available": rank_list,
+                                "rank_count": len(rank_list),
+                                "source": first_entry["source"],
+                                "file_size_mb": round(first_entry.get("size_bytes", 0) / (1024 * 1024), 1),
+                                "ready": True,
+                            }
                     version_status[vname] = {
-                        "workloads": workload_status,
+                        "workload_count": len(workloads),
+                        **({"workloads": workload_status} if include_workloads else {}),
                         "ready": True,
                     }
                     total_versions += 1
@@ -2788,7 +3160,7 @@ async def analyze_trace_structure(
     TOOL_NAME=analyze_trace_structure
     DISPLAY_NAME=Analyze Trace Structure
     USECASE=Perform block-level structural analysis of a PyTorch profiler trace. Use this to understand the temporal structure of inference: how many transformer blocks were captured, what a single representative block looks like (operations in order, per-stream), and where overhead lives (inter-block gaps, intra-block idle).
-    INSTRUCTIONS=1. Specify a vLLM version, model, tp, and workload, 2. The tool detects transformer block boundaries automatically, 3. It picks a median-wall-time block as representative, 4. It returns ordered pipeline breakdown, stream analysis, and overhead accounting
+    INSTRUCTIONS=1. Specify a vLLM version, model, tp, and workload, 2. The tool detects transformer block boundaries automatically, 3. It picks a median-wall-time block as representative, 4. It returns ordered pipeline breakdown, stream analysis, and overhead accounting. If the trace is malformed or unreadable, report profiler evidence as unavailable and continue with other evidence.
     INPUT_DESCRIPTION=version (str): vLLM version like "0.21.0"; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0)
     OUTPUT_DESCRIPTION=Dictionary with block segmentation, median block detail, stream analysis, ordered pipeline breakdown, and overhead metrics
     EXAMPLES=analyze_trace_structure("0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -2816,15 +3188,21 @@ async def analyze_trace_structure(
 
         display_name = _get_display_name(model_key)
 
-        raw_events = _load_raw_events(
+        raw_events = await asyncio.to_thread(_load_raw_events,
             model_key, matched_tp, matched_version, matched_workload, rank,
             index=index,
         )
         if not raw_events:
-            return {
-                "status": "error",
-                "message": f"No trace found for {display_name} {matched_version} rank {rank}",
-            }
+            return _profile_trace_unavailable_result(
+                "Trace structure analysis",
+                [{
+                    "model": display_name,
+                    "tp": matched_tp,
+                    "version": matched_version,
+                    "workload": matched_workload,
+                    "rank": rank,
+                }],
+            )
 
         # Block segmentation
         blocks = _detect_blocks(raw_events)
@@ -2914,7 +3292,7 @@ async def compare_trace_structures(
     TOOL_NAME=compare_trace_structures
     DISPLAY_NAME=Compare Trace Structures
     USECASE=Compare the temporal structure of two vLLM versions at the transformer block level. Use this for deep root-cause analysis: it compares median blocks operation-by-operation (preserving execution order), analyses stream overlap changes, computes overhead deltas, and produces structured root-cause objects with per-kernel evidence and suggested source files.
-    INSTRUCTIONS=1. Specify two vLLM versions, model, tp, and workload, 2. The tool segments both traces into blocks, picks median blocks, and compares them structurally
+    INSTRUCTIONS=1. Specify two vLLM versions, model, tp, and workload, 2. The tool segments both traces into blocks, picks median blocks, and compares them structurally. If either trace is malformed or unreadable, report a partial/unavailable result and continue with other evidence; do not infer missing structural deltas.
     INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int): GPU rank (default 0)
     OUTPUT_DESCRIPTION=Dictionary with per-version median block details, ordered pipeline comparison, stream analysis diff, overhead comparison, and structured root causes
     EXAMPLES=compare_trace_structures("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -2954,16 +3332,34 @@ async def compare_trace_structures(
             wl_v2 = sorted(tp_data.get(mv2, {}).keys())
             return {"status": "error", "message": f"Workload '{matched_workload}' not found for {mv2}. Available: {wl_v2}"}
 
-        raw1 = _load_raw_events(
+        raw1 = await asyncio.to_thread(_load_raw_events,
             model_key, matched_tp, mv1, matched_workload, rank, index=index
         )
-        raw2 = _load_raw_events(
+        raw2 = await asyncio.to_thread(_load_raw_events,
             model_key, matched_tp, mv2, matched_workload, rank, index=index
         )
-        if not raw1:
-            return {"status": "error", "message": f"No trace found for {display_name} {mv1} rank {rank}"}
-        if not raw2:
-            return {"status": "error", "message": f"No trace found for {display_name} {mv2} rank {rank}"}
+        if not raw1 or not raw2:
+            unavailable_traces = []
+            available_summaries = {}
+            for version_name, events in ((mv1, raw1), (mv2, raw2)):
+                if events:
+                    available_summaries[version_name] = {
+                        "trace_events": len(events),
+                    }
+                else:
+                    unavailable_traces.append({
+                        "model": display_name,
+                        "tp": matched_tp,
+                        "version": version_name,
+                        "workload": matched_workload,
+                        "rank": rank,
+                    })
+            return _profile_trace_unavailable_result(
+                "Trace structure comparison",
+                unavailable_traces,
+                available_summaries,
+                comparison=True,
+            )
 
         # Block segmentation + median selection
         blocks1 = _detect_blocks(raw1)
