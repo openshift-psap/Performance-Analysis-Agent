@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from psap_mcp_server.src.tools.benchmark_row_selection import select_latest_run_rows
 from psap_mcp_server.src.tools.grafana_metrics_tool import query_grafana_metrics
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.src.tools.profile_utils import parse_profile
@@ -153,6 +154,8 @@ async def calculate_energy_efficiency(
                         & (filtered_df["output toks"] == output_tokens)
                     ]
                     filters_applied["profile"] = profile
+
+        filtered_df = select_latest_run_rows(filtered_df)
 
         if filtered_df.empty:
             return {

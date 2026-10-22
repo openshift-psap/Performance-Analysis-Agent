@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from psap_mcp_server.src.tools.benchmark_row_selection import select_latest_run_rows
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
@@ -69,6 +70,9 @@ async def analyze_regression(
         v1_df = df[df["version"].str.contains(version1, case=False, na=False)].copy()
         v2_df = df[df["version"].str.contains(version2, case=False, na=False)].copy()
 
+        v1_df = select_latest_run_rows(v1_df)
+        v2_df = select_latest_run_rows(v2_df)
+
         if v1_df.empty or v2_df.empty:
             return {
                 "status": "error",
@@ -123,6 +127,8 @@ async def analyze_regression(
         # Create matching key for comparison
         # Use actual column names from CSV: "prompt toks", "output toks"
         match_cols = ["model", "accelerator", "TP", "prompt toks", "output toks"]
+        if "intended concurrency" in v1_df.columns and "intended concurrency" in v2_df.columns:
+            match_cols.append("intended concurrency")
         v1_df["match_key"] = v1_df[match_cols].astype(str).agg("-".join, axis=1)
         v2_df["match_key"] = v2_df[match_cols].astype(str).agg("-".join, axis=1)
 
@@ -157,6 +163,12 @@ async def analyze_regression(
                 "profile": profile_str,
                 "metrics_changed": {},
             }
+            if "intended concurrency" in v1_row.index:
+                comparison["intended_concurrency"] = (
+                    int(v1_row["intended concurrency"])
+                    if pd.notna(v1_row["intended concurrency"])
+                    else None
+                )
 
             has_improvement = False
             has_regression = False

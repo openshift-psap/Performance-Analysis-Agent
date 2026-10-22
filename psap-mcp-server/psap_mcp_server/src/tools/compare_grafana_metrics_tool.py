@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from .benchmark_row_selection import select_latest_run_rows
 from .grafana_metrics_tool import query_grafana_metrics
 from .performance_data_loader import load_rhaiis_data
 from .profile_utils import parse_profile
@@ -84,18 +85,23 @@ async def compare_grafana_metrics(
             if len(filtered) == 0:
                 return None, f"No data found for {run_label} with the specified parameters."
             
-            # Check if UUID and time fields are populated
-            valid_runs = filtered[
-                pd.notna(filtered['uuid']) &
-                pd.notna(filtered['guidellm_start_time_ms']) &
-                pd.notna(filtered['guidellm_end_time_ms'])
+            # Choose the newest benchmark run before checking whether that
+            # run has Grafana time metadata. Do not silently fall back to an
+            # older run just because it has more complete metrics metadata.
+            latest_runs = select_latest_run_rows(filtered)
+            valid_runs = latest_runs[
+                pd.notna(latest_runs['uuid']) &
+                pd.notna(latest_runs['guidellm_start_time_ms']) &
+                pd.notna(latest_runs['guidellm_end_time_ms'])
             ]
             
             if len(valid_runs) == 0:
                 return None, f"No Grafana data available for {run_label}. The run exists but doesn't have GPU metrics."
             
-            # Take the first valid run (or you could add logic to select based on concurrency)
-            return valid_runs.iloc[0]['uuid'], None
+            valid_runs = valid_runs.sort_values(
+                "guidellm_start_time_ms", ascending=True, na_position="first"
+            )
+            return valid_runs.iloc[-1]["uuid"], None
         
         # Get UUIDs for both runs
         if not run1_uuid:

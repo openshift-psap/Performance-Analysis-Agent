@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from psap_mcp_server.src.tools.benchmark_row_selection import select_latest_run_rows
 from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.src.tools.profile_utils import parse_profile
 from psap_mcp_server.utils.pylogger import get_python_logger
@@ -202,6 +203,9 @@ async def compare_configurations(
                     except (ValueError, AttributeError, KeyError):
                         pass
 
+            # Select a complete, newest run cohort before comparing concurrency
+            # points; never deduplicate individual rows by concurrency.
+            filtered_df = select_latest_run_rows(filtered_df)
             config_filtered_dfs.append((i, config, filtered_df))
 
         # Compute concurrency cap: min of max concurrencies across non-empty configs.
@@ -541,7 +545,12 @@ async def compare_versions_comprehensive(
         if tp is not None:
             df_baseline = df_baseline[df_baseline["TP"] == tp]
             df_newer = df_newer[df_newer["TP"] == tp]
-        
+
+        # Keep the newest run cohort for each configuration, including every
+        # concurrency row that belongs to that run.
+        df_baseline = select_latest_run_rows(df_baseline)
+        df_newer = select_latest_run_rows(df_newer)
+
         if df_baseline.empty or df_newer.empty:
             return {
                 "status": "error",
