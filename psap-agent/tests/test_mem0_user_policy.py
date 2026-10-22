@@ -11,7 +11,8 @@ from psap_agent.src.settings import settings
 
 
 @pytest.mark.asyncio
-async def test_forge_user_skips_mem0_retrieval_without_initializing_client():
+async def test_forge_user_skips_mem0_retrieval_without_initializing_client(monkeypatch):
+    monkeypatch.setattr(settings, "MEM0_DISABLED_USER_IDS", "forge-rhaiis")
     memory = Mem0Memory()
     get_client = Mock(side_effect=AssertionError("Mem0 client should not be used"))
     memory._get_client = get_client
@@ -23,7 +24,8 @@ async def test_forge_user_skips_mem0_retrieval_without_initializing_client():
 
 
 @pytest.mark.asyncio
-async def test_forge_user_skips_mem0_storage_without_initializing_client():
+async def test_forge_user_skips_mem0_storage_without_initializing_client(monkeypatch):
+    monkeypatch.setattr(settings, "MEM0_DISABLED_USER_IDS", "forge-rhaiis")
     memory = Mem0Memory()
     get_client = Mock(side_effect=AssertionError("Mem0 client should not be used"))
     memory._get_client = get_client

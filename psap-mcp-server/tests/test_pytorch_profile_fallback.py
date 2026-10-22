@@ -25,39 +25,32 @@ def reset_trace_caches():
     pytorch_profile_tool._raw_events_cache.clear()
 
 
-def _profile_index(model_key=MODEL_KEY):
+def _profile_index(model_key=MODEL_KEY, ranks_by_version=None):
     accelerator, bare_model = model_key.split("/", 1)
+    if ranks_by_version is None:
+        ranks_by_version = {
+            BROKEN_VERSION: (0,),
+            VALID_VERSION: (0,),
+        }
     return {
         model_key: {
             TP: {
-                BROKEN_VERSION: {
+                version: {
                     WORKLOAD: {
-                        0: {
+                        rank: {
                             "source": "s3",
                             "key": (
                                 f"pytorch-profiles/rhaiis/{accelerator}/"
-                                f"{bare_model}/{TP}/{BROKEN_VERSION}/{WORKLOAD}/"
-                                "trace_rank0.json"
+                                f"{bare_model}/{TP}/{version}/{WORKLOAD}/"
+                                f"trace_rank{rank}.json"
                             ),
-                            "filename": "trace_rank0.json",
-                            "size_bytes": 114_000_000,
-                        }
-                    }
-                },
-                VALID_VERSION: {
-                    WORKLOAD: {
-                        0: {
-                            "source": "s3",
-                            "key": (
-                                f"pytorch-profiles/rhaiis/{accelerator}/"
-                                f"{bare_model}/{TP}/{VALID_VERSION}/{WORKLOAD}/"
-                                "trace_rank0.json"
-                            ),
-                            "filename": "trace_rank0.json",
+                            "filename": f"trace_rank{rank}.json",
                             "size_bytes": 128,
                         }
+                        for rank in ranks
                     }
-                },
+                }
+                for version, ranks in ranks_by_version.items()
             }
         }
     }
@@ -97,15 +90,26 @@ def _valid_trace_bytes():
     ).encode()
 
 
-def _configure_fake_s3(monkeypatch, *, valid_versions=(), model_key=MODEL_KEY):
-    index = _profile_index(model_key)
+def _configure_fake_s3(
+    monkeypatch,
+    *,
+    valid_versions=(),
+    valid_traces=None,
+    model_key=MODEL_KEY,
+    ranks_by_version=None,
+):
+    index = _profile_index(model_key, ranks_by_version)
     payloads = {
         entry["key"]: _valid_trace_bytes()
-        if version in valid_versions
+        if (
+            (version, rank) in valid_traces
+            if valid_traces is not None
+            else version in valid_versions
+        )
         else b'{"traceEvents":[{"name":"truncated","ph":"X","dur":"unterminated'
         for version, workloads in index[model_key][TP].items()
         for ranks in workloads.values()
-        for entry in ranks.values()
+        for rank, entry in ranks.items()
     }
     fake_s3 = _FakeS3(payloads)
 
@@ -211,3 +215,143 @@ async def test_profile_comparison_is_unavailable_when_both_traces_are_malformed(
     assert result["operation_completed"] is False
     assert result["comparison_performed"] is False
     assert len(result["unavailable_traces"]) == 2
+
+
+@pytest.mark.parametrize("missing_trace_is_indexed", [True, False])
+@pytest.mark.asyncio
+async def test_aggregate_comparison_never_compares_different_rank_sets(
+    monkeypatch, missing_trace_is_indexed
+):
+    ranks_by_version = {
+        BROKEN_VERSION: (0, 1),
+        VALID_VERSION: (0, 1) if missing_trace_is_indexed else (0,),
+    }
+    _configure_fake_s3(
+        monkeypatch,
+        ranks_by_version=ranks_by_version,
+        valid_traces={
+            (BROKEN_VERSION, 0),
+            (BROKEN_VERSION, 1),
+            (VALID_VERSION, 0),
+        },
+    )
+
+    result = await pytorch_profile_tool.compare_pytorch_profiles(
+        BROKEN_VERSION,
+        VALID_VERSION,
+        aggregate_ranks=True,
+        model=MODEL_KEY,
+        tp=TP,
+        workload=WORKLOAD,
+    )
+
+    assert result["status"] == "partial"
+    assert result["comparison_performed"] is False
+    assert "summary" not in result
+    assert result["rank_coverage"][BROKEN_VERSION]["loaded_ranks"] == [0, 1]
+    assert result["rank_coverage"][VALID_VERSION]["loaded_ranks"] == [0]
+    assert result["rank_coverage"][VALID_VERSION]["missing_ranks"] == [1]
+    assert result["unavailable_traces"] == [{
+        "model": "openai--gpt-oss-120b (H200)",
+        "tp": TP,
+        "version": VALID_VERSION,
+        "workload": WORKLOAD,
+        "rank": 1,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_comparison_requires_all_ranks_even_if_both_sides_skip_the_same_one(
+    monkeypatch,
+):
+    _configure_fake_s3(
+        monkeypatch,
+        ranks_by_version={
+            BROKEN_VERSION: (0, 1),
+            VALID_VERSION: (0, 1),
+        },
+        valid_traces={(BROKEN_VERSION, 0), (VALID_VERSION, 0)},
+    )
+
+    result = await pytorch_profile_tool.compare_pytorch_profiles(
+        BROKEN_VERSION,
+        VALID_VERSION,
+        aggregate_ranks=True,
+        model=MODEL_KEY,
+        tp=TP,
+        workload=WORKLOAD,
+    )
+
+    assert result["status"] == "partial"
+    assert result["comparison_performed"] is False
+    assert "summary" not in result
+    assert result["rank_coverage"][BROKEN_VERSION]["missing_ranks"] == [1]
+    assert result["rank_coverage"][VALID_VERSION]["missing_ranks"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_comparison_succeeds_with_complete_matching_rank_sets(monkeypatch):
+    _configure_fake_s3(
+        monkeypatch,
+        valid_versions=(BROKEN_VERSION, VALID_VERSION),
+        ranks_by_version={
+            BROKEN_VERSION: (0, 1),
+            VALID_VERSION: (0, 1),
+        },
+    )
+
+    result = await pytorch_profile_tool.compare_pytorch_profiles(
+        BROKEN_VERSION,
+        VALID_VERSION,
+        aggregate_ranks=True,
+        model=MODEL_KEY,
+        tp=TP,
+        workload=WORKLOAD,
+    )
+
+    assert result["status"] == "success"
+    assert result["comparison_performed"] is True
+    assert result["comparison"]["scope"] == "all 2 ranks"
+    assert result["summary"]["total_diff_pct"] == 0
+
+
+@pytest.mark.asyncio
+async def test_single_rank_comparison_ignores_unrequested_malformed_rank(monkeypatch):
+    _configure_fake_s3(
+        monkeypatch,
+        ranks_by_version={
+            BROKEN_VERSION: (0, 1),
+            VALID_VERSION: (0, 1),
+        },
+        valid_traces={(BROKEN_VERSION, 0), (VALID_VERSION, 0)},
+    )
+
+    result = await pytorch_profile_tool.compare_pytorch_profiles(
+        BROKEN_VERSION,
+        VALID_VERSION,
+        rank=0,
+        model=MODEL_KEY,
+        tp=TP,
+        workload=WORKLOAD,
+    )
+
+    assert result["status"] == "success"
+    assert result["comparison_performed"] is True
+    assert result["summary"]["total_diff_pct"] == 0
+
+
+@pytest.mark.asyncio
+async def test_single_trace_unavailability_does_not_mention_comparisons(monkeypatch):
+    _configure_fake_s3(monkeypatch)
+
+    result = await pytorch_profile_tool.analyze_pytorch_profile(
+        BROKEN_VERSION,
+        model=MODEL_KEY,
+        tp=TP,
+        workload=WORKLOAD,
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["analysis_performed"] is False
+    assert "cross-version" not in result["message"]
+    assert "comparison" not in result["agent_guidance"]

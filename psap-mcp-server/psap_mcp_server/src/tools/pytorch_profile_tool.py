@@ -1127,21 +1127,29 @@ def _profile_trace_unavailable_result(
         for trace in unavailable_traces
     ]
     unavailable_text = ", ".join(unavailable_labels) or "the requested profile"
+    message = (
+        f"{operation} could not be completed because profiler trace data for "
+        f"{unavailable_text} is missing, malformed, or unreadable."
+    )
+    agent_guidance = (
+        "Continue the user request with benchmark metrics, logs, or other "
+        "valid traces. Clearly disclose that profiler evidence is unavailable "
+        "for the listed trace."
+    )
+    if comparison:
+        message += " No cross-version result was inferred from the incomplete data."
+        agent_guidance += " Do not infer a profiler comparison."
+    else:
+        message += " No result was inferred from the unavailable profiler evidence."
+        agent_guidance += " Do not infer findings from that trace."
+
     result = {
         "status": "partial" if summaries else "unavailable",
         "operation_completed": False,
         "unavailable_traces": unavailable_traces,
         "available_trace_summaries": summaries,
-        "message": (
-            f"{operation} could not be completed because profiler trace data for "
-            f"{unavailable_text} is missing, malformed, or unreadable. No "
-            "cross-version result was inferred from the incomplete data."
-        ),
-        "agent_guidance": (
-            "Continue the user request with benchmark metrics, logs, or other "
-            "valid traces. Clearly disclose that profiler evidence is unavailable "
-            "for the listed trace and do not infer a profiler comparison."
-        ),
+        "message": message,
+        "agent_guidance": agent_guidance,
     }
     if comparison:
         result["comparison_performed"] = False
@@ -2126,17 +2134,32 @@ async def compare_pytorch_profiles(
         stats1, scope1, unavailable_ranks1 = await asyncio.to_thread(load_version_stats, mv1, ranks_v1)
         stats2, scope2, unavailable_ranks2 = await asyncio.to_thread(load_version_stats, mv2, ranks_v2)
 
-        if not stats1 or not stats2:
+        if aggregate_ranks:
+            expected_ranks = set(ranks_v1) | set(ranks_v2)
+            loaded_ranks1 = sorted(set(ranks_v1) - set(unavailable_ranks1))
+            loaded_ranks2 = sorted(set(ranks_v2) - set(unavailable_ranks2))
+            missing_ranks1 = sorted(expected_ranks - set(loaded_ranks1))
+            missing_ranks2 = sorted(expected_ranks - set(loaded_ranks2))
+        else:
+            missing_ranks1 = unavailable_ranks1
+            missing_ranks2 = unavailable_ranks2
+
+        # Aggregated totals are comparable only when both versions contain the
+        # same complete set of ranks. Otherwise a missing trace can look like a
+        # performance improvement or regression even if no kernel changed.
+        if not stats1 or not stats2 or (aggregate_ranks and (missing_ranks1 or missing_ranks2)):
             unavailable_traces = []
             available_summaries = {}
-            for version_name, stats, unavailable_ranks in (
-                (mv1, stats1, unavailable_ranks1),
-                (mv2, stats2, unavailable_ranks2),
+            for version_name, stats, missing_ranks in (
+                (mv1, stats1, missing_ranks1),
+                (mv2, stats2, missing_ranks2),
             ):
                 if stats:
                     available_summaries[version_name] = _profile_trace_summary(stats)
-                    continue
-                for unavailable_rank in unavailable_ranks or [rank if rank is not None else 0]:
+                ranks_to_report = missing_ranks
+                if not stats and not ranks_to_report:
+                    ranks_to_report = [rank if rank is not None else 0]
+                for unavailable_rank in ranks_to_report:
                     unavailable_traces.append({
                         "model": display_name,
                         "tp": matched_tp,
@@ -2144,14 +2167,26 @@ async def compare_pytorch_profiles(
                         "workload": matched_workload,
                         "rank": unavailable_rank,
                     })
-            return _profile_trace_unavailable_result(
+            result = _profile_trace_unavailable_result(
                 "PyTorch profile comparison",
                 unavailable_traces,
                 available_summaries,
                 comparison=True,
             )
-
-        incomplete_rank_data = bool(unavailable_ranks1 or unavailable_ranks2)
+            if aggregate_ranks:
+                result["rank_coverage"] = {
+                    mv1: {
+                        "indexed_ranks": ranks_v1,
+                        "loaded_ranks": loaded_ranks1,
+                        "missing_ranks": missing_ranks1,
+                    },
+                    mv2: {
+                        "indexed_ranks": ranks_v2,
+                        "loaded_ranks": loaded_ranks2,
+                        "missing_ranks": missing_ranks2,
+                    },
+                }
+            return result
 
         # Apply category filter
         filtered1 = _filter_by_category(stats1, category)
@@ -2277,7 +2312,7 @@ async def compare_pytorch_profiles(
         event_counts_v2 = _event_counts(stats2)
 
         result = {
-            "status": "partial" if incomplete_rank_data else "success",
+            "status": "success",
             "comparison_performed": True,
             "comparison": {
                 "version1": mv1,
@@ -2335,23 +2370,6 @@ async def compare_pytorch_profiles(
                 f"Use get_vllm_code_diff('{mv1}', '{mv2}', '<file_path>') to see exact code changes",
             ],
         }
-        if incomplete_rank_data:
-            warnings = []
-            if unavailable_ranks1:
-                warnings.append(
-                    f"Skipped malformed or unreadable {mv1} trace(s) for rank(s) "
-                    f"{unavailable_ranks1}; results include {scope1}."
-                )
-            if unavailable_ranks2:
-                warnings.append(
-                    f"Skipped malformed or unreadable {mv2} trace(s) for rank(s) "
-                    f"{unavailable_ranks2}; results include {scope2}."
-                )
-            result["warnings"] = warnings
-            result["agent_guidance"] = (
-                "Use the computed comparison only for the valid traces represented in each scope. "
-                "Disclose skipped traces and avoid claims about their missing ranks."
-            )
         return result
 
     except Exception as exc:
