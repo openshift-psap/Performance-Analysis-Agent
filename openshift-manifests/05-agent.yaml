@@ -103,6 +103,8 @@ spec:
           value: "600"
         - name: ENABLE_MEM0
           value: "true"
+        - name: MEM0_DISABLED_USER_IDS
+          value: "forge-rhaiis"
         - name: ENABLE_SKILL_DOCUMENTS
           value: "true"
         - name: SKILL_GENERATION_THRESHOLD

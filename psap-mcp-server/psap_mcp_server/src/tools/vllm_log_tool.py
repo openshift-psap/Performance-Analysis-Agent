@@ -6,6 +6,7 @@ The UUID for each benchmark run is recorded in the consolidated dashboard CSV lo
 caller-supplied model / version / accelerator filters, then download and parse the log.
 """
 
+import asyncio
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -17,6 +18,8 @@ from psap_mcp_server.src.tools.performance_data_loader import load_rhaiis_data
 from psap_mcp_server.utils.pylogger import get_python_logger
 
 logger = get_python_logger()
+_MAX_STARTUP_LOG_BYTES = 4_000_000
+_MAX_WARNING_SAMPLES = 20
 
 
 # ===================================================================== #
@@ -158,7 +161,22 @@ def _fetch_log_by_uuid(uuid: str) -> Tuple[Optional[str], str]:
         s3 = get_s3_client()
         logger.info(f"Downloading log from S3: s3://{bucket}/{s3_key}")
         response = s3.get_object(Bucket=bucket, Key=s3_key)
-        return response["Body"].read().decode("utf-8", errors="replace"), s3_key
+        body = response["Body"]
+        lines = []
+        bytes_read = 0
+        try:
+            for line in body.iter_lines(chunk_size=8192):
+                remaining = _MAX_STARTUP_LOG_BYTES - bytes_read
+                if remaining <= 0:
+                    lines.append(b"WARNING: log startup section truncated at size limit")
+                    break
+                lines.append(line[:remaining])
+                bytes_read += len(line) + 1
+                if _STARTUP_COMPLETE_MARKER.encode() in line:
+                    break
+            return b"\n".join(lines).decode("utf-8", errors="replace"), s3_key
+        finally:
+            body.close()
     except Exception as exc:
         logger.error(f"Failed to download log s3://{bucket}/{s3_key}: {exc}")
         return None, s3_key
@@ -187,9 +205,10 @@ _STARTUP_COMPLETE_MARKER = "Application startup complete."
 
 def _truncate_at_startup(raw: str) -> str:
     """Return only the portion of the log up to and including the startup-complete line."""
-    for i, line in enumerate(raw.splitlines()):
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
         if _STARTUP_COMPLETE_MARKER in line:
-            return "\n".join(raw.splitlines()[: i + 1])
+            return "\n".join(lines[: i + 1])
     return raw
 
 
@@ -286,8 +305,6 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
     }
 
     lines = raw.splitlines()
-    matched_lines: set[int] = set()
-
     for line_idx, line in enumerate(lines):
         # --- Server config ---
         m = re.search(r"vLLM API server version (\S+)", line)
@@ -957,7 +974,9 @@ def _parse_vllm_log(raw: str) -> Dict[str, Any]:
         if "WARNING" in line or "ERROR" in line:
             cleaned = line.strip()
             if cleaned and "Loading safetensors" not in cleaned and "Capturing CUDA" not in cleaned:
-                result["warnings_errors"].append(cleaned)
+                result["warnings_errors_total"] = result.get("warnings_errors_total", 0) + 1
+                if len(result["warnings_errors"]) < _MAX_WARNING_SAMPLES:
+                    result["warnings_errors"].append(cleaned[:500])
 
     # ------------------------------------------------------------------ #
     #  Second pass: generic extraction for lines the regexes didn't cover #
@@ -1204,11 +1223,13 @@ async def fetch_vllm_logs(
         Dictionary with parsed log data and metadata.
     """
     try:
-        uuid, error = _find_uuid_for_run(version, model, accelerator, tp, profile)
+        uuid, error = await asyncio.to_thread(
+            _find_uuid_for_run, version, model, accelerator, tp, profile
+        )
         if error:
             return {"status": "error", "message": error}
 
-        raw, s3_key = _fetch_log_by_uuid(uuid)
+        raw, s3_key = await asyncio.to_thread(_fetch_log_by_uuid, uuid)
         if raw is None:
             return {"status": "error", "message": f"Failed to download log file: {s3_key}"}
 
@@ -1236,6 +1257,7 @@ async def compare_vllm_logs(
     accelerator: Optional[str] = None,
     tp: Optional[int] = None,
     profile: Optional[str] = None,
+    include_parsed: bool = False,
 ) -> Dict[str, Any]:
     """Compare vLLM server logs between two versions to identify configuration differences.
 
@@ -1255,9 +1277,9 @@ async def compare_vllm_logs(
     TOOL_NAME=compare_vllm_logs
     DISPLAY_NAME=Compare vLLM Logs
     USECASE=Compare engine configurations AND all pinned dependency versions between two vLLM versions. Automatically enriches with every dependency from requirements/cuda.txt. Use this to find config and dependency differences that explain performance changes.
-    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model, accelerator, tp, and profile, 3. Returns only the fields that differ between versions plus full parsed data for both, 4. Check the 'pinned_dependencies' section for ALL dependency version changes (PyTorch, Triton, flash-attn, xformers, etc.)
-    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile e.g. "1k/1k"
-    OUTPUT_DESCRIPTION=Dictionary with config_differences (only changed fields including all pinned dependency versions), plus full parsed logs for both versions
+    INSTRUCTIONS=1. Provide two version strings, 2. Optionally specify model, accelerator, tp, and profile, 3. Returns changed fields plus warning counts by default, 4. Use fetch_vllm_logs for a full single-version view
+    INPUT_DESCRIPTION=version1 (str): Baseline version; version2 (str): Comparison version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism; profile (str, optional): Workload profile e.g. "1k/1k"; include_parsed (bool): Include full parsed sections when necessary
+    OUTPUT_DESCRIPTION=Dictionary with config_differences (only changed fields including pinned dependencies), warning summaries, and optional full parsed sections
     EXAMPLES=compare_vllm_logs("vLLM-0.16.0", "vLLM-0.17.1", model="gpt-oss-120b", accelerator="H200", tp=4, profile="1k/1k")
     PREREQUISITES=Benchmark CSV must contain uuid column; log files must exist in S3 for both versions
     RELATED_TOOLS=fetch_vllm_logs, compare_pytorch_profiles, analyze_performance_insights
@@ -1271,26 +1293,34 @@ async def compare_vllm_logs(
         profile: Workload profile filter (e.g., "1k/1k", "512/2k").
 
     Returns:
-        Dictionary with differences and full parsed logs for both versions.
+        Dictionary with differences and optional full parsed logs for both versions.
     """
     try:
-        uuid1, err1 = _find_uuid_for_run(version1, model, accelerator, tp, profile)
+        uuid1, err1 = await asyncio.to_thread(
+            _find_uuid_for_run, version1, model, accelerator, tp, profile
+        )
         if err1:
             return {"status": "error", "message": f"Version 1 ({version1}): {err1}"}
 
-        uuid2, err2 = _find_uuid_for_run(version2, model, accelerator, tp, profile)
+        uuid2, err2 = await asyncio.to_thread(
+            _find_uuid_for_run, version2, model, accelerator, tp, profile
+        )
         if err2:
             return {"status": "error", "message": f"Version 2 ({version2}): {err2}"}
 
-        raw1, key1 = _fetch_log_by_uuid(uuid1)
-        raw2, key2 = _fetch_log_by_uuid(uuid2)
+        (raw1, key1), (raw2, key2) = await asyncio.gather(
+            asyncio.to_thread(_fetch_log_by_uuid, uuid1),
+            asyncio.to_thread(_fetch_log_by_uuid, uuid2),
+        )
         if raw1 is None:
             return {"status": "error", "message": f"Failed to download log: {key1}"}
         if raw2 is None:
             return {"status": "error", "message": f"Failed to download log: {key2}"}
 
-        parsed1 = _parse_vllm_log(raw1)
-        parsed2 = _parse_vllm_log(raw2)
+        parsed1, parsed2 = await asyncio.gather(
+            asyncio.to_thread(_parse_vllm_log, raw1),
+            asyncio.to_thread(_parse_vllm_log, raw2),
+        )
 
         # Enrich with dependency versions from requirements/cuda.txt if not
         # already extracted from the logs.  This ensures the comparison always
@@ -1322,7 +1352,7 @@ async def compare_vllm_logs(
             if section_diff:
                 differences[section] = section_diff
 
-        return {
+        result = {
             "status": "success",
             "model": model,
             "accelerator": accelerator,
@@ -1330,9 +1360,15 @@ async def compare_vllm_logs(
             "uuids": {version1: uuid1, version2: uuid2},
             "config_differences": differences,
             "num_differences": sum(len(v) for v in differences.values()),
-            "version1_parsed": parsed1,
-            "version2_parsed": parsed2,
+            "warning_counts": {
+                version1: parsed1.get("warnings_errors_total", 0),
+                version2: parsed2.get("warnings_errors_total", 0),
+            },
         }
+        if include_parsed:
+            result["version1_parsed"] = parsed1
+            result["version2_parsed"] = parsed2
+        return result
 
     except Exception as exc:
         logger.error(f"compare_vllm_logs failed: {exc}")

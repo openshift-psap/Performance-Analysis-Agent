@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-from psap_agent.src.settings import Settings, validate_config
 from psap_agent.src.core.exceptions.exceptions import AppException
+from psap_agent.src.settings import Settings, validate_config
 
 
 class TestSettings:
@@ -29,6 +29,18 @@ class TestSettings:
         assert settings.CRITIC_MODEL == "gemini-4-argon"
         assert settings.OPENAI_API_KEY is None
         assert settings.OPENAI_MODEL is None
+        assert settings.mem0_disabled_user_ids == frozenset({"forge-rhaiis"})
+
+    def test_mem0_disabled_user_ids_can_be_configured(self):
+        with patch.dict(
+            "os.environ",
+            {"MEM0_DISABLED_USER_IDS": "forge-rhaiis, batch-worker ,"},
+        ):
+            settings = Settings()
+
+        assert settings.mem0_disabled_user_ids == frozenset(
+            {"forge-rhaiis", "batch-worker"}
+        )
 
     @patch.dict("os.environ", {}, clear=True)
     def test_database_uri_property(self):

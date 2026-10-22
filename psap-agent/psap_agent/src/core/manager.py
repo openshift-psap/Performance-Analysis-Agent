@@ -20,7 +20,6 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langfuse import Langfuse, get_client
-from langfuse.langchain import CallbackHandler
 from langgraph.pregel import Pregel
 from langgraph.types import Command, Interrupt
 
@@ -33,6 +32,9 @@ from psap_agent.src.core.agent_utils import (
 from psap_agent.src.core.evaluator import evaluate_response
 from psap_agent.src.core.reflection import run_critic
 from psap_agent.src.core.storage import register_thread
+from psap_agent.src.core.trace_callback import (
+    CompactLangfuseCallbackHandler as CallbackHandler,
+)
 from psap_agent.src.schema import StreamRequest
 from psap_agent.src.settings import settings
 from psap_agent.utils.pylogger import get_python_logger
@@ -46,6 +48,107 @@ def _langfuse_context_for_run(run_id: str) -> tuple[str, CallbackHandler]:
     """Create the authoritative Langfuse trace context for one LangGraph run."""
     trace_id = Langfuse.create_trace_id(seed=str(run_id))
     return trace_id, CallbackHandler(trace_context={"trace_id": trace_id})
+
+
+def _start_langfuse_root_observation(
+    trace_id: str,
+    request: StreamRequest,
+    user_id: str,
+    session_id: str,
+) -> tuple[Any | None, Any | None]:
+    """Start the root observation that owns this request's trace input/output."""
+    observation_context = None
+    metadata = {
+        key: value
+        for key, value in {
+            "model": request.model,
+            "reasoning_effort": request.reasoning_effort,
+        }.items()
+        if value is not None
+    }
+    try:
+        observation_context = get_client().start_as_current_observation(
+            as_type="span",
+            name="psap-agent-request",
+            input={"query": request.message},
+            metadata=metadata,
+            trace_context={"trace_id": trace_id},
+        )
+        observation = observation_context.__enter__()
+    except Exception as e:
+        app_logger.warning(f"Could not start Langfuse root observation: {e}")
+        return None, None
+
+    try:
+        observation.update_trace(
+            input={"query": request.message},
+            user_id=user_id,
+            session_id=session_id,
+        )
+    except Exception as e:
+        app_logger.warning(f"Could not update Langfuse trace attributes: {e}")
+
+    return observation_context, observation
+
+
+def _bind_langchain_callbacks_to_current_trace(config: RunnableConfig) -> None:
+    """Let LangChain observations inherit the active root instead of forking it."""
+    callbacks = config.get("callbacks") or []
+    config["callbacks"] = [
+        callback
+        for callback in callbacks
+        if not isinstance(callback, CallbackHandler)
+    ] + [CallbackHandler()]
+
+
+def _trace_output_from_events(events: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the last non-empty assistant message delivered to the user."""
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "message":
+            continue
+        message = event.get("content")
+        if not isinstance(message, dict) or message.get("type") != "ai":
+            continue
+        content = message.get("content")
+        if content:
+            return {"response": content}
+
+    token_content = "".join(
+        event["content"]
+        for event in events
+        if isinstance(event, dict)
+        and event.get("type") == "token"
+        and isinstance(event.get("content"), str)
+    )
+    if token_content:
+        return {"response": token_content}
+    return {"status": "no_response"}
+
+
+def _record_langfuse_root_output(
+    observation: Any | None, output: Dict[str, Any]
+) -> None:
+    """Best-effort update of both root-observation and trace-level output."""
+    if observation is None:
+        return
+    try:
+        observation.update(output=output)
+    except Exception as e:
+        app_logger.warning(f"Could not update Langfuse root observation output: {e}")
+    try:
+        observation.update_trace(output=output)
+    except Exception as e:
+        app_logger.warning(f"Could not update Langfuse trace output: {e}")
+
+
+def _close_langfuse_observation(observation_context: Any | None) -> None:
+    """Close a Langfuse observation without letting tracing disrupt the agent."""
+    if observation_context is None:
+        return
+    try:
+        observation_context.__exit__(None, None, None)
+    except Exception as e:
+        app_logger.warning(f"Could not close Langfuse root observation: {e}")
 
 
 # Keys that carry the most signal for a revision; checked in order.
@@ -147,6 +250,10 @@ class AgentManager:
             model_name=request.model,
             reasoning_effort=request.reasoning_effort,
         ) as persistent_agent:
+            observation_context = None
+            root_observation = None
+            trace_completed = False
+            trace_failed = False
             try:
                 (
                     kwargs,
@@ -165,6 +272,16 @@ class AgentManager:
                 self._current_tool_call_id = None
                 effective_session_id = request.session_id or thread_id
                 effective_user_id = request.user_id or "anonymous"
+                observation_context, root_observation = (
+                    _start_langfuse_root_observation(
+                        langfuse_trace_id,
+                        request,
+                        effective_user_id,
+                        effective_session_id,
+                    )
+                )
+                if root_observation is not None:
+                    _bind_langchain_callbacks_to_current_trace(kwargs["config"])
 
                 def _make_status(step: str, detail: str = ""):
                     return {"type": "status", "content": {"step": step, "detail": detail}}
@@ -463,6 +580,13 @@ class AgentManager:
                         )
                         collected_messages = missing_tool_msgs + list(collected_messages)
 
+                _record_langfuse_root_output(
+                    root_observation, _trace_output_from_events(buffered_events)
+                )
+                trace_completed = True
+                _close_langfuse_observation(observation_context)
+                observation_context = None
+
                 # --- Deliver the final (possibly revised) response to user ---
                 for event in buffered_events:
                     yield event
@@ -527,6 +651,23 @@ class AgentManager:
                 asyncio.create_task(_post_process())
 
             except Exception as e:
+                trace_failed = True
+                _record_langfuse_root_output(
+                    root_observation,
+                    {
+                        "error": "Internal server error",
+                        "error_type": "agent_error",
+                    },
+                )
+                if root_observation is not None:
+                    try:
+                        root_observation.update(
+                            level="ERROR", status_message=str(e)[:1000]
+                        )
+                    except Exception as trace_error:
+                        app_logger.warning(
+                            f"Could not mark Langfuse root observation as failed: {trace_error}"
+                        )
                 app_logger.error(
                     f"Error in AgentManager stream_response: {e}", exc_info=True
                 )
@@ -538,6 +679,26 @@ class AgentManager:
                         "error_type": "agent_error",
                     },
                 }
+            finally:
+                if (
+                    root_observation is not None
+                    and not trace_completed
+                    and not trace_failed
+                ):
+                    _record_langfuse_root_output(
+                        root_observation, {"status": "incomplete"}
+                    )
+                    try:
+                        root_observation.update(
+                            level="ERROR",
+                            status_message="Agent response stream ended before completion",
+                        )
+                    except Exception as e:
+                        app_logger.warning(
+                            f"Could not mark incomplete Langfuse trace: {e}"
+                        )
+                if observation_context is not None:
+                    _close_langfuse_observation(observation_context)
 
     async def _handle_input(
         self, request: StreamRequest, agent: Pregel

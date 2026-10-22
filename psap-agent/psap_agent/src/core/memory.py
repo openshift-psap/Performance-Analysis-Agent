@@ -67,12 +67,23 @@ class Mem0Memory:
     _RELEVANCE_THRESHOLD = 0.6
     _MAX_MEMORIES = 5
 
+    @staticmethod
+    def _is_disabled_for_user(user_id: str) -> bool:
+        """Whether Mem0 is disabled for this exact application identity."""
+        if user_id in settings.mem0_disabled_user_ids:
+            logger.info(f"Mem0 disabled for configured user {user_id}")
+            return True
+        return False
+
     async def retrieve_memories(self, query: str, user_id: str) -> str:
         """Retrieve relevant memories for the current query.
 
         Filters results by relevance score and caps the count to avoid
         injecting loosely-related context that confuses the agent.
         """
+        if self._is_disabled_for_user(user_id):
+            return ""
+
         try:
             client = self._get_client()
             from mem0 import Memory
@@ -134,6 +145,9 @@ class Mem0Memory:
         self, user_query: str, agent_response: str, user_id: str
     ) -> None:
         """Store a conversation interaction in Mem0."""
+        if self._is_disabled_for_user(user_id):
+            return
+
         try:
             client = self._get_client()
             interaction = [

@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     ENABLE_MEM0: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_MEM0"}
     )
+    # Comma-separated identities excluded from Mem0 retrieval and storage.
+    MEM0_DISABLED_USER_IDS: str = Field(
+        default="forge-rhaiis", json_schema_extra={"env": "MEM0_DISABLED_USER_IDS"}
+    )
     MEM0_API_KEY: Optional[str] = Field(
         default=None, json_schema_extra={"env": "MEM0_API_KEY"}
     )
@@ -201,6 +205,15 @@ class Settings(BaseSettings):
             The complete PostgreSQL database URI string.
         """
         return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    @property
+    def mem0_disabled_user_ids(self) -> frozenset[str]:
+        """Parse the configured comma-separated Mem0 exclusion list."""
+        return frozenset(
+            user_id.strip()
+            for user_id in self.MEM0_DISABLED_USER_IDS.split(",")
+            if user_id.strip()
+        )
 
 
 def validate_config(settings: Settings) -> None:
