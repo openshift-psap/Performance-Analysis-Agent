@@ -313,6 +313,38 @@ def test_kernel_mapping_uses_exact_downstream_repo_and_ref():
     assert all("v0.28.0%2Brhaiv.5.cpu" in item["url"] for item in result["github_urls"])
 
 
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "https://github.com/neuralmagic/nm-vllm-ent",
+        "owner/../repository",
+        "owner/..",
+        "owner/repository/extra",
+        "../repository",
+    ],
+)
+@pytest.mark.asyncio
+async def test_github_source_tools_reject_invalid_repo_before_network(monkeypatch, repo):
+    def unexpected_request(**kwargs):
+        pytest.fail("Invalid repository must be rejected before making a request")
+
+    monkeypatch.setattr(source_tool.httpx, "AsyncClient", unexpected_request)
+
+    results = [
+        await source_tool.map_kernel_to_vllm_code(
+            "fused_moe_kernel", repo=repo, search_github=True
+        ),
+        await source_tool.fetch_vllm_source("README.md", "main", repo=repo),
+        await source_tool.get_vllm_code_diff("base", "head", repo=repo),
+        await source_tool.correlate_kernel_with_changes(
+            "fused_moe_kernel", "base", "head", repo=repo
+        ),
+    ]
+
+    assert all(result["status"] == "error" for result in results)
+    assert all("owner/repository" in result["message"] for result in results)
+
+
 @pytest.mark.asyncio
 async def test_fetch_source_keeps_downstream_ref_and_repo(monkeypatch):
     repo = DOWNSTREAM_REPO

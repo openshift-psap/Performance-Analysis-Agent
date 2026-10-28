@@ -16,7 +16,7 @@ FastMCP server providing 35 performance analysis tools over the Model Context Pr
 | Dashboard | `generate_dashboard_url` | Generate links to the performance dashboard with pre-applied filters |
 | PyTorch Profiler | `analyze_pytorch_profile`, `compare_pytorch_profiles`, `analyze_performance_insights`, `list_available_profiles`, `check_profile_status`, `analyze_trace_structure`, `compare_trace_structures`, `get_kernel_call_stacks` | Parse and compare Chrome traces from S3, inspect trace structure, and retrieve kernel call stacks |
 | Kernel-to-Code | `map_kernel_to_vllm_code`, `get_downstream_vllm_tags`, `get_kernel_categories`, `correlate_kernel_with_changes` | Map profiler kernels to source and discover downstream refs for an RHAIIS/upstream base version |
-| vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff`, `get_cross_repo_vllm_diff` | Fetch source at exact refs, compare within one repository, or diff across upstream and downstream repository trees |
+| vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff`, `get_cross_repo_vllm_diff`, `compare_downstream_vllm_releases` | Fetch source at exact refs; compare upstream or downstream releases, including downstream commits and related upstream changes |
 | vLLM Releases | `get_vllm_release_notes`, `compare_vllm_versions`, `get_version_mappings`, `get_vllm_pull_request` | Fetch release notes, compare changelogs, resolve version mappings, inspect PRs |
 | vLLM Logs | `fetch_vllm_logs`, `compare_vllm_logs` | Fetch and compare vLLM server logs (engine config, compilation timings, memory allocation) between versions |
 | Performance Triage | `get_vllm_performance_triage_guide` | Structured 5-step vLLM performance triage workflow and diagnostic guidance |

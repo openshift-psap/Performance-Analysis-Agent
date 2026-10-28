@@ -23,6 +23,11 @@ spec:
         env:
         - name: AGENT_API_URL
           value: "http://psap-agent:5002"
+        # Keep aligned with psap-agent; Streamlit adds a 60s read cushion.
+        - name: AGENT_RESPONSE_TIMEOUT_SECONDS
+          value: "600"
+        - name: AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS
+          value: "900"
         resources:
           requests:
             memory: "512Mi"

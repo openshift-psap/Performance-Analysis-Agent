@@ -261,6 +261,18 @@ def _key_accelerator(composite_key: str) -> str:
     return composite_key.split("/", 1)[0] if "/" in composite_key else "unknown"
 
 
+def _ambiguous_model_match_message(
+    user_model: Optional[str], matches: List[str]
+) -> str:
+    """Ask for an explicit profile key instead of guessing among matches."""
+    return (
+        f"Multiple models match '{user_model}': {', '.join(matches)}. "
+        "Choose the exact composite key (accelerator/model) that matches the "
+        "desired profile and retry. Do not select a candidate based on list order; "
+        "a separate profile-listing call is not needed."
+    )
+
+
 def _match_all_models(user_model: Optional[str], available_models: List[str]) -> List[str]:
     """Smart model matching that handles separator variants and disambiguates similar names.
 
@@ -1703,12 +1715,14 @@ async def _resolve_profile(
         ), index
 
     if len(matches) > 1:
-        formatted = ", ".join(matches)
-        return None, None, None, None, (
-            f"Multiple models match '{model}': {formatted}. "
-            "Retry with one exact composite model key from this list; a separate "
-            f"profile-listing call is not needed: '{matches[0]}'"
-        ), index
+        return (
+            None,
+            None,
+            None,
+            None,
+            _ambiguous_model_match_message(model, matches),
+            index,
+        )
 
     model_key = matches[0]
     model_data = index[model_key]
@@ -2038,11 +2052,7 @@ async def compare_pytorch_profiles(
         if len(matches) > 1:
             return {
                 "status": "error",
-                "message": (
-                    f"Multiple models match '{model}': {', '.join(matches)}. "
-                    "Retry with one exact composite model key from this list; a separate "
-                    f"profile-listing call is not needed: '{matches[0]}'"
-                ),
+                "message": _ambiguous_model_match_message(model, matches),
             }
         model_key = matches[0]
         model_data = index[model_key]

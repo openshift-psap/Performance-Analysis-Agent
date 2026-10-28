@@ -26,6 +26,26 @@ logger = get_python_logger()
 # GitHub API configuration
 GITHUB_API_BASE = "https://api.github.com"
 VLLM_REPO = "vllm-project/vllm"
+_GITHUB_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def _normalize_github_repository(
+    repo: Optional[str],
+    *,
+    default: Optional[str] = VLLM_REPO,
+    argument_name: str = "repo",
+) -> str:
+    """Validate and normalize a GitHub repository before URL construction."""
+    target_repo = (repo or "").strip()
+    if not target_repo and default is not None:
+        target_repo = default
+
+    if (
+        not _GITHUB_REPOSITORY_PATTERN.fullmatch(target_repo)
+        or any(part in {".", ".."} for part in target_repo.split("/"))
+    ):
+        raise ValueError(f"{argument_name} must use GitHub owner/repository format.")
+    return target_repo
 
 # Curated mapping of kernel patterns to likely vLLM source locations
 # Format: (pattern, [(path, confidence, description)])
@@ -409,10 +429,14 @@ async def get_downstream_vllm_tags(
                 "message": "The downstream vLLM repository is not configured.",
                 "suggestion": "Set RHAIIS_DOWNSTREAM_VLLM_REPO to the GitHub owner/repository.",
             }
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target_repo):
+        try:
+            target_repo = _normalize_github_repository(
+                target_repo, default=None, argument_name="RHAIIS_DOWNSTREAM_VLLM_REPO"
+            )
+        except ValueError as exc:
             return {
                 "status": "error",
-                "message": "RHAIIS_DOWNSTREAM_VLLM_REPO must use GitHub owner/repository format.",
+                "message": str(exc),
             }
 
         from psap_mcp_server.src.tools.vllm_release_notes_tool import (
@@ -722,7 +746,10 @@ async def map_kernel_to_vllm_code(
         - search_suggestions: How to find more information
     """
     try:
-        target_repo = repo.strip() or VLLM_REPO
+        try:
+            target_repo = _normalize_github_repository(repo)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
         version = (
             await _normalize_version(version)
             if target_repo == VLLM_REPO
@@ -982,7 +1009,10 @@ async def correlate_kernel_with_changes(
         Dictionary with correlation analysis and investigation suggestions.
     """
     try:
-        target_repo = repo.strip() or VLLM_REPO
+        try:
+            target_repo = _normalize_github_repository(repo)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
         if target_repo == VLLM_REPO:
             version1 = await _normalize_version(version1)
             version2 = await _normalize_version(version2)
@@ -1116,7 +1146,10 @@ async def fetch_vllm_source(
         - github_url: Direct link to view the file on GitHub
     """
     try:
-        target_repo = repo or VLLM_REPO
+        try:
+            target_repo = _normalize_github_repository(repo)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
         if target_repo == VLLM_REPO:
             version = await _normalize_version(version)
         file_path = file_path.lstrip("/")
@@ -1254,7 +1287,10 @@ async def get_vllm_code_diff(
         - github_compare_url: Link to the full comparison on GitHub
     """
     try:
-        target_repo = repo.strip() or VLLM_REPO
+        try:
+            target_repo = _normalize_github_repository(repo)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
         if target_repo == VLLM_REPO:
             version1 = await _normalize_version(version1)
             version2 = await _normalize_version(version2)
@@ -1573,21 +1609,18 @@ async def get_cross_repo_vllm_diff(
         text patch. Truncated GitHub trees are rejected rather than reported as
         complete comparisons.
     """
-    repo_pattern = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
-    for label, repo in (
-        ("base_repo", base_repo),
-        ("comparison_repo", comparison_repo),
-    ):
-        if not re.fullmatch(repo_pattern, repo.strip()):
-            return {
-                "status": "error",
-                "message": f"{label} must use GitHub owner/repository format.",
-            }
+    try:
+        base_repo = _normalize_github_repository(
+            base_repo, default=None, argument_name="base_repo"
+        )
+        comparison_repo = _normalize_github_repository(
+            comparison_repo, default=None, argument_name="comparison_repo"
+        )
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
     if not base_ref.strip() or not comparison_ref.strip():
         return {"status": "error", "message": "Both exact refs are required."}
 
-    base_repo = base_repo.strip()
-    comparison_repo = comparison_repo.strip()
     base_ref = base_ref.strip()
     comparison_ref = comparison_ref.strip()
     if base_repo.casefold() == comparison_repo.casefold():

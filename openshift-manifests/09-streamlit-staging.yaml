@@ -25,6 +25,11 @@ spec:
           value: "http://psap-agent-staging:5002"
         - name: APP_TITLE
           value: "Staging Performance Analysis Agent"
+        # Keep aligned with the staging agent; Streamlit adds a 60s read cushion.
+        - name: AGENT_RESPONSE_TIMEOUT_SECONDS
+          value: "600"
+        - name: AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS
+          value: "900"
         resources:
           requests:
             memory: "512Mi"
