@@ -1205,9 +1205,9 @@ async def fetch_vllm_logs(
     TOOL_NAME=fetch_vllm_logs
     DISPLAY_NAME=Fetch vLLM Logs
     USECASE=Read parsed vLLM server logs to understand the runtime configuration of a benchmark run. Use this alongside profiling tools to get the full picture of how the engine was configured.
-    INSTRUCTIONS=1. Specify a version (e.g., "rhaiis-3.3" or "vLLM-0.13.0"), 2. Optionally specify model, accelerator, tp, and profile to disambiguate, 3. Returns structured config + compilation + memory + timing data
+    INSTRUCTIONS=1. Specify a version (e.g., "rhaiis-3.3" or "vLLM-0.13.0"), 2. Optionally specify model, accelerator, tp, and profile to disambiguate, 3. When the downstream repository is configured, inspect downstream_tag_resolution: exact log-version matches are verified, while mapped refs are fallback candidates only.
     INPUT_DESCRIPTION=version (str): Version; model (str, optional): Model name; accelerator (str, optional): GPU type; tp (int, optional): Tensor parallelism value; profile (str, optional): Workload profile e.g. "1k/1k"
-    OUTPUT_DESCRIPTION=Dictionary with parsed log sections: server_config, engine_config, compilation, memory, timing, warnings_errors
+    OUTPUT_DESCRIPTION=Parsed log sections plus downstream_tag_resolution when the downstream repository is configured; exact runtime version matches are distinguished from mapping fallback candidates
     EXAMPLES=fetch_vllm_logs("vLLM-0.17.1", model="gpt-oss-120b", accelerator="H200", tp=4, profile="1k/1k")
     PREREQUISITES=Benchmark CSV must contain a uuid column; log files must exist in S3 at <LOG_S3_BUCKET>/logs/<uuid>.log
     RELATED_TOOLS=compare_vllm_logs, analyze_pytorch_profile, compare_pytorch_profiles
@@ -1234,8 +1234,7 @@ async def fetch_vllm_logs(
             return {"status": "error", "message": f"Failed to download log file: {s3_key}"}
 
         parsed = _parse_vllm_log(raw)
-
-        return {
+        result = {
             "status": "success",
             "uuid": uuid,
             "version": version,
@@ -1244,6 +1243,33 @@ async def fetch_vllm_logs(
             "log_file": f"{uuid}.log",
             "parsed": parsed,
         }
+
+        if settings.RHAIIS_DOWNSTREAM_VLLM_REPO:
+            try:
+                from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
+                    get_downstream_vllm_tags,
+                )
+
+                runtime_version = parsed.get("server_config", {}).get(
+                    "vllm_version"
+                )
+                result["downstream_tag_resolution"] = await get_downstream_vllm_tags(
+                    version=version,
+                    platform=accelerator,
+                    max_tags=10,
+                    runtime_version=runtime_version,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not cross-check downstream tag from server log "
+                    f"({type(exc).__name__})"
+                )
+                result["downstream_tag_resolution"] = {
+                    "status": "error",
+                    "message": "Could not cross-check the server-reported version against downstream tags.",
+                }
+
+        return result
 
     except Exception as exc:
         logger.error(f"fetch_vllm_logs failed: {exc}")

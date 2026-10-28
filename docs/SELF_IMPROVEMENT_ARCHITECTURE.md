@@ -45,7 +45,7 @@ The self-improvement system is organized into three tiers that run after every a
           │                                                   │
           │  Safety rails:                                    │
           │  • Recursion limit: 50 steps (~25 tool calls max) │
-          │  • Response timeout: 600s per pass                │
+          │  • Response timeout: 600s; Argon: at least 900s   │
           │  • Loop detection: aborts if same tool+args > 3x  │
           └────────────────┬─────────────────────────────────┘
                                  │
@@ -147,7 +147,7 @@ The self-improvement system is organized into three tiers that run after every a
   │  ◄──── MCP Tools                                │
   │                                                  │
   │  • recursion_limit=50 (≈25 tool calls max)      │
-  │  • asyncio.timeout(600s) per pass               │
+  │  • asyncio.timeout(600s; Argon: at least 900s)   │
   │  • tool-call loop detection (>3 identical = abort)│
   │  (streaming, buffered until critic approves)     │
   └──────┬───────────────────────────────────────────┘
@@ -522,10 +522,11 @@ Applied via `.with_config(recursion_limit=_RECURSION_LIMIT)` on every agent inst
 ### 2. Response Timeout
 
 ```python
-AGENT_RESPONSE_TIMEOUT_SECONDS = 600  # configurable via env var
+AGENT_RESPONSE_TIMEOUT_SECONDS = 600  # default per-pass timeout via env var
+AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS = 900  # minimum for Gemini 4 Argon
 ```
 
-Each agent pass (initial run or revision) is wrapped in `asyncio.timeout()`. If the agent exceeds 600 seconds on a single pass, the pass is aborted and treated as if it produced no output. For revision passes, the previous (pre-revision) response is used as a fallback.
+Each agent pass (initial run or revision) is wrapped in `asyncio.timeout()`. The selected Gemini 4 Argon model gets at least 900 seconds; other models use `AGENT_RESPONSE_TIMEOUT_SECONDS`. A larger configured general timeout is preserved. If a pass exceeds its effective timeout, it is aborted; for revision passes, the previous response is used as a fallback.
 
 ### 3. Tool-Call Loop Detection
 
@@ -564,7 +565,8 @@ All settings are in `psap_agent/src/settings.py` and can be overridden via envir
 | `CRITIC_MODEL` | `gemini-4-argon` | Model used for the inline critic (blocks response delivery); OpenAI models use `openai:<model-id>`. Argon uses implicit caching only. |
 | `LLM_JUDGE_MODEL` | `gemini-3.8-flash` | Model used for post-hoc judge and skill extraction; OpenAI models use `openai:<model-id>` |
 | `MAX_REFLECTION_ITERATIONS` | `2` | Max revision loops before delivering response |
-| `AGENT_RESPONSE_TIMEOUT_SECONDS` | `600` | Timeout per agent pass (seconds) |
+| `AGENT_RESPONSE_TIMEOUT_SECONDS` | `600` | Timeout per agent pass for non-Argon models (seconds) |
+| `AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS` | `900` | Minimum timeout per agent pass when the selected model is Gemini 4 Argon (seconds) |
 | `MEM0_QDRANT_PATH` | `/app/qdrant_data` | Qdrant storage path inside container |
 | `SKILL_GENERATION_THRESHOLD` | `5` | Min tool calls to trigger skill extraction |
 

@@ -26,6 +26,8 @@ AI_TRANSPARENCY_NOTICE = (
     "By proceeding, you acknowledge that all AI agent outputs are intended for internal "
     "use only and must be reviewed prior to use."
 )
+_DEFAULT_AGENT_STREAM_READ_TIMEOUT_SECONDS = 660
+_ARGON_AGENT_STREAM_READ_TIMEOUT_SECONDS = 960
 
 
 def get_logo_base64():
@@ -91,6 +93,13 @@ def _provider_for_model(model_name: str) -> str:
     if normalized.startswith("claude-"):
         return "claude"
     return "gemini"
+
+
+def _agent_stream_read_timeout_seconds(model_name: str | None) -> int:
+    """Leave time for a 15-minute Argon pass plus a short network cushion."""
+    if (model_name or "").strip().lower().startswith("gemini-4-argon"):
+        return _ARGON_AGENT_STREAM_READ_TIMEOUT_SECONDS
+    return _DEFAULT_AGENT_STREAM_READ_TIMEOUT_SECONDS
 
 
 def _get_model_options(openai_model: str = "") -> dict[str, tuple[str, str | None]]:
@@ -542,7 +551,7 @@ def stream_agent_response(
             f"{api_url}/v1/stream",
             json=request_data,
             stream=True,
-            timeout=660,
+            timeout=_agent_stream_read_timeout_seconds(model),
             headers={"Accept": "text/event-stream"},
         )
         response.raise_for_status()

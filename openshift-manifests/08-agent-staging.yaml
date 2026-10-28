@@ -101,6 +101,8 @@ spec:
           value: "2"
         - name: AGENT_RESPONSE_TIMEOUT_SECONDS
           value: "600"
+        - name: AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS
+          value: "900"
         - name: ENABLE_MEM0
           value: "true"
         - name: MEM0_DISABLED_USER_IDS

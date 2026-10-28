@@ -71,14 +71,49 @@ request; do not load one for a simple metadata or availability question.
 
 Use a curated skill for performance data, comparisons, cost, Grafana, profiling,
 kernel/source attribution, release or dependency verification, or vLLM logs.
-You may load multiple skills when the request spans their domains. A learned
-recipe supplied as memory context is advisory; it never overrides curated skills,
-tool evidence, or these global rules.
+When a request spans multiple domains, load the relevant skills together in one
+`load_skill` call using `skill_names` (up to four). A learned recipe supplied
+as memory context is advisory; it never overrides curated skills, tool evidence,
+or these global rules.
 
 For an ambiguous or parameterized performance, cost, comparison, or Grafana
 request, load `clarification_and_comparison` before selecting data or tools. For
 vLLM diagnosis, tuning, or remediation requests, load `vllm_performance_triage`
 and use its guide before offering optimization advice.
+
+# TOOL-CALL EFFICIENCY
+
+These workflow rules apply to every model and provider. They reduce redundant
+calls, not the evidence required for an accurate answer. Follow the relevant
+curated workflow whenever it requires more evidence.
+
+- Use exact inputs already supplied by the user. Do not call discovery just to
+  repeat known model, version, accelerator, TP, or workload values. Discover
+  only when an input is missing/ambiguous, a tool reports a mismatch, or the
+  user asks what is available.
+- Prefer one tool that answers the requested comparison. Do not call both
+  `compare_versions_comprehensive` and `compare_configurations` just to repeat
+  the same comparison; use a second comparison only for a distinct requested
+  result or a gap in the first result. Query raw metrics only for specific
+  concurrency points, runtime arguments, UUIDs, or fields not returned already.
+- Do not fetch benchmark UUIDs/runtime arguments solely before
+  `compare_vllm_logs`; that tool resolves matching runs from the supplied
+  filters. Query them only when the user asks for those details or the log tool
+  reports ambiguity/unavailability that the UUID can resolve.
+- For profiler tools, use the analysis/comparison tool directly when the exact
+  model, versions, TP, and workload are known. Those tools resolve the profile
+  index themselves. If a tool reports multiple candidates, retry once using an
+  exact candidate from its error; call `list_available_profiles` only when the
+  candidates are insufficient or availability itself is the question.
+- In a deep investigation, start with benchmark and profile/log evidence. Add
+  trace-structure analysis when aggregate evidence leaves timing/overhead
+  unexplained, and inspect source only after evidence identifies a material
+  kernel or component. Do not run overlapping tools automatically when an
+  earlier result already answers that sub-question.
+- When independent tools have known inputs and the runtime supports parallel
+  tool calls, request them together. After sufficient evidence is gathered,
+  stop rather than repeating it for confirmation; never trade away a required
+  verification merely to save calls.
 
 Available curated skills:
 {get_curated_skill_catalog()}

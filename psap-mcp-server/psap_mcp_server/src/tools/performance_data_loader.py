@@ -40,9 +40,9 @@ LLMD_DATA_PATH = DATA_DIR / "llmd-dashboard.csv"
 def validate_data_availability() -> None:
     """Validate that performance data is available at startup.
 
-    Checks whether the RHAIIS dashboard CSV can be loaded from S3 or exists
-    locally. If neither is available, logs a clear error message with setup
-    instructions and exits the process.
+    Loads and validates the RHAIIS dashboard data from S3 or the local
+    fallback. The normal loader also warms the in-memory cache, avoiding a
+    second download and parse on the first tool request.
 
     This should be called during server startup (from main.py) to fail fast
     rather than returning cryptic errors when tools are invoked later.
@@ -50,24 +50,22 @@ def validate_data_availability() -> None:
     Raises:
         SystemExit: If no data source is available.
     """
-    # 1. Check if S3 is configured and reachable
-    if settings.S3_BUCKET:
-        try:
-            _read_csv_from_s3(settings.S3_BUCKET, settings.S3_KEY, settings.S3_REGION)
-            logger.info(
-                f"Data validation passed: S3 source available at "
-                f"s3://{settings.S3_BUCKET}/{settings.S3_KEY}"
-            )
-            return
-        except Exception as e:
-            logger.warning(f"S3 data source not reachable: {e}")
-
-    # 2. Check if the local CSV fallback exists
-    if RHAIIS_DATA_PATH.exists():
-        logger.info(f"Data validation passed: local CSV found at {RHAIIS_DATA_PATH}")
+    started_at = time.perf_counter()
+    df = load_rhaiis_data(force_refresh=True)
+    elapsed = time.perf_counter() - started_at
+    if df is not None:
+        cache_status = (
+            "cache warmed"
+            if settings.S3_CACHE_TTL_SECONDS > 0
+            else "cache disabled"
+        )
+        logger.info(
+            f"Data validation passed: loaded {len(df)} RHAIIS rows in "
+            f"{elapsed:.2f}s ({cache_status})"
+        )
         return
 
-    # 3. Neither source available — fail fast with instructions
+    # Neither source could be loaded — fail fast with setup instructions.
     logger.critical(
         "\n"
         "════════════════════════════════════════════════════════════════\n"
@@ -75,7 +73,7 @@ def validate_data_availability() -> None:
         "════════════════════════════════════════════════════════════════\n"
         "\n"
         "  The MCP server requires the RHAIIS consolidated dashboard CSV\n"
-        "  but could not find it from any source.\n"
+        "  but could not load it from any configured source.\n"
         "\n"
         "  To fix this, do ONE of the following:\n"
         "\n"
@@ -224,15 +222,45 @@ def _read_csv_from_s3(bucket: str, key: str, region: str = "us-east-1") -> pd.Da
     try:
         from psap_mcp_server.src.tools.s3_utils import get_s3_client
 
+        total_started_at = time.perf_counter()
+        client_started_at = time.perf_counter()
         s3_client = get_s3_client(
             region=region, test_bucket=bucket, test_key=key
         )
-        
-        # Fetch the object
+        client_elapsed = time.perf_counter() - client_started_at
+
+        # Time the request separately from consuming the response body: S3
+        # returns the body as a stream, so most transfer time is spent reading it.
+        request_started_at = time.perf_counter()
         response = s3_client.get_object(Bucket=bucket, Key=key)
-        csv_content = response["Body"].read().decode("utf-8")
-        
-        return pd.read_csv(io.StringIO(csv_content))
+        request_elapsed = time.perf_counter() - request_started_at
+
+        body = response["Body"]
+        download_started_at = time.perf_counter()
+        try:
+            csv_content = body.read()
+        finally:
+            body.close()
+        download_elapsed = time.perf_counter() - download_started_at
+
+        csv_size = len(csv_content)
+        csv_buffer = io.BytesIO(csv_content)
+        del csv_content
+        parse_started_at = time.perf_counter()
+        try:
+            df = pd.read_csv(csv_buffer, encoding="utf-8")
+        finally:
+            csv_buffer.close()
+        parse_elapsed = time.perf_counter() - parse_started_at
+        total_elapsed = time.perf_counter() - total_started_at
+
+        logger.info(
+            f"Read S3 CSV s3://{bucket}/{key} ({csv_size} bytes): "
+            f"client setup {client_elapsed:.2f}s, request {request_elapsed:.2f}s, "
+            f"download {download_elapsed:.2f}s, parse {parse_elapsed:.2f}s, "
+            f"total {total_elapsed:.2f}s"
+        )
+        return df
         
     except ImportError:
         raise ImportError("boto3 is required for S3 access. Install with: pip install boto3")
@@ -319,7 +347,10 @@ def load_rhaiis_data(force_refresh: bool = False) -> Optional[pd.DataFrame]:
             logger.info(f"Loaded RHAIIS data from {source}")
         
         # Clean the data
+        clean_started_at = time.perf_counter()
         df = _clean_rhaiis_data(df)
+        clean_elapsed = time.perf_counter() - clean_started_at
+        logger.info(f"Cleaned RHAIIS data ({len(df)} rows) in {clean_elapsed:.2f}s")
         
         # Cache the cleaned data
         if ttl > 0:

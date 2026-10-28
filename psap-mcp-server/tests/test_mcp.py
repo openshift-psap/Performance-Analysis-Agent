@@ -5,6 +5,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from psap_mcp_server.src.mcp import PSAPMCPServer
+from psap_mcp_server.src.tools.downstream_vllm_comparison_tool import (
+    compare_downstream_vllm_releases,
+)
+from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
+    get_cross_repo_vllm_diff,
+    get_downstream_vllm_tags,
+)
 
 
 class TestPSAPMCPServer:
@@ -92,6 +99,12 @@ class TestPSAPMCPServer:
         # Assert
         # Verify that tool() was called multiple times (once for each tool)
         assert mock_mcp.tool.call_count >= 3
+        registered_tools = [
+            call.args[0] for call in mock_mcp.tool.return_value.call_args_list
+        ]
+        assert get_downstream_vllm_tags in registered_tools
+        assert get_cross_repo_vllm_diff in registered_tools
+        assert compare_downstream_vllm_releases in registered_tools
 
     def test_server_attributes(self):
         """Test that server has required attributes for tools-first architecture."""

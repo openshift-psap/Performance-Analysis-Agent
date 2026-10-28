@@ -7,10 +7,8 @@ tools for MCP clients. It uses FastMCP to register and manage MCP capabilities.
 from fastmcp import FastMCP
 
 from psap_mcp_server.src.settings import settings
-
-# Import performance analysis tools
-from psap_mcp_server.src.tools.query_performance_tool import (
-    query_performance_metrics,
+from psap_mcp_server.src.tools.compare_grafana_metrics_tool import (
+    compare_grafana_metrics,
 )
 from psap_mcp_server.src.tools.compare_performance_tool import (
     compare_configurations,
@@ -19,23 +17,17 @@ from psap_mcp_server.src.tools.compare_performance_tool import (
 from psap_mcp_server.src.tools.cost_efficiency_tool import (
     calculate_cost_efficiency,
 )
-from psap_mcp_server.src.tools.energy_efficiency_tool import (
-    calculate_energy_efficiency,
-)
-from psap_mcp_server.src.tools.regression_analysis_tool import (
-    analyze_regression,
-)
 from psap_mcp_server.src.tools.dataset_metadata_tool import (
     get_dataset_metadata,
 )
 from psap_mcp_server.src.tools.discover_configurations_tool import (
     discover_configurations,
 )
-from psap_mcp_server.src.tools.grafana_metrics_tool import (
-    query_grafana_metrics,
+from psap_mcp_server.src.tools.downstream_vllm_comparison_tool import (
+    compare_downstream_vllm_releases,
 )
-from psap_mcp_server.src.tools.compare_grafana_metrics_tool import (
-    compare_grafana_metrics,
+from psap_mcp_server.src.tools.energy_efficiency_tool import (
+    calculate_energy_efficiency,
 )
 from psap_mcp_server.src.tools.generate_dashboard_url_tool import (
     generate_dashboard_url,
@@ -43,35 +35,48 @@ from psap_mcp_server.src.tools.generate_dashboard_url_tool import (
 from psap_mcp_server.src.tools.generate_grafana_url_tool import (
     generate_grafana_url,
 )
-from psap_mcp_server.src.tools.vllm_release_notes_tool import (
-    get_vllm_release_notes,
-    compare_vllm_versions,
-    get_version_mappings,
-    get_vllm_pull_request,
-)
-from psap_mcp_server.src.tools.pytorch_profile_tool import (
-    analyze_pytorch_profile,
-    compare_pytorch_profiles,
-    list_available_profiles,
-    check_profile_status,
-    analyze_performance_insights,
-    analyze_trace_structure,
-    compare_trace_structures,
-    get_kernel_call_stacks,
+from psap_mcp_server.src.tools.grafana_metrics_tool import (
+    query_grafana_metrics,
 )
 from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
-    map_kernel_to_vllm_code,
-    get_kernel_categories,
     correlate_kernel_with_changes,
     fetch_vllm_source,
+    get_cross_repo_vllm_diff,
+    get_downstream_vllm_tags,
+    get_kernel_categories,
     get_vllm_code_diff,
+    map_kernel_to_vllm_code,
+)
+from psap_mcp_server.src.tools.pytorch_profile_tool import (
+    analyze_performance_insights,
+    analyze_pytorch_profile,
+    analyze_trace_structure,
+    check_profile_status,
+    compare_pytorch_profiles,
+    compare_trace_structures,
+    get_kernel_call_stacks,
+    list_available_profiles,
+)
+
+# Import performance analysis tools
+from psap_mcp_server.src.tools.query_performance_tool import (
+    query_performance_metrics,
+)
+from psap_mcp_server.src.tools.regression_analysis_tool import (
+    analyze_regression,
 )
 from psap_mcp_server.src.tools.vllm_log_tool import (
-    fetch_vllm_logs,
     compare_vllm_logs,
+    fetch_vllm_logs,
 )
 from psap_mcp_server.src.tools.vllm_performance_triage_tool import (
     get_vllm_performance_triage_guide,
+)
+from psap_mcp_server.src.tools.vllm_release_notes_tool import (
+    compare_vllm_versions,
+    get_version_mappings,
+    get_vllm_pull_request,
+    get_vllm_release_notes,
 )
 from psap_mcp_server.utils.pylogger import (
     force_reconfigure_all_loggers,
@@ -133,11 +138,14 @@ class PSAPMCPServer:
         - get_kernel_call_stacks: Get real Python/C++ call stacks for a kernel from profile traces
         - analyze_trace_structure: Block-level structural analysis with median block, streams, overhead
         - compare_trace_structures: Compare trace structures between versions with root-cause detection
-        - map_kernel_to_vllm_code: Map kernel names to vLLM source code locations
+        - get_downstream_vllm_tags: Find exact refs in the configured downstream repository for an RHAIIS/upstream version
+        - map_kernel_to_vllm_code: Map kernel names to upstream or downstream vLLM source code locations
         - get_kernel_categories: Get information about kernel categories
         - correlate_kernel_with_changes: Correlate kernel performance with code changes
-        - fetch_vllm_source: Fetch source code from any public GitHub repo (defaults to vLLM) at a specific version
-        - get_vllm_code_diff: Fetch code diff between two vLLM versions for specific files
+        - fetch_vllm_source: Fetch source from upstream or a private downstream GitHub repo at an exact ref
+        - get_vllm_code_diff: Fetch code diff between two upstream or downstream refs
+        - compare_downstream_vllm_releases: Compare upstream and downstream commits/PRs for two exact RHAIIS builds
+        - get_cross_repo_vllm_diff: Compare source trees and file patches across distinct GitHub repositories
         - fetch_vllm_logs: Fetch and parse vLLM server logs for a specific version
         - compare_vllm_logs: Compare vLLM server logs between two versions (auto-enriches with ALL pinned dependency versions from requirements/cuda.txt)
         - get_vllm_performance_triage_guide: Retrieve vLLM performance triage guidance (5-step diagnostic workflow)
@@ -172,11 +180,14 @@ class PSAPMCPServer:
         self.mcp.tool()(compare_trace_structures)
         # Register kernel-to-code mapping tools
         self.mcp.tool()(map_kernel_to_vllm_code)
+        self.mcp.tool()(get_downstream_vllm_tags)
         self.mcp.tool()(get_kernel_categories)
         self.mcp.tool()(correlate_kernel_with_changes)
         # Register vLLM source code access tools
         self.mcp.tool()(fetch_vllm_source)
         self.mcp.tool()(get_vllm_code_diff)
+        self.mcp.tool()(compare_downstream_vllm_releases)
+        self.mcp.tool()(get_cross_repo_vllm_diff)
         # Register vLLM log analysis tools
         self.mcp.tool()(fetch_vllm_logs)
         self.mcp.tool()(compare_vllm_logs)

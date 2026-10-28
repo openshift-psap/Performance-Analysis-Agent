@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     AGENT_RESPONSE_TIMEOUT_SECONDS: int = Field(
         default=600, json_schema_extra={"env": "AGENT_RESPONSE_TIMEOUT_SECONDS"}
     )
+    AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS: int = Field(
+        default=900,
+        json_schema_extra={"env": "AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS"},
+    )
     ENABLE_MEM0: bool = Field(
         default=True, json_schema_extra={"env": "ENABLE_MEM0"}
     )

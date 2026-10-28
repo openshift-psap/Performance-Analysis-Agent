@@ -40,6 +40,8 @@ def test_curated_skills_cover_the_migrated_legacy_workflow_rules():
         "benchmark_analysis": (
             "`compare_versions_comprehensive`",
             "Do not query two configurations separately",
+            "discover only if a tool reports a mismatch or missing data",
+            "Query only missing, specifically requested concurrency points",
             "`cv_conc` only with actual concurrency values",
             "follow-up request to show, graph, or visualize",
         ),
@@ -54,12 +56,15 @@ def test_curated_skills_cover_the_migrated_legacy_workflow_rules():
             "`summary` field",
         ),
         "pytorch_profiles": (
+            "call `analyze_pytorch_profile` or `compare_pytorch_profiles` directly",
+            "rather than issuing a separate listing call",
             "`analyze_performance_insights`",
             "`compare_trace_structures`",
             "`get_kernel_call_stacks`",
         ),
         "deep_profiling": (
-            "`compare_vllm_logs` after profiling",
+            "`compare_vllm_logs` can run independently of profile comparison",
+            "resolves matching run UUIDs itself",
             "single-request profile paradox",
             "Quantitative accounting using only actual profiling deltas",
         ),
@@ -67,6 +72,12 @@ def test_curated_skills_cover_the_migrated_legacy_workflow_rules():
             "`get_kernel_categories`",
             "`correlate_kernel_with_changes`",
             "`get_vllm_pull_request`",
+            "`compare_downstream_vllm_releases(release1, release2,",
+            "This tool is specifically for two downstream RHAIIS releases",
+            "For two upstream vLLM versions, continue using",
+            "patch-equivalent matches as distinct evidence levels",
+            "do not claim it is absent or unchanged unless the tool result establishes that",
+            "A GitHub/API error means the diff was unavailable",
         ),
         "vllm_logs": (
             "`pinned_dependencies`",
@@ -89,3 +100,11 @@ def test_curated_benchmark_workflow_does_not_reintroduce_a_nonexistent_tool():
     benchmark_skill = load_curated_skill("benchmark_analysis")
 
     assert "get_pareto_optimal" not in benchmark_skill
+
+
+def test_global_tool_efficiency_rules_do_not_weaken_evidence_requirements():
+    prompt = _normalize(get_system_prompt())
+
+    assert "These workflow rules apply to every model and provider" in prompt
+    assert "not the evidence required for an accurate answer" in prompt
+    assert "never trade away a required verification merely to save calls" in prompt
