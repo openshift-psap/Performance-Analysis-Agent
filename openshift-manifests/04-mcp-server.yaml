@@ -72,6 +72,8 @@ spec:
               name: psap-secrets
               key: GITHUB_TOKEN
               optional: true
+        - name: RHAIIS_DOWNSTREAM_VLLM_REPO
+          value: ""  # Set to owner/repository to enable downstream source discovery
         # S3 Configuration for performance data
         - name: S3_BUCKET
           valueFrom:
@@ -111,7 +113,7 @@ spec:
               optional: true
         # S3 configuration for vLLM server logs
         - name: LOG_S3_BUCKET
-          value: "psap-model-furnace"
+          value: "psap-dashboard-data"
         - name: LOG_S3_PREFIX
           value: "logs"
         # PyTorch profile S3 prefix (<accel>/<model>/<tp>/<version>/<workload>/trace_*.json)
@@ -122,7 +124,7 @@ spec:
             memory: "512Mi"
             cpu: "250m"
           limits:
-            memory: "2Gi"
+            memory: "8Gi"
             cpu: "1000m"
         livenessProbe:
           httpGet:

@@ -26,6 +26,9 @@ AI_TRANSPARENCY_NOTICE = (
     "By proceeding, you acknowledge that all AI agent outputs are intended for internal "
     "use only and must be reviewed prior to use."
 )
+_AGENT_STREAM_READ_TIMEOUT_CUSHION_SECONDS = 60
+_DEFAULT_AGENT_RESPONSE_TIMEOUT_SECONDS = 600
+_DEFAULT_ARGON_AGENT_RESPONSE_TIMEOUT_SECONDS = 900
 
 
 def get_logo_base64():
@@ -91,6 +94,26 @@ def _provider_for_model(model_name: str) -> str:
     if normalized.startswith("claude-"):
         return "claude"
     return "gemini"
+
+
+def _agent_stream_read_timeout_seconds(model_name: str | None) -> int:
+    """Derive the client's idle timeout from the configured agent pass timeout."""
+    is_argon = (model_name or "").strip().lower().startswith("gemini-4-argon")
+    timeout_env = (
+        "AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS"
+        if is_argon
+        else "AGENT_RESPONSE_TIMEOUT_SECONDS"
+    )
+    default_timeout = (
+        _DEFAULT_ARGON_AGENT_RESPONSE_TIMEOUT_SECONDS
+        if is_argon
+        else _DEFAULT_AGENT_RESPONSE_TIMEOUT_SECONDS
+    )
+    try:
+        response_timeout = int(os.getenv(timeout_env, str(default_timeout)))
+    except (TypeError, ValueError):
+        response_timeout = default_timeout
+    return max(0, response_timeout) + _AGENT_STREAM_READ_TIMEOUT_CUSHION_SECONDS
 
 
 def _get_model_options(openai_model: str = "") -> dict[str, tuple[str, str | None]]:
@@ -542,7 +565,7 @@ def stream_agent_response(
             f"{api_url}/v1/stream",
             json=request_data,
             stream=True,
-            timeout=660,
+            timeout=_agent_stream_read_timeout_seconds(model),
             headers={"Accept": "text/event-stream"},
         )
         response.raise_for_status()

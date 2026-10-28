@@ -11,8 +11,13 @@ from psap_mcp_server.src.settings import Settings, validate_config
 class TestSettings:
     """Test the Settings class."""
 
-    def test_default_settings(self):
+    def test_default_settings(self, monkeypatch):
         """Test that default settings are correct."""
+        # The settings module may load a developer .env at import time.
+        # Clear those values so this test actually verifies class defaults.
+        for field_name in Settings.model_fields:
+            monkeypatch.delenv(field_name, raising=False)
+
         # Arrange & Act
         settings = Settings()
 
@@ -25,6 +30,8 @@ class TestSettings:
         assert settings.RHAIIS_VERSION_MAPPINGS_URL.endswith(
             "version_mappings.json"
         )
+        assert settings.LOG_S3_BUCKET == "psap-dashboard-data"
+        assert settings.LOG_S3_PREFIX == "logs"
         assert settings.MCP_SSL_KEYFILE is None
         assert settings.MCP_SSL_CERTFILE is None
 
@@ -40,6 +47,8 @@ class TestSettings:
             "MCP_SSL_CERTFILE": "/path/to/cert.pem",
             "RHAIIS_VERSION_MAPPINGS_URL": "https://example.com/mappings.json",
             "RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS": "600",
+            "LOG_S3_BUCKET": "example-logs",
+            "LOG_S3_PREFIX": "application-logs",
         }
 
         # Act
@@ -55,6 +64,8 @@ class TestSettings:
         assert settings.MCP_SSL_CERTFILE == "/path/to/cert.pem"
         assert settings.RHAIIS_VERSION_MAPPINGS_URL == "https://example.com/mappings.json"
         assert settings.RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS == 600
+        assert settings.LOG_S3_BUCKET == "example-logs"
+        assert settings.LOG_S3_PREFIX == "application-logs"
 
     def test_port_validation(self):
         """Test port validation constraints."""

@@ -5,22 +5,35 @@ for a root-cause analysis, or wants a rigorous explanation of a regression or
 improvement. Load `clarification_and_comparison` if the compared configurations
 are not exact.
 
-## Required evidence order
+## Evidence workflow
 
-Use this order. Do not replace measured profiling evidence with release notes,
-PR descriptions, or general knowledge.
+Use measured evidence; do not replace profiling with release notes, PR
+descriptions, or general knowledge. Load the relevant workflow documents in one
+`load_skill` call when the request spans domains (typically
+`deep_profiling`, `pytorch_profiles`, `benchmark_analysis`, and `vllm_logs`).
 
-1. Establish the measured benchmark delta for two fair configurations: same
-   model, accelerator, profile, TP, workload, and comparable versions.
-2. Load `pytorch_profiles` and call `list_available_profiles` before selecting a
-   trace. Then call `compare_pytorch_profiles` first for the chosen traces.
-3. Call `analyze_performance_insights` with the observed benchmark direction,
-   and `compare_trace_structures` for ordered pipeline, stream, and overhead
-   evidence.
-4. Load `vllm_logs` and call `compare_vllm_logs` after profiling to identify
-   supporting configuration and pinned-dependency differences.
-5. Load `kernel_source_analysis`. Prefer call stacks, then map material kernels,
-   fetch relevant source for both versions, and inspect the actual code diff.
+1. Establish the measured benchmark delta for fair configurations: same model,
+   accelerator, profile, TP, workload, and comparable versions. Use the
+   comparison tool that directly answers the requested headline; do not repeat
+   it with a second comparison tool.
+2. When exact profile coordinates are known, call `compare_pytorch_profiles`
+   directly. It resolves the profile index itself, so do not first call
+   `list_available_profiles`. If model/TP/workload is ambiguous, use the exact
+   candidates returned by the comparison error; list profiles only if those
+   candidates do not resolve the ambiguity or availability itself is in
+   question.
+3. Once the benchmark selectors are known, `compare_vllm_logs` can run
+   independently of profile comparison; it resolves matching run UUIDs itself.
+   Request both comparisons together when parallel tool calls are supported.
+4. Add `analyze_performance_insights` when the profile/benchmark relationship
+   needs synthesis. Use `compare_trace_structures` when aggregate results leave
+   throughput, idle time, stream overlap, or scheduling unexplained. These
+   analyses overlap in some evidence; do not run both automatically if one
+   already answers the open question.
+5. Load `kernel_source_analysis` after profiling identifies a material kernel
+   or component. Prefer call stacks, then map the relevant kernels, fetch source
+   for both versions, and inspect the actual code diff. Avoid broad source
+   exploration before there is a concrete lead.
 
 Do not use release notes, changelogs, or PR descriptions as root-cause evidence
 during this workflow unless the user explicitly asks for them. They can explain
@@ -51,7 +64,9 @@ Separate three levels of certainty:
 
 Configuration differences, release-note items, and source diffs are not root
 causes by themselves. Profiling evidence is ground truth when it conflicts with
-a release-note or source-reading hypothesis.
+a release-note or source-reading hypothesis. Efficiency rules do not lower this
+evidence standard: pursue additional targeted evidence whenever a claimed cause
+is still unresolved.
 
 For every material contributor, provide actual trace time, call-count, and
 per-call-duration evidence. For multi-GPU models, examine communication kernels

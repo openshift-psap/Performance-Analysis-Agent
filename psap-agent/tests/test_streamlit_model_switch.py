@@ -4,7 +4,6 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-
 APP_PATH = Path(__file__).parents[1] / "examples" / "streamlit_app.py"
 SPEC = importlib.util.spec_from_file_location("streamlit_app_under_test", APP_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -25,6 +24,22 @@ def test_gemini_selector_keeps_flash_default_and_offers_argon():
 
     assert next(iter(options.values())) == ("gemini-3.8-flash", None)
     assert options["🧠 Gemini 4 Argon ▾"] == ("gemini-4-argon", None)
+
+
+def test_stream_read_timeout_tracks_agent_pass_timeout_and_adds_cushion(monkeypatch):
+    monkeypatch.delenv("AGENT_RESPONSE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS", raising=False)
+    assert streamlit_app._agent_stream_read_timeout_seconds("gemini-4-argon") == 960
+    assert streamlit_app._agent_stream_read_timeout_seconds("gemini-3.8-flash") == 660
+    assert streamlit_app._agent_stream_read_timeout_seconds("openai:gpt-6-luna") == 660
+
+    monkeypatch.setenv("AGENT_RESPONSE_TIMEOUT_SECONDS", "1200")
+    monkeypatch.setenv("AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS", "1800")
+    assert streamlit_app._agent_stream_read_timeout_seconds("gemini-3.8-flash") == 1260
+    assert streamlit_app._agent_stream_read_timeout_seconds("gemini-4-argon") == 1860
+
+    monkeypatch.setenv("AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS", "invalid")
+    assert streamlit_app._agent_stream_read_timeout_seconds("gemini-4-argon") == 960
 
 
 def test_start_new_conversation_creates_thread_and_keeps_prior_messages():

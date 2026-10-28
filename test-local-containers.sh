@@ -8,6 +8,8 @@
 # - Google API Key: Loaded from GOOGLE_API_KEY env var or psap-agent/.env
 # - OpenAI API Key: Loaded from OPENAI_API_KEY env var or psap-agent/.env
 # - Grafana: Loaded from GRAFANA_* env vars or psap-mcp-server/.env
+# - Downstream vLLM repository: Loaded from RHAIIS_DOWNSTREAM_VLLM_REPO or
+#   psap-mcp-server/.env
 # - Dashboard URLs: Loaded from DASHBOARD_BASE_URL and
 #   DASHBOARD_BASE_URL_STAGING in .env
 # - Langfuse: Prompted interactively during startup (http://localhost:3000)
@@ -36,6 +38,10 @@ NC='\033[0m' # No Color
 
 # Configuration
 NETWORK_NAME="psap-network"
+# MCP startup validates the configured performance-data source before opening
+# its HTTP listener. S3-backed CSV validation can take a few minutes.
+MCP_STARTUP_TIMEOUT_SECONDS="${MCP_STARTUP_TIMEOUT_SECONDS:-300}"
+AGENT_STARTUP_TIMEOUT_SECONDS="${AGENT_STARTUP_TIMEOUT_SECONDS:-120}"
 
 # ── Load .env file (infrastructure credentials) ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +74,8 @@ LLM_JUDGE_MODEL="${LLM_JUDGE_MODEL:-}"
 GRAFANA_URL="${GRAFANA_URL:-}"
 GRAFANA_API_TOKEN="${GRAFANA_API_TOKEN:-}"
 GRAFANA_DATASOURCE_UID="${GRAFANA_DATASOURCE_UID:-}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+RHAIIS_DOWNSTREAM_VLLM_REPO="${RHAIIS_DOWNSTREAM_VLLM_REPO:-}"
 
 # S3 Configuration (for loading performance data from S3)
 S3_BUCKET="${S3_BUCKET:-}"
@@ -75,6 +83,8 @@ S3_KEY="${S3_KEY:-main/rhaiis-dashboard/consolidated_dashboard.csv}"
 S3_KEY_STAGING="${S3_KEY_STAGING:-staging/rhaiis-dashboard/consolidated_dashboard.csv}"
 S3_REGION="${S3_REGION:-us-east-1}"
 S3_CACHE_TTL_SECONDS="${S3_CACHE_TTL_SECONDS:-300}"
+LOG_S3_BUCKET="${LOG_S3_BUCKET:-}"
+LOG_S3_PREFIX="${LOG_S3_PREFIX:-}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-}"
@@ -97,9 +107,52 @@ log_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
+wait_for_health() {
+    local url="$1"
+    local service_name="$2"
+    local timeout_seconds="${3:-$MCP_STARTUP_TIMEOUT_SECONDS}"
+    local start_time=$SECONDS
+    local next_status_time=$((start_time + 15))
+
+    log_info "Waiting for $service_name health at $url (up to ${timeout_seconds}s)..."
+    while (( SECONDS - start_time < timeout_seconds )); do
+        if curl --silent --show-error --fail --connect-timeout 2 --max-time 5 \
+            "$url" &> /dev/null; then
+            log_success "$service_name is healthy"
+            return 0
+        fi
+
+        if (( SECONDS >= next_status_time )); then
+            log_info "$service_name is still starting..."
+            next_status_time=$((SECONDS + 15))
+        fi
+        sleep 2
+    done
+
+    log_error "$service_name did not become healthy within ${timeout_seconds}s"
+    return 1
+}
+
 prompt_for_credentials() {
     log_info "Setting up credentials..."
     echo ""
+
+    # Load GitHub settings independently of Grafana configuration.
+    if [ -f psap-mcp-server/.env ]; then
+        if [ -z "$GITHUB_TOKEN" ] && grep -q "^GITHUB_TOKEN=" psap-mcp-server/.env; then
+            GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" psap-mcp-server/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+            if [ -n "$GITHUB_TOKEN" ]; then
+                log_success "GitHub Token loaded from psap-mcp-server/.env"
+            fi
+        fi
+
+        if [ -z "$RHAIIS_DOWNSTREAM_VLLM_REPO" ] && grep -q "^RHAIIS_DOWNSTREAM_VLLM_REPO=" psap-mcp-server/.env; then
+            RHAIIS_DOWNSTREAM_VLLM_REPO=$(grep "^RHAIIS_DOWNSTREAM_VLLM_REPO=" psap-mcp-server/.env | head -1 | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+            if [ -n "$RHAIIS_DOWNSTREAM_VLLM_REPO" ]; then
+                log_success "Downstream repository loaded from psap-mcp-server/.env"
+            fi
+        fi
+    fi
     
     # Google API Key
     if [ -z "$GOOGLE_API_KEY" ]; then
@@ -181,14 +234,6 @@ prompt_for_credentials() {
             fi
         fi
         
-        # GitHub Token (for vLLM release/PR lookups — optional)
-    if [ -z "$GITHUB_TOKEN" ] && [ -f psap-mcp-server/.env ] && grep -q "GITHUB_TOKEN" psap-mcp-server/.env; then
-        GITHUB_TOKEN=$(grep "GITHUB_TOKEN" psap-mcp-server/.env | grep -v '^#' | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-        if [ -n "$GITHUB_TOKEN" ]; then
-            log_success "GitHub Token loaded from psap-mcp-server/.env"
-        fi
-    fi
-
     # Prompt for any missing Grafana credentials
         if [ -z "$GRAFANA_URL" ]; then
             log_warning "Grafana URL not found"
@@ -246,6 +291,14 @@ prompt_for_credentials() {
         if grep -q "^S3_REGION" psap-mcp-server/.env; then
             S3_REGION=$(extract_env_value "S3_REGION" "psap-mcp-server/.env")
         fi
+
+        if [ -z "$LOG_S3_BUCKET" ] && grep -q "^LOG_S3_BUCKET=" psap-mcp-server/.env; then
+            LOG_S3_BUCKET=$(extract_env_value "LOG_S3_BUCKET" "psap-mcp-server/.env")
+        fi
+
+        if [ -z "$LOG_S3_PREFIX" ] && grep -q "^LOG_S3_PREFIX=" psap-mcp-server/.env; then
+            LOG_S3_PREFIX=$(extract_env_value "LOG_S3_PREFIX" "psap-mcp-server/.env")
+        fi
         
         if grep -q "^S3_CACHE_TTL_SECONDS" psap-mcp-server/.env; then
             S3_CACHE_TTL_SECONDS=$(extract_env_value "S3_CACHE_TTL_SECONDS" "psap-mcp-server/.env")
@@ -266,6 +319,9 @@ prompt_for_credentials() {
             fi
         fi
     fi
+
+    LOG_S3_BUCKET="${LOG_S3_BUCKET:-psap-dashboard-data}"
+    LOG_S3_PREFIX="${LOG_S3_PREFIX:-logs}"
     echo ""
     
     # Show summary
@@ -298,6 +354,11 @@ prompt_for_credentials() {
     else
         echo "  ⚠ GitHub Token:            Not configured (60 req/hr rate limit)"
     fi
+    if [ -n "$RHAIIS_DOWNSTREAM_VLLM_REPO" ]; then
+        echo "  ✓ Downstream repository:   $RHAIIS_DOWNSTREAM_VLLM_REPO"
+    else
+        echo "  ⚠ Downstream repository:   Not configured"
+    fi
     if [ -n "$S3_BUCKET" ]; then
         echo "  ✓ S3 Bucket:               $S3_BUCKET"
         echo "  ✓ S3 Key:                  $S3_KEY"
@@ -310,6 +371,7 @@ prompt_for_credentials() {
     else
         echo "  ⚠ S3:                      Not configured (using local files)"
     fi
+    echo "  ✓ vLLM Logs:               s3://$LOG_S3_BUCKET/$LOG_S3_PREFIX/"
     if [ -n "$DASHBOARD_BASE_URL" ]; then
         echo "  ✓ Dashboard URL:           Configured"
     else
@@ -633,17 +695,16 @@ start_langfuse() {
 start_mcp_server() {
     log_info "Starting MCP Server..."
     
-    # Build S3 env vars if configured
-    S3_ENV_VARS=""
+    # vLLM logs use the dashboard bucket; benchmark/profile data can be configured separately.
+    S3_ENV_VARS="-e LOG_S3_BUCKET=$LOG_S3_BUCKET -e LOG_S3_PREFIX=$LOG_S3_PREFIX -e S3_REGION=$S3_REGION"
     if [ -n "$S3_BUCKET" ]; then
-        S3_ENV_VARS="-e S3_BUCKET=$S3_BUCKET -e S3_KEY=$S3_KEY -e S3_REGION=$S3_REGION -e S3_CACHE_TTL_SECONDS=$S3_CACHE_TTL_SECONDS"
-        # Add AWS credentials if set
-        if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
-            S3_ENV_VARS="$S3_ENV_VARS -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
-        fi
+        S3_ENV_VARS="$S3_ENV_VARS -e S3_BUCKET=$S3_BUCKET -e S3_KEY=$S3_KEY -e S3_CACHE_TTL_SECONDS=$S3_CACHE_TTL_SECONDS"
         log_info "S3 data loading enabled: s3://$S3_BUCKET/$S3_KEY"
     else
         log_info "S3 not configured, using local data files"
+    fi
+    if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+        S3_ENV_VARS="$S3_ENV_VARS -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
     fi
     
     # PyTorch profile S3 prefix (profiles are loaded from S3 at runtime)
@@ -673,6 +734,7 @@ start_mcp_server() {
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
       -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+      -e RHAIIS_DOWNSTREAM_VLLM_REPO="${RHAIIS_DOWNSTREAM_VLLM_REPO:-}" \
       -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-}" \
       $S3_ENV_VARS \
       $PROFILE_ENV \
@@ -680,20 +742,15 @@ start_mcp_server() {
       -p 5001:5001 \
       psap-mcp-server:local
     
-    log_info "Waiting for MCP Server to be ready..."
-    sleep 5
-    
-    # Check if MCP Server is responding
-    if curl -s -f http://localhost:5001/health &> /dev/null; then
-        log_success "MCP Server is ready"
-    else
-        log_warning "MCP Server might not be ready yet (this is sometimes normal)"
-    fi
+    wait_for_health "http://localhost:5001/health" "MCP Server"
 }
 
 start_agent() {
     log_info "Starting PSAP Agent..."
     echo ""
+
+    # The agent loads its MCP tools during startup and exits if MCP is not ready.
+    wait_for_health "http://localhost:5001/health" "MCP Server (Agent dependency)"
     
     # Langfuse keys: use env vars if set, otherwise prompt interactively.
     # To skip prompts: export LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-...
@@ -759,6 +816,7 @@ start_agent() {
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
       -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"
+      -e "AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS=${AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS:-900}"
       -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
       -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
       -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"
@@ -783,15 +841,7 @@ start_agent() {
 
     "${cmd[@]}"
     
-    log_info "Waiting for Agent to be ready..."
-    sleep 10
-    
-    # Check if Agent is responding
-    if curl -s -f http://localhost:5002/health &> /dev/null; then
-        log_success "Agent is ready"
-    else
-        log_warning "Agent might not be ready yet"
-    fi
+    wait_for_health "http://localhost:5002/health" "Agent" "$AGENT_STARTUP_TIMEOUT_SECONDS"
 }
 
 start_streamlit() {
@@ -819,15 +869,15 @@ start_streamlit() {
 start_mcp_server_staging() {
     log_info "Starting MCP Server (Staging)..."
 
-    S3_ENV_VARS_STAGING=""
+    S3_ENV_VARS_STAGING="-e LOG_S3_BUCKET=$LOG_S3_BUCKET -e LOG_S3_PREFIX=$LOG_S3_PREFIX -e S3_REGION=$S3_REGION"
     if [ -n "$S3_BUCKET" ]; then
-        S3_ENV_VARS_STAGING="-e S3_BUCKET=$S3_BUCKET -e S3_KEY=$S3_KEY_STAGING -e S3_REGION=$S3_REGION -e S3_CACHE_TTL_SECONDS=$S3_CACHE_TTL_SECONDS"
-        if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
-            S3_ENV_VARS_STAGING="$S3_ENV_VARS_STAGING -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
-        fi
+        S3_ENV_VARS_STAGING="$S3_ENV_VARS_STAGING -e S3_BUCKET=$S3_BUCKET -e S3_KEY=$S3_KEY_STAGING -e S3_CACHE_TTL_SECONDS=$S3_CACHE_TTL_SECONDS"
         log_info "S3 staging data: s3://$S3_BUCKET/$S3_KEY_STAGING"
     else
         log_info "S3 not configured, staging MCP will use local data files"
+    fi
+    if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+        S3_ENV_VARS_STAGING="$S3_ENV_VARS_STAGING -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
     fi
 
     PROFILE_ENV_STAGING=""
@@ -852,24 +902,21 @@ start_mcp_server_staging() {
       -e GRAFANA_API_TOKEN="$GRAFANA_API_TOKEN" \
       -e GRAFANA_DATASOURCE_UID="$GRAFANA_DATASOURCE_UID" \
       -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+      -e RHAIIS_DOWNSTREAM_VLLM_REPO="${RHAIIS_DOWNSTREAM_VLLM_REPO:-}" \
       -e DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL_STAGING:-}" \
       $S3_ENV_VARS_STAGING \
       $PROFILE_ENV_STAGING \
       -p 5003:5001 \
       psap-mcp-server:local
 
-    log_info "Waiting for MCP Server (Staging) to be ready..."
-    sleep 5
-
-    if curl -s -f http://localhost:5003/health &> /dev/null; then
-        log_success "MCP Server (Staging) is ready"
-    else
-        log_warning "MCP Server (Staging) might not be ready yet"
-    fi
+    wait_for_health "http://localhost:5003/health" "MCP Server (Staging)"
 }
 
 start_agent_staging() {
     log_info "Starting PSAP Agent (Staging)..."
+
+    # The agent loads its MCP tools during startup and exits if MCP is not ready.
+    wait_for_health "http://localhost:5003/health" "MCP Server (Staging Agent dependency)"
 
     local cmd=(podman run -d
       --name psap-agent-staging
@@ -899,6 +946,7 @@ start_agent_staging() {
       -e "ENABLE_REFLECTION=${ENABLE_REFLECTION:-true}"
       -e "MAX_REFLECTION_ITERATIONS=${MAX_REFLECTION_ITERATIONS:-2}"
       -e "AGENT_RESPONSE_TIMEOUT_SECONDS=${AGENT_RESPONSE_TIMEOUT_SECONDS:-600}"
+      -e "AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS=${AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS:-900}"
       -e "ENABLE_MEM0=${ENABLE_MEM0:-true}"
       -e "ENABLE_SKILL_DOCUMENTS=${ENABLE_SKILL_DOCUMENTS:-true}"
       -e "SKILL_GENERATION_THRESHOLD=${SKILL_GENERATION_THRESHOLD:-5}"
@@ -921,14 +969,7 @@ start_agent_staging() {
 
     "${cmd[@]}"
 
-    log_info "Waiting for Agent (Staging) to be ready..."
-    sleep 10
-
-    if curl -s -f http://localhost:5004/health &> /dev/null; then
-        log_success "Agent (Staging) is ready"
-    else
-        log_warning "Agent (Staging) might not be ready yet"
-    fi
+    wait_for_health "http://localhost:5004/health" "Agent (Staging)" "$AGENT_STARTUP_TIMEOUT_SECONDS"
 }
 
 start_streamlit_staging() {

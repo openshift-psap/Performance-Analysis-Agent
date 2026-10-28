@@ -3,7 +3,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12,3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-FastMCP server providing 28 performance analysis tools over the Model Context Protocol. Designed for the [PSAP Agent](../psap-agent/) but compatible with any MCP client (Claude Desktop, Cursor, custom agents). Tools query vLLM benchmark data from S3, analyze PyTorch profiler traces, fetch vLLM source code and diffs from GitHub, and generate Grafana dashboard links.
+FastMCP server providing 35 performance analysis tools over the Model Context Protocol. Designed for the [PSAP Agent](../psap-agent/) but compatible with any MCP client (Claude Desktop, Cursor, custom agents). Tools query vLLM benchmark data from S3, analyze PyTorch profiler traces, fetch upstream and downstream vLLM source code and diffs from GitHub, and generate Grafana dashboard links.
 
 ## Tool Catalog
 
@@ -11,12 +11,12 @@ FastMCP server providing 28 performance analysis tools over the Model Context Pr
 |---|---|---|
 | Benchmark Data | `query_performance_metrics`, `compare_configurations`, `compare_versions_comprehensive` | Query and compare throughput, latency, TTFT, ITL across models, accelerators, versions |
 | Discovery | `get_dataset_metadata`, `discover_configurations` | Discover available models, accelerators, profiles, versions |
-| Cost & Regression | `calculate_cost_efficiency`, `analyze_regression` | Cost-per-million-tokens and version-to-version regression detection |
+| Cost & Regression | `calculate_cost_efficiency`, `calculate_energy_efficiency`, `analyze_regression` | Cost/energy-per-million-tokens and version-to-version regression detection |
 | Grafana | `query_grafana_metrics`, `compare_grafana_metrics`, `generate_grafana_url` | Query GPU/vLLM metrics, compare runs, generate dashboard URLs |
 | Dashboard | `generate_dashboard_url` | Generate links to the performance dashboard with pre-applied filters |
-| PyTorch Profiler | `analyze_pytorch_profile`, `compare_pytorch_profiles`, `analyze_performance_insights`, `list_available_profiles`, `check_profile_status` | Parse Chrome trace JSON from S3, extract kernel stats, compare across versions with functional pipeline breakdowns |
-| Kernel-to-Code | `map_kernel_to_vllm_code`, `get_kernel_categories`, `correlate_kernel_with_changes` | Map profiler kernel names to vLLM source files, correlate performance changes with code changes |
-| vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff` | Fetch vLLM source code at any version tag and line-level diffs between versions via GitHub API |
+| PyTorch Profiler | `analyze_pytorch_profile`, `compare_pytorch_profiles`, `analyze_performance_insights`, `list_available_profiles`, `check_profile_status`, `analyze_trace_structure`, `compare_trace_structures`, `get_kernel_call_stacks` | Parse and compare Chrome traces from S3, inspect trace structure, and retrieve kernel call stacks |
+| Kernel-to-Code | `map_kernel_to_vllm_code`, `get_downstream_vllm_tags`, `get_kernel_categories`, `correlate_kernel_with_changes` | Map profiler kernels to source and discover downstream refs for an RHAIIS/upstream base version |
+| vLLM Source | `fetch_vllm_source`, `get_vllm_code_diff`, `get_cross_repo_vllm_diff`, `compare_downstream_vllm_releases` | Fetch source at exact refs; compare upstream or downstream releases, including downstream commits and related upstream changes |
 | vLLM Releases | `get_vllm_release_notes`, `compare_vllm_versions`, `get_version_mappings`, `get_vllm_pull_request` | Fetch release notes, compare changelogs, resolve version mappings, inspect PRs |
 | vLLM Logs | `fetch_vllm_logs`, `compare_vllm_logs` | Fetch and compare vLLM server logs (engine config, compilation timings, memory allocation) between versions |
 | Performance Triage | `get_vllm_performance_triage_guide` | Structured 5-step vLLM performance triage workflow and diagnostic guidance |
@@ -33,7 +33,7 @@ graph LR
 
     subgraph server [PSAP MCP Server :5001]
         API[FastAPI + FastMCP]
-        Tools[28 MCP Tools]
+        Tools[35 MCP Tools]
     end
 
     subgraph data [Data Sources]
@@ -65,9 +65,13 @@ Environment variables (see `.env.example`):
 | `PYTHON_LOG_LEVEL` | `INFO` | Logging level |
 | `S3_BUCKET` | -- | S3 bucket for benchmark data and profiler traces |
 | `PROFILE_S3_PREFIX` | `pytorch-profiles/rhaiis` | S3 prefix for PyTorch profiler traces |
+| `LOG_S3_BUCKET` | `psap-dashboard-data` | S3 bucket for vLLM server logs |
+| `LOG_S3_PREFIX` | `logs` | S3 key prefix for vLLM server logs |
+| `S3_REGION` | `us-east-1` | AWS region used for S3 access |
 | `GRAFANA_URL` | -- | Grafana server URL |
 | `GRAFANA_TOKEN` | -- | Grafana API token |
-| `GITHUB_TOKEN` | -- | GitHub token (optional, for higher API rate limits) |
+| `RHAIIS_DOWNSTREAM_VLLM_REPO` | -- | Configured downstream GitHub repository in `owner/repository` format |
+| `GITHUB_TOKEN` | -- | GitHub token; required for private downstream source access (Contents: read) and useful for higher API rate limits |
 | `RHAIIS_VERSION_MAPPINGS_URL` | Upstream `master` raw JSON | GitHub raw URL for the RHAIIS-to-vLLM mappings |
 | `RHAIIS_VERSION_MAPPINGS_CACHE_TTL_SECONDS` | `300` | Seconds to cache mappings before refreshing; bundled JSON is used if GitHub is unavailable |
 | `MCP_SSL_KEYFILE` | -- | SSL private key path |
@@ -121,7 +125,7 @@ The server auto-discovers available accelerators, models, TP configs, versions, 
 
 ### vLLM Source and Releases (GitHub API)
 
-The `kernel_code_mapper_tool` and `vllm_release_notes_tool` fetch data directly from the [vllm-project/vllm](https://github.com/vllm-project/vllm) GitHub repository. An optional `GITHUB_TOKEN` increases API rate limits.
+The source tools read upstream code from [vllm-project/vllm](https://github.com/vllm-project/vllm). Set `RHAIIS_DOWNSTREAM_VLLM_REPO` to the downstream GitHub repository in `owner/repository` format. When fetching a RHAIIS server log, the MCP checks the logged runtime version against tags in that repository. An exact match identifies the downstream ref; otherwise, the RHAIIS-to-upstream mapping supplies fallback tag candidates, which must not be treated as verified. For cross-repository comparisons, use the mapped upstream base ref and exact downstream ref with `get_cross_repo_vllm_diff`. For a private repository, `GITHUB_TOKEN` must have read access (and organization approval, if required); the existing MCP deployment secret wiring uses this variable.
 
 ## Testing
 

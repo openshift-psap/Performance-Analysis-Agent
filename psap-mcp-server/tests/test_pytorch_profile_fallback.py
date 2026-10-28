@@ -355,3 +355,34 @@ async def test_single_trace_unavailability_does_not_mention_comparisons(monkeypa
     assert result["analysis_performed"] is False
     assert "cross-version" not in result["message"]
     assert "comparison" not in result["agent_guidance"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_model_match_requires_exact_key_without_guessing(monkeypatch):
+    index = {
+        **_profile_index("H200/openai--gpt-oss-120b"),
+        **_profile_index("MI355X/openai--gpt-oss-120b"),
+    }
+
+    async def discover_profiles(model=None):
+        return index
+
+    monkeypatch.setattr(
+        pytorch_profile_tool, "_discover_profiles_async", discover_profiles
+    )
+
+    analysis = await pytorch_profile_tool.analyze_pytorch_profile(
+        VALID_VERSION, model="gpt-oss-120b"
+    )
+    comparison = await pytorch_profile_tool.compare_pytorch_profiles(
+        BROKEN_VERSION, VALID_VERSION, model="gpt-oss-120b"
+    )
+
+    for result in (analysis, comparison):
+        message = result["message"]
+        assert result["status"] == "error"
+        assert "H200/openai--gpt-oss-120b" in message
+        assert "MI355X/openai--gpt-oss-120b" in message
+        assert "Choose the exact composite key" in message
+        assert "Do not select a candidate based on list order" in message
+        assert "profile-listing call is not needed" in message

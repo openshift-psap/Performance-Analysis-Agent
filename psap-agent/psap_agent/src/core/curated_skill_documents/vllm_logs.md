@@ -9,6 +9,11 @@ attribution.
 
 - For logs from one run, use `fetch_vllm_logs` with the resolved benchmark
   configuration.
+- If the downstream repository is configured, `fetch_vllm_logs` also returns
+  `downstream_tag_resolution`. Treat `exact_runtime_match=true` as confirmation
+  that the server-reported build string matched a repository tag. If it reports
+  a mapping fallback, the returned refs are candidates only—not proof of the
+  exact build tag.
 - When the user explicitly asks to compare or diff logs, call
   `compare_vllm_logs` directly. Do not substitute release notes, benchmark
   metrics, or another analysis if it fails; report the tool error instead.

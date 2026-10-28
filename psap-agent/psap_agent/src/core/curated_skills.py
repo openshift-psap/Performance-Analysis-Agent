@@ -8,6 +8,7 @@ previously successful tool sequence.
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional
 
 from langchain_core.tools import BaseTool, tool
 
@@ -64,8 +65,8 @@ _SKILLS: tuple[CuratedSkill, ...] = (
     CuratedSkill(
         name="kernel_source_analysis",
         filename="kernel_source_analysis.md",
-        description="Kernel-to-source mapping, vLLM source and diff inspection, release and dependency verification.",
-        triggers="kernel mapping, source code, code diff, release notes, dependency pin, Triton or PyTorch version",
+        description="Kernel-to-source mapping, vLLM source/diff inspection, downstream release PR analysis, and dependency verification.",
+        triggers="kernel mapping, source code, code diff, release notes, downstream RHAIIS comparison, downstream PRs, cherry-picks, dependency pin, Triton or PyTorch version",
     ),
     CuratedSkill(
         name="vllm_logs",
@@ -82,6 +83,8 @@ _SKILLS: tuple[CuratedSkill, ...] = (
 )
 
 _SKILLS_BY_NAME = {skill.name: skill for skill in _SKILLS}
+_MAX_SKILLS_PER_LOAD = 4
+_MAX_SKILL_BATCH_CHARS = 18_000
 
 
 def list_curated_skills() -> tuple[CuratedSkill, ...]:
@@ -134,14 +137,50 @@ def create_load_skill_tool() -> BaseTool:
     @tool(
         "load_skill",
         description=(
-            "Load one reviewed workflow skill before a specialized analysis. "
+            "Load reviewed workflow skills before a specialized analysis. "
             "Use it only for a multi-step workflow, not for a simple metadata "
-            "or availability question. You may load more than one skill when a "
-            "workflow spans those domains.\n\nAvailable skills:\n" + catalog
+            "or availability question. For a request spanning multiple domains, "
+            "load the relevant skills together in one call with skill_names. "
+            f"At most {_MAX_SKILLS_PER_LOAD} skills and {_MAX_SKILL_BATCH_CHARS} "
+            "combined characters may be returned per call.\n\n"
+            "Available skills:\n" + catalog
         ),
     )
-    def load_skill(skill_name: str) -> str:
-        """Load the requested allowlisted workflow skill."""
-        return load_curated_skill(skill_name)
+    def load_skill(
+        skill_name: Optional[str] = None,
+        skill_names: Optional[List[str]] = None,
+    ) -> str:
+        """Load one or more requested allowlisted workflow skills."""
+        requested: List[str] = []
+        if skill_name:
+            requested.append(skill_name)
+        if skill_names:
+            requested.extend(skill_names)
+
+        # Preserve order while treating case/whitespace variants as duplicates.
+        unique: List[str] = []
+        seen = set()
+        for name in requested:
+            normalized = name.strip().lower()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique.append(name)
+
+        if not unique:
+            return "Provide skill_name or skill_names with at least one curated skill name."
+        if len(unique) > _MAX_SKILLS_PER_LOAD:
+            return (
+                f"Load at most {_MAX_SKILLS_PER_LOAD} skills per call; "
+                "choose only the skills relevant to this request."
+            )
+
+        content = "\n\n---\n\n".join(load_curated_skill(name) for name in unique)
+        if len(content) > _MAX_SKILL_BATCH_CHARS:
+            return (
+                "The requested skill documents exceed the combined output limit. "
+                "Choose fewer, more directly relevant skills so no workflow "
+                "instructions are shortened."
+            )
+        return content
 
     return load_skill

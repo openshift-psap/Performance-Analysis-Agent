@@ -8,15 +8,21 @@ model, version, accelerator, profile, or TP choice is unresolved.
 ## Select the right data tool
 
 - Use `get_dataset_metadata` for unfiltered, overall inventory questions.
-- Use `discover_configurations` to resolve exact models, accelerators, profiles,
-  versions, or TP values that were actually tested.
+- Use `discover_configurations` to resolve only missing or ambiguous models,
+  accelerators, profiles, versions, or TP values, or when discovery itself is
+  requested. If the user supplied exact comparison inputs, use them directly;
+  discover only if a tool reports a mismatch or missing data.
 - Use `query_performance_metrics` for exact metrics, runtime arguments, UUIDs,
   and Grafana availability. It is the source for configuration parameters and
   deployment UUIDs, not just performance metrics.
 - Use `compare_configurations` for a side-by-side peak-throughput comparison.
-  Do not query two configurations separately and compare them manually.
+  Do not query two configurations separately and compare them manually. Do not
+  also call `compare_versions_comprehensive` for the same peak comparison.
 - Use `compare_versions_comprehensive` when the user asks for the geometric
-  mean across common concurrencies. Do not use `analyze_regression` as a
+  mean across common concurrencies or a comprehensive version comparison. Its
+  result includes the comparison summary; do not call another comparison tool
+  merely to repeat those same headline metrics. Query only missing, specifically
+  requested concurrency points or fields. Do not use `analyze_regression` as a
   substitute for a side-by-side version comparison; it is for trend analysis.
 - Use `analyze_regression` for a version-to-version regression investigation
   across its supported data. For throughput/latency trade-offs, report only

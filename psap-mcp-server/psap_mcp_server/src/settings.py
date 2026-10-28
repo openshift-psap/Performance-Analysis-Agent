@@ -97,6 +97,14 @@ class Settings(BaseSettings):
             "description": "Seconds to cache the GitHub version mapping before refreshing",
         },
     )
+    RHAIIS_DOWNSTREAM_VLLM_REPO: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "env": "RHAIIS_DOWNSTREAM_VLLM_REPO",
+            "description": "GitHub owner/repository for the downstream vLLM source",
+            "example": "owner/repository",
+        },
+    )
     CORS_ENABLED: bool = Field(
         default=False,
         json_schema_extra={
@@ -332,7 +340,7 @@ class Settings(BaseSettings):
         default=None,
         json_schema_extra={
             "env": "GITHUB_TOKEN",
-            "description": "GitHub personal access token for higher API rate limits (optional)",
+            "description": "GitHub token for private downstream source access and higher API rate limits",
             "example": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             "sensitive": True,
         },
@@ -401,11 +409,11 @@ class Settings(BaseSettings):
 
     # S3 configuration for vLLM log files
     LOG_S3_BUCKET: str = Field(
-        default="psap-model-furnace",
+        default="psap-dashboard-data",
         json_schema_extra={
             "env": "LOG_S3_BUCKET",
             "description": "S3 bucket where vLLM log files are stored (flat layout: logs/<uuid>.log)",
-            "example": "psap-model-furnace",
+            "example": "psap-dashboard-data",
         },
     )
     LOG_S3_PREFIX: str = Field(

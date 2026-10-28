@@ -76,7 +76,8 @@ self.mcp.tool()(your_tool_function)
 - `generate_grafana_url_tool.py` - Generate Grafana dashboard URLs for specific runs
 - `vllm_release_notes_tool.py` - Fetch vLLM release notes, compare versions, inspect PRs
 - `pytorch_profile_tool.py` - Analyze and compare PyTorch profiler traces across versions
-- `kernel_code_mapper_tool.py` - Map kernel names to vLLM source, fetch code and diffs from GitHub
+- `kernel_code_mapper_tool.py` - Map kernels to source, discover exact private downstream tags, and compare code within or across GitHub repositories
+- `downstream_vllm_comparison_tool.py` - Compare two RHAIIS downstream builds and their upstream vLLM ranges, associated PRs, and likely cherry-pick relationships
 
 ## ✅ **Best Practices**
 

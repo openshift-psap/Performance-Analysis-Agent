@@ -261,6 +261,18 @@ def _key_accelerator(composite_key: str) -> str:
     return composite_key.split("/", 1)[0] if "/" in composite_key else "unknown"
 
 
+def _ambiguous_model_match_message(
+    user_model: Optional[str], matches: List[str]
+) -> str:
+    """Ask for an explicit profile key instead of guessing among matches."""
+    return (
+        f"Multiple models match '{user_model}': {', '.join(matches)}. "
+        "Choose the exact composite key (accelerator/model) that matches the "
+        "desired profile and retry. Do not select a candidate based on list order; "
+        "a separate profile-listing call is not needed."
+    )
+
+
 def _match_all_models(user_model: Optional[str], available_models: List[str]) -> List[str]:
     """Smart model matching that handles separator variants and disambiguates similar names.
 
@@ -1703,11 +1715,14 @@ async def _resolve_profile(
         ), index
 
     if len(matches) > 1:
-        formatted = ", ".join(matches)
-        return None, None, None, None, (
-            f"Multiple models match '{model}': {formatted}. "
-            f"Please specify the accelerator, e.g. '{matches[0]}'"
-        ), index
+        return (
+            None,
+            None,
+            None,
+            None,
+            _ambiguous_model_match_message(model, matches),
+            index,
+        )
 
     model_key = matches[0]
     model_data = index[model_key]
@@ -1989,7 +2004,7 @@ async def compare_pytorch_profiles(
     TOOL_NAME=compare_pytorch_profiles
     DISPLAY_NAME=Compare PyTorch Profiles
     USECASE=Compare kernel performance between two vLLM versions to identify regressions and improvements. Use this when investigating performance changes between releases or trying to understand why one version is slower/faster.
-    INSTRUCTIONS=1. Specify two versions to compare, 2. Specify model, tp, and workload to select profiles, 3. Results show which kernels got slower (regressions) and faster (improvements). If a trace is malformed or unreadable, report partial/unavailable profiler evidence and continue with other evidence; do not infer missing deltas.
+    INSTRUCTIONS=Specify two versions and the known model, tp, and workload. This tool resolves the profile index itself, so do not call list_available_profiles first. If it returns exact ambiguous candidates, retry with the selected composite model key or other exact candidate. If a trace is malformed or unreadable, report partial/unavailable profiler evidence and continue with other evidence; do not infer missing deltas.
     INPUT_DESCRIPTION=version1 (str): First/baseline version; version2 (str): Second/comparison version; model (str, optional): Model name; tp (str, optional): Tensor parallelism e.g. "tp8"; workload (str, optional): ISL/OSL config e.g. "isl1000_osl1000"; rank (int, optional): GPU rank; aggregate_ranks (bool): Combine all ranks; top_n (int): Number of results; category (str, optional): Filter by category
     OUTPUT_DESCRIPTION=Dictionary with regressions, improvements, new/removed kernels, and summary comparison
     EXAMPLES=compare_pytorch_profiles("0.20.0", "0.21.0", model="deepseek-r1", tp="tp8", workload="isl1000_osl1000")
@@ -2037,10 +2052,7 @@ async def compare_pytorch_profiles(
         if len(matches) > 1:
             return {
                 "status": "error",
-                "message": (
-                    f"Multiple models match '{model}': {', '.join(matches)}. "
-                    f"Please specify the accelerator, e.g. '{matches[0]}'"
-                ),
+                "message": _ambiguous_model_match_message(model, matches),
             }
         model_key = matches[0]
         model_data = index[model_key]
@@ -2782,8 +2794,8 @@ async def list_available_profiles(
     
     TOOL_NAME=list_available_profiles
     DISPLAY_NAME=List Available Profiles
-    USECASE=Discover what PyTorch profile traces are available for analysis. Use this first to see which models, TP configs, versions, and workloads have profile data.
-    INSTRUCTIONS=Call without arguments for a fast model catalog. Specify a model to see its TP/version/workload details. Avoid repeated unfiltered calls. Use include_details only when full hierarchy pagination is actually needed.
+    USECASE=Discover PyTorch profile availability when the user asks what traces exist or analysis tools return candidates that do not resolve an ambiguity. Profile analysis and comparison tools resolve their own index when given exact selectors, so this listing is not a prerequisite.
+    INSTRUCTIONS=Call without arguments only when a model catalog is requested or availability is otherwise unknown. Specify a model to see its TP/version/workload details. Avoid listing before analyze_pytorch_profile or compare_pytorch_profiles when their selectors are known; those tools resolve the profile index themselves. Avoid repeated unfiltered calls. Use include_details only when full hierarchy pagination is actually needed.
     INPUT_DESCRIPTION=model (str, optional): Filter by model name; offset (int): Skip model folders in catalog mode or profile entries in detail mode; max_profiles (int): Page size, at most 50; include_details (bool): Request full hierarchy even without a model (slow on S3).
     OUTPUT_DESCRIPTION=Dictionary with available models, tp configs, versions, workloads, ranks, and file information
     EXAMPLES=list_available_profiles(), list_available_profiles(model="deepseek")
@@ -3060,8 +3072,8 @@ async def check_profile_status(
     
     TOOL_NAME=check_profile_status
     DISPLAY_NAME=Check Profile Status
-    USECASE=Quick diagnostic check to see if profile data is available. Use this first to verify setup before running expensive comparisons.
-    INSTRUCTIONS=Call without arguments for a compact readiness summary; specify a model to narrow it. Use list_available_profiles for paginated trace details.
+    USECASE=Quick diagnostic check for profile readiness when availability is uncertain. It is not a prerequisite when exact selectors are known because profile analysis tools resolve their own index.
+    INSTRUCTIONS=Call without arguments for a compact readiness summary; specify a model to narrow it. Use list_available_profiles for paginated trace details only when needed.
     INPUT_DESCRIPTION=model (str, optional): Model to check; include_workloads (bool): Include full workload/rank details when needed.
     OUTPUT_DESCRIPTION=Dictionary with profile readiness and version/workload counts for each model
     EXAMPLES=check_profile_status(), check_profile_status(model="deepseek")

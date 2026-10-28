@@ -31,6 +31,7 @@ from psap_agent.src.core.agent_utils import (
 )
 from psap_agent.src.core.evaluator import evaluate_response
 from psap_agent.src.core.reflection import run_critic
+from psap_agent.src.core.response_timeout import get_agent_response_timeout_seconds
 from psap_agent.src.core.storage import register_thread
 from psap_agent.src.core.trace_callback import (
     CompactLangfuseCallbackHandler as CallbackHandler,
@@ -286,6 +287,11 @@ class AgentManager:
                 def _make_status(step: str, detail: str = ""):
                     return {"type": "status", "content": {"step": step, "detail": detail}}
 
+                agent_response_timeout_seconds = get_agent_response_timeout_seconds(
+                    request.model or settings.GEMINI_MODEL,
+                    settings.AGENT_RESPONSE_TIMEOUT_SECONDS,
+                    settings.AGENT_ARGON_RESPONSE_TIMEOUT_SECONDS,
+                )
                 _MAX_DUPLICATE_TOOL_CALLS = 3
 
                 async def _run_agent_pass(agent_kwargs: dict, out: dict):
@@ -294,7 +300,7 @@ class AgentManager:
                     out["events"] = []
                     tool_call_counts: dict[str, int] = {}
                     try:
-                        async with asyncio.timeout(settings.AGENT_RESPONSE_TIMEOUT_SECONDS):
+                        async with asyncio.timeout(agent_response_timeout_seconds):
                             async for stream_event in persistent_agent.astream(
                                 **agent_kwargs, stream_mode=["updates", "messages", "custom"]
                             ):
@@ -331,7 +337,7 @@ class AgentManager:
                                         out["events"].append(fe)
                     except TimeoutError:
                         app_logger.warning(
-                            f"Agent pass timed out after {settings.AGENT_RESPONSE_TIMEOUT_SECONDS}s"
+                            f"Agent pass timed out after {agent_response_timeout_seconds}s"
                         )
                         out["aborted"] = True
 

@@ -26,6 +26,9 @@ class TestPrompt:
         assert "benchmark_analysis" in prompt
         assert "clarification_and_comparison" in prompt
         assert "vllm_performance_triage" in prompt
+        assert "These workflow rules apply to every model and provider" in prompt
+        assert "load_skill` call using `skill_names`" in prompt
+        assert "exact candidate from its error" in prompt
         assert "DEEP PERFORMANCE ANALYSIS WORKFLOW" not in prompt
 
     @patch("psap_agent.src.core.prompt.get_current_date")
