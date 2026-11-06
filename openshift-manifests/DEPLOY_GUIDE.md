@@ -19,7 +19,7 @@ Before starting, ensure you have:
 - [ ] Your Grafana credentials (optional)
 - [ ] All 3 custom container images built and pushed to Quay
 
-**Langfuse v3 Architecture Note**: This deployment uses Langfuse v3 which requires 5 backend components (ClickHouse, Redis, MinIO, Worker, Web) in addition to PostgreSQL. The current production snapshot uses 16Gi for ClickHouse, 20Gi for MinIO, 10Gi for PostgreSQL, and 4Gi for each production/staging Mem0/Qdrant volume. Redis has no PVC.
+**Langfuse v3 Architecture Note**: This deployment uses Langfuse v3 which requires 5 backend components (ClickHouse, Redis, MinIO, Worker, Web) in addition to PostgreSQL. The current production snapshot uses 16Gi for ClickHouse, 20Gi for MinIO, 25G for PostgreSQL, and 4Gi for each production/staging Mem0/Qdrant volume. Redis has no PVC.
 
 ---
 

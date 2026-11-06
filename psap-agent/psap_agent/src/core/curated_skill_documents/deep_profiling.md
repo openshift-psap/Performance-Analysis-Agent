@@ -87,7 +87,21 @@ state that error rather than claiming source analysis was completed.
 
 ## Final structure
 
-Present the measured benchmark change first. Then provide:
+Present the measured benchmark change first. For a structured report, start
+with a short **At a glance** section: the observed outcome, the best-supported
+explanation with its evidence level, and the next check that would confirm or
+refute it. This summary should be understandable without reading the detailed
+evidence. Use short paragraphs and do not repeat the full metric inventory in
+the summary or a later certainty recap.
+
+When a Markdown table is requested, use it for a few comparable measurements
+with workload, concurrency, baseline, current value, and delta. Label any
+aggregate and its contributing concurrency points. If the caller already
+provides a benchmark table, refer to the decisive rows rather than recreating
+the table. Keep material trace, log, and source evidence in the detailed
+sections even when the summary is brief.
+
+Then provide:
 
 1. Configuration observations from logs, if available.
 2. For each contributor: profiling evidence, relevant log evidence, source-code
