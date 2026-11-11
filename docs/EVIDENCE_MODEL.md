@@ -197,7 +197,7 @@ Registering a repeatable sequence of tool calls as an advisory recipe in Postgre
 
 $$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land \left(n_{\mathrm{calls}} \ge N_{\mathrm{skill}} \lor \left(\mathrm{recovery} \land n_{\mathrm{calls}} \ge 4\right)\right)\right]$$
 
-with $N_{\mathrm{skill}} = 5$ by default, configurable through `SKILL_GENERATION_THRESHOLD`. The second clause admits shorter recipes when the agent recovered from at least one tool error, on the view that the recovery path is itself the reusable part.
+with $N_{\mathrm{skill}} = 5$ by default, configurable through `SKILL_GENERATION_THRESHOLD`. The second clause admits shorter recipes when the agent recovered from at least one tool error, on the view that the recovery path is itself the reusable part. The paper's recipe-gate equation states the default path, $n_{\mathrm{calls}} \ge 5$; the recovery clause is part of the shipped gate.
 
 **Implementation note.** The shipped gate has two stages in two modules. The post-processing hook in `manager.py` requires `tool_efficiency` to be present and equal to 1.0 before it calls `maybe_generate_skill`; a missing score skips generation. `maybe_generate_skill` in `memory.py` then applies the complexity test above, and generation is disabled outright when `ENABLE_SKILL_DOCUMENTS` is off. The formula is the conjunction of the two checks.
 
@@ -307,7 +307,7 @@ def triage_regression(r_b: Run, r_r: Run, S_max: int = 50, T_max: float = 600.0)
     return draft
 ```
 
-**Implementation note.** The shipped agent does not implement `triage_regression` as one function. It runs a LangGraph ReAct loop under a recursion limit of 50 (`agent.py`), so the step bound is enforced by the graph rather than by a per-stage counter, and `context_budget.py` bounds payload size rather than elapsed time; there is no 600-second triage deadline in the code. The `runtime_localized` name is ours, but the payload flags it reads are returned by the tools. Deciding that a flag localizes the bottleneck to the suspected layer remains a skill-guided judgment, and Stage 5 admissibility is enforced by the workflow skill's instructions rather than by a runtime guard. The critic loop is real: `reflection.py` revises at most `MAX_REFLECTION_ITERATIONS` times (default 2) and then delivers the latest draft even if the critic never passed, recording the outstanding critique. It does not withhold the report or emit an evidence-gap notice.
+**Implementation note.** The shipped agent does not implement `triage_regression` as one function. It runs a LangGraph ReAct loop under a recursion limit of 50 (`agent.py`), so the step bound is enforced by the graph rather than by a per-stage counter, and `context_budget.py` bounds payload size rather than elapsed time. The time bound is the agent response timeout in `manager.py` (`AGENT_RESPONSE_TIMEOUT_SECONDS`, default 600 s; 900 s for the Gemini 4 Argon configuration), which wraps an entire agent pass rather than each tool call. The `runtime_localized` name is ours, but the payload flags it reads are returned by the tools. Deciding that a flag localizes the bottleneck to the suspected layer remains a skill-guided judgment, and Stage 5 admissibility is enforced by the workflow skill's instructions rather than by a runtime guard. The critic loop is real: `reflection.py` revises at most `MAX_REFLECTION_ITERATIONS` times (default 2) and then delivers the latest draft even if the critic never passed, recording the outstanding critique. It does not withhold the report or emit an evidence-gap notice.
 
 ---
 
