@@ -139,14 +139,14 @@ $$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land 
 
 ## 6. Diagnostic Acceptance Predicate
 
-A delivered diagnostic report $D = \{q_1, \dots, q_k\}$ is formally accepted ($A(D) = 1$) under external engineering evaluation if and only if its primary causal claim $q^*$ satisfies:
+A delivered diagnostic report $D = \{q_1, \dots, q_k\}$ is formally accepted ($A(D) = 1$) under external engineering evaluation if and only if its primary causal claim $q^{\ast}$ satisfies:
 
-$$A(D) = \mathbb{I}\left[\sigma(q^*) = \mathrm{conf} \land \mathrm{fix}(q^*) = \mathrm{merged} \land \mathrm{panel}(q^*) = 1\right]$$
+$$A(D) = \mathbb{I}\left[\sigma(q^{\ast}) = \mathrm{conf} \land \mathrm{fix}(q^{\ast}) = \mathrm{merged} \land \mathrm{panel}(q^{\ast}) = 1\right]$$
 
 where:
-* $\sigma(q^*) = \mathrm{conf}$: The agent's claim satisfied the trace-level confirmation gate.
-* $\mathrm{panel}(q^*) = 1$: Independent human performance engineers and maintainers external to the authors review and adjudicate the trace evidence as factually correct.
-* $\mathrm{fix}(q^*) = \mathrm{merged}$: Upstream or downstream maintainers author and merge a patch based on the diagnosis that empirically recovers benchmark throughput.
+* $\sigma(q^{\ast}) = \mathrm{conf}$: The agent's claim satisfied the trace-level confirmation gate.
+* $\mathrm{panel}(q^{\ast}) = 1$: Independent human performance engineers and maintainers external to the authors review and adjudicate the trace evidence as factually correct.
+* $\mathrm{fix}(q^{\ast}) = \mathrm{merged}$: Upstream or downstream maintainers author and merge a patch based on the diagnosis that empirically recovers benchmark throughput.
 
 ---
 
