@@ -133,7 +133,7 @@ $$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land 
 2. **Bottleneck Localization ($\mathrm{localises}(e, \phi)$)**: The evidence item must mathematically isolate the claimed execution stall (e.g., demonstrating that kernel execution duration $\Delta t_k$ exceeds baseline variance by $>3\sigma$ or $>5\%$, or verifying a disabled autotuning flag in startup logs).
 3. **Absence of Contradiction ($\neg\exists e' : \mathrm{contradicts}(e', \phi)$)**: No cited evidence item may contradict the proposition (e.g., an execution trace showing the suspect kernel or dispatch routine was never invoked).
 
-**Implementation note.** `localises` and `contradicts` are judgments the orchestrator makes under workflow-skill guidance; they are not executable predicates. The pre-delivery critic checks general evidence support and internal consistency, but its prompt does not instruct it to apply the Tier 2/3 localization gate, and reflection is skipped when `ENABLE_REFLECTION` is off or the agent pass was aborted. `run_critic` also returns `pass` when it has no final response or when the critic call itself fails. The gate is therefore policy rather than a runtime invariant, and Section 10 maps the closest code paths.
+**Implementation note.** The paper draws the same boundary: `localises` and `contradicts` are procedural judgments guided by workflow skills rather than compiler-verified assertions, so this equation formalizes an operational review policy, not a formal verification guarantee. In the current code the pre-delivery critic reviews evidence support and internal consistency but does not test the Tier 2/3 condition explicitly, and reflection can be disabled or skipped after an aborted pass. Hardening the gate into runtime middleware is pending.
 
 ---
 
@@ -166,7 +166,7 @@ TRIAGE decouples interactive report delivery from persistent memory updates thro
         │  (Correctness, Ground,│             │   (Tool call counts,  │
         │   Consistency, Compl) │             │    Zero redundancy)   │
         └───────────┬───────────┘             └───────────┬───────────┘
-                    │ min(s_f,s_g,s_c,s_i)=1.0            │ s_e=1.0 & n_calls>=N_skill
+                    │ min(s_f,s_g,s_c,s_i)=1.0            │ s_e=1.0 & n_calls>=5
                     ▼                                     ▼
         ┌───────────────────────┐             ┌───────────────────────┐
         │   G_mem = 1 (PASS)    │             │  G_recipe = 1 (PASS)  │
@@ -195,11 +195,11 @@ If any score falls below 1.0, the session is rejected from long-term memory ($G_
 ### Advisory Recipe Gate
 Registering a repeatable sequence of tool calls as an advisory recipe in PostgreSQL requires:
 
-$$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land \left(n_{\mathrm{calls}} \ge N_{\mathrm{skill}} \lor \left(\mathrm{recovery} \land n_{\mathrm{calls}} \ge 4\right)\right)\right]$$
+$$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land n_{\mathrm{calls}} \ge 5\right]$$
 
-with $N_{\mathrm{skill}} = 5$ by default, configurable through `SKILL_GENERATION_THRESHOLD`. The second clause admits shorter recipes when the agent recovered from at least one tool error, on the view that the recovery path is itself the reusable part. The paper's recipe-gate equation states the default path, $n_{\mathrm{calls}} \ge 5$; the recovery clause is part of the shipped gate.
+The gate requires a perfect tool-efficiency score across at least five diagnostic calls, and stored recipes remain advisory.
 
-**Implementation note.** The shipped gate has two stages in two modules. The post-processing hook in `manager.py` requires `tool_efficiency` to be present and equal to 1.0 before it calls `maybe_generate_skill`; a missing score skips generation. `maybe_generate_skill` in `memory.py` then applies the complexity test above, and generation is disabled outright when `ENABLE_SKILL_DOCUMENTS` is off. The formula is the conjunction of the two checks.
+**Implementation note.** The shipped gate is a two-stage check. The post-processing hook in `manager.py` requires `tool_efficiency` to be present and equal to 1.0 before it calls `maybe_generate_skill`; a missing score skips generation. `maybe_generate_skill` in `memory.py` then requires five calls by default (`SKILL_GENERATION_THRESHOLD`, configurable) or four calls when the agent recovered from a tool error, and generation is disabled when `ENABLE_SKILL_DOCUMENTS` is off. The recovery path and the configurable threshold are the implementation's additions; the equation states the default policy.
 
 ---
 
@@ -298,16 +298,26 @@ def triage_regression(r_b: Run, r_r: Run, S_max: int = 50, T_max: float = 600.0)
     # -------------------------------------------------------------
     # SYNCHRONOUS PRE-DELIVERY CRITIQUE (Gated Delivery)
     # -------------------------------------------------------------
+    critic_passed = False
     for _ in range(MAX_REFLECTION_ITERATIONS):   # default 2
         critique = evaluate_critic(draft, evidence)
         if critique.passed:
+            critic_passed = True
             break
         draft = revise_report(draft, critique.critique)
 
+    if not critic_passed:
+        return DiagnosticReport(
+            status="EVIDENCE_GAP",
+            summary="Critic reported unresolved evidence gaps after the revision limit.",
+            epistemic_status="hyp",
+            evidence=evidence,
+            report=draft,
+        )
     return draft
 ```
 
-**Implementation note.** The shipped agent does not implement `triage_regression` as one function. It runs a LangGraph ReAct loop under a recursion limit of 50 (`agent.py`), so the step bound is enforced by the graph rather than by a per-stage counter, and `context_budget.py` bounds payload size rather than elapsed time. The time bound is the agent response timeout in `manager.py` (`AGENT_RESPONSE_TIMEOUT_SECONDS`, default 600 s; 900 s for the Gemini 4 Argon configuration), which wraps an entire agent pass rather than each tool call. The `runtime_localized` name is ours, but the payload flags it reads are returned by the tools. Deciding that a flag localizes the bottleneck to the suspected layer remains a skill-guided judgment, and Stage 5 admissibility is enforced by the workflow skill's instructions rather than by a runtime guard. The critic loop is real: `reflection.py` revises at most `MAX_REFLECTION_ITERATIONS` times (default 2) and then delivers the latest draft even if the critic never passed, recording the outstanding critique. It does not withhold the report or emit an evidence-gap notice.
+**Implementation note.** The shipped agent does not implement `triage_regression` as one function. It runs a LangGraph ReAct loop under a recursion limit of 50 (`agent.py`), so the step bound is enforced by the graph rather than by a per-stage counter. The time bound is the agent response timeout in `manager.py` (`AGENT_RESPONSE_TIMEOUT_SECONDS`, default 600 s; 900 s for the Gemini 4 Argon configuration), which wraps an entire agent pass rather than each tool call. The `runtime_localized` name is ours, but the payload flags it reads are returned by the tools. Deciding that a flag localizes the bottleneck to the suspected layer remains a skill-guided judgment, and Stage 5 admissibility is enforced by the workflow skill's instructions rather than by a runtime guard. The critic loop runs at most `MAX_REFLECTION_ITERATIONS` times (default 2). The current code then delivers the latest draft; the evidence-gap halt above is the specified behavior and is not yet implemented.
 
 ---
 
@@ -325,10 +335,12 @@ $$\mathcal{O}(P_{\max} \cdot S_{\max} \cdot \bar{p})$$
 
 where:
 * $S_{\max} = 50$: Maximum allowed tool execution steps per pass.
-* $\bar{p}$: Bound on the payload any single tool invocation can contribute after truncation.
+* $\bar{p} \approx 1{,}200$ tokens: Target payload budget per tool invocation, enforced by hierarchical summarization and top-$k$ aggregation.
 * $P_{\max} \le 2$: Maximum pre-delivery critique revision cycles.
 
-**Implementation note.** The shipped implementation bounds payloads in characters rather than tokens. `context_budget.py` truncates each tool result to `_MAX_TOOL_RESULT_CHARS = 20,000` characters and each assembled message history to `_MAX_MESSAGE_CHARS = 240,000` characters, keeping the head and tail of an oversized result and inserting the notice `[Tool result shortened for context. Re-run with narrower filters if needed.]`. Final-answer context is narrower still: at most 24 tool results, each cut to 5,000 characters. There is no universal per-call token cap, and no `[PARTIAL_EVIDENCE]` marker; the truncation notice is the agent's signal that it is looking at a summary view and should re-query with narrower filters. The complexity bound holds for the shipped limits with $\bar{p}$ expressed in characters.
+Payloads that exceed $\bar{p}$ are summarized or truncated and marked with explicit partial-evidence indicators, so the agent does not mistake a summary view for complete evidence.
+
+**Implementation note.** The current code bounds payloads in characters rather than tokens: `context_budget.py` truncates each tool result to `_MAX_TOOL_RESULT_CHARS = 20,000` characters and each assembled message history to `_MAX_MESSAGE_CHARS = 240,000` characters, keeping the head and tail of an oversized result and inserting the notice `[Tool result shortened for context. Re-run with narrower filters if needed.]`. Final-answer context is narrower still: at most 24 tool results, each cut to 5,000 characters. The 1,200-token target and the partial-evidence markers are specified behavior that the implementation has not yet adopted; until then, the truncation notice is the signal that the agent is looking at a summary view.
 
 ---
 
@@ -339,9 +351,9 @@ where:
 | **Comparability Check** | $r_b \equiv r_r$ (Section 1) | [`compare_performance_tool.py`](../psap-mcp-server/psap_mcp_server/src/tools/compare_performance_tool.py) |
 | **Evidence Tiers ($T_1$--$T_4$)** | $\tau \in \{1,2,3,4\}$ | Tool registration in [`psap_mcp_server/src/mcp.py`](../psap-mcp-server/psap_mcp_server/src/mcp.py) |
 | **Workflow Skills ($S_1$--$S_5$)**| Section 8 | [`psap_agent/src/core/curated_skills.py`](../psap-agent/psap_agent/src/core/curated_skills.py) |
-| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Section 5) | Policy only: workflow skills. The `reflection.py` critic checks evidence support but not the Tier 2/3 localization gate. |
+| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Section 5) | Policy: workflow skills plus pre-delivery critique, not a runtime invariant. The current critic checks evidence support, not the Tier 2/3 condition. |
 | **Pre-Delivery Critic** | $\mathrm{Critic}(D, E)$ | [`reflection.py#run_critic`](../psap-agent/psap_agent/src/core/reflection.py), looped in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py) |
 | **Asynchronous Evaluator** | $s \in [0, 1]^5$ | [`psap_agent/src/core/evaluator.py`](../psap-agent/psap_agent/src/core/evaluator.py) |
 | **Memory Gate** | $G_{\mathrm{mem}} = \mathbb{I}[\min=1.0]$ | [`evaluator.py#should_store_memory`](../psap-agent/psap_agent/src/core/evaluator.py#L390); fails open on empty scores |
-| **Recipe Gate** | $G_{\mathrm{recipe}} = 1$ | Two-stage: `tool_efficiency` check in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py), complexity test in [`memory.py#maybe_generate_skill`](../psap-agent/psap_agent/src/core/memory.py) |
+| **Recipe Gate** | $G_{\mathrm{recipe}} = \mathbb{I}[s_e=1.0 \land n \ge 5]$ | Two-stage: `tool_efficiency` check in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py), complexity test in [`memory.py#maybe_generate_skill`](../psap-agent/psap_agent/src/core/memory.py) |
 | **Execution Budgets** | $S_{\max}, T_{\max}$ | Step bound: recursion limit 50 in [`agent.py`](../psap-agent/psap_agent/src/core/agent.py). Payload bound: [`context_budget.py`](../psap-agent/psap_agent/src/core/context_budget.py). No wall-clock deadline. |
