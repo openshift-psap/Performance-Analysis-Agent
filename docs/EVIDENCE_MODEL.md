@@ -1,8 +1,8 @@
 # Evidence Model and Diagnostic Triage Specification
 
-This document specifies the formal evidence model, evidence algebra, and diagnostic-triage procedure for **TRIAGE** (*Tool-guided Root-cause Investigation Agent with Grounded Evidence*). It is the companion specification for the ICPE 2027 Industry Track paper *TRIAGE: Evidence-Grounded Diagnosis of LLM Inference Performance Regressions*.
+This document specifies the formal evidence model, evidence algebra, and diagnostic-triage procedure for **TRIAGE** (*Tool-guided Root-cause Investigation Agent with Grounded Evidence*).
 
-The document deliberately separates two things. Sections 1--6 state the **normative policy** the workflow is designed to enforce. Implementation notes record where the shipped code is weaker than that policy, because the agent enforces most of the procedure through reviewed workflow skills and a pre-delivery critic rather than through hard-coded finite-state checks. Where policy and code differ, the note describes the behavior of `master` at the time of writing; the paper's Threats to Validity section makes the same distinction.
+The document deliberately separates two things. Sections 1--6 state the **normative policy** the workflow is designed to enforce. Implementation notes record where the shipped code is weaker than that policy, because the agent enforces most of the procedure through reviewed workflow skills and a pre-delivery critic rather than through hard-coded finite-state checks. Where policy and code differ, the note describes the behavior of `master` at the time of writing.
 
 ---
 
@@ -133,7 +133,7 @@ $$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land 
 2. **Bottleneck Localization ($\mathrm{localises}(e, \phi)$)**: The evidence item must mathematically isolate the claimed execution stall (e.g., demonstrating that kernel execution duration $\Delta t_k$ exceeds baseline variance by $>3\sigma$ or $>5\%$, or verifying a disabled autotuning flag in startup logs).
 3. **Absence of Contradiction ($\neg\exists e' : \mathrm{contradicts}(e', \phi)$)**: No cited evidence item may contradict the proposition (e.g., an execution trace showing the suspect kernel or dispatch routine was never invoked).
 
-**Implementation note.** The paper draws the same boundary: `localises` and `contradicts` are procedural judgments guided by workflow skills rather than compiler-verified assertions, so this equation formalizes an operational review policy, not a formal verification guarantee. In the current code the pre-delivery critic reviews evidence support and internal consistency but does not test the Tier 2/3 condition explicitly, and reflection can be disabled or skipped after an aborted pass. Hardening the gate into runtime middleware is pending.
+**Implementation note.** This boundary is deliberate: `localises` and `contradicts` are procedural judgments guided by workflow skills rather than compiler-verified assertions, so this equation formalizes an operational review policy, not a formal verification guarantee. In the current code the pre-delivery critic reviews evidence support and internal consistency but does not test the Tier 2/3 condition explicitly, and reflection can be disabled or skipped after an aborted pass. Hardening the gate into runtime middleware is pending.
 
 ---
 
