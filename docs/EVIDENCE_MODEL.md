@@ -1,6 +1,8 @@
 # Evidence Model and Diagnostic Triage Specification
 
-This document provides the complete formal specification, evidence algebra, and pseudocode algorithms for **TRIAGE** (*Tool-guided Root-cause Investigation Agent with Grounded Evidence*), supporting the ICPE 2027 paper submission.
+This document specifies the formal evidence model, evidence algebra, and diagnostic-triage procedure for **TRIAGE** (*Tool-guided Root-cause Investigation Agent with Grounded Evidence*). It is the companion specification for the ICPE 2027 Industry Track paper *TRIAGE: Evidence-Grounded Diagnosis of LLM Inference Performance Regressions*.
+
+The document deliberately separates two things. Sections 1--6 state the **normative policy** the workflow is designed to enforce. Implementation notes record where the shipped code is weaker than that policy, because the agent enforces most of the procedure through reviewed workflow skills and a pre-delivery critic rather than through hard-coded finite-state checks. Where policy and code differ, the note describes the behavior of `master` at the time of writing; the paper's Threats to Validity section makes the same distinction.
 
 ---
 
@@ -41,7 +43,9 @@ A diagnostic comparison between a baseline run $r_b$ and a regressed run $r_r$ i
 
 $$r_b \equiv r_r \iff \left(m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}\right)_b = \left(m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}\right)_r$$
 
-If $r_b \not\equiv r_r$, the diagnostic procedure halts immediately at Stage 1 ($S_1$: Comparison Fairness) with an explicit configuration mismatch notice. This halts execution before speculative causal hypotheses can be propagated across asymmetric benchmark points.
+If $r_b \not\equiv r_r$, the policy halts at Stage 1 ($S_1$: Comparison Fairness) with an explicit configuration mismatch notice, before speculative causal hypotheses can be propagated across asymmetric benchmark points.
+
+**Implementation note.** The shipped comparison tools enforce the run-defining dimensions directly: a profile or tensor-parallel mismatch returns `profile_mismatch` or `tp_mismatch`, and the workflow asks for a common value instead of proceeding. Concurrency coverage is handled differently. `compare_configurations` compares only up to the highest concurrency both runs share and returns a `concurrency_cap_note` when one run was benchmarked further. That is a fairness mitigation, not a hard halt, so the strict predicate above is the normative rule rather than a description of every path through the tool.
 
 ---
 
@@ -129,6 +133,8 @@ $$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land 
 2. **Bottleneck Localization ($\mathrm{localises}(e, \phi)$)**: The evidence item must mathematically isolate the claimed execution stall (e.g., demonstrating that kernel execution duration $\Delta t_k$ exceeds baseline variance by $>3\sigma$ or $>5\%$, or verifying a disabled autotuning flag in startup logs).
 3. **Absence of Contradiction ($\neg\exists e' : \mathrm{contradicts}(e', \phi)$)**: No cited evidence item may contradict the proposition (e.g., an execution trace showing the suspect kernel or dispatch routine was never invoked).
 
+**Implementation note.** `localises` and `contradicts` are judgments the orchestrator makes under workflow-skill guidance, and the pre-delivery critic reviews them; they are not executable predicates. The gate is therefore policy enforced through prompts and review, not a runtime invariant. Section 10 maps the closest code paths.
+
 ---
 
 ## 6. Diagnostic Acceptance Predicate
@@ -169,11 +175,13 @@ TRIAGE decouples interactive report delivery from persistent memory updates thro
 ```
 
 Following delivery, an out-of-band asynchronous evaluator scores the interaction across five normalized dimensions $s = (s_f, s_g, s_c, s_i, s_e) \in [0, 1]^5$:
-* $s_f$: Factual correctness
-* $s_g$: Groundedness (anti-hallucination)
-* $s_c$: Completeness
-* $s_i$: Internal quantitative consistency
-* $s_e$: Tool efficiency
+* $s_f$: Factual correctness (`correctness`)
+* $s_g$: Groundedness / anti-hallucination (`hallucination`)
+* $s_c$: Completeness (`completeness`)
+* $s_i$: Internal quantitative consistency (`internal_consistency`)
+* $s_e$: Tool efficiency (`tool_efficiency`)
+
+The parenthetical names are the criterion keys used in the shipped evaluator, given here so the code references in Section 10 resolve.
 
 ### Episodic Memory Gate
 Admitting an investigation's findings into persistent vector memory (Mem0 / Qdrant) requires a flawless score across all four correctness-related dimensions:
