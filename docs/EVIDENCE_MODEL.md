@@ -1,0 +1,316 @@
+# Evidence Model and Diagnostic Triage Specification
+
+This document provides the complete formal specification, evidence algebra, and pseudocode algorithms for **TRIAGE** (*Tool-guided Root-cause Investigation Agent with Grounded Evidence*), supporting the ICPE 2027 paper submission.
+
+---
+
+## Table of Contents
+1. [Inference Run Definition & Comparability](#1-inference-run-definition--comparability)
+2. [Performance Metrics and Deltas](#2-performance-metrics-and-deltas)
+3. [Evidence Algebra & Provenance](#3-evidence-algebra--provenance)
+4. [Diagnostic Claims & Epistemic Status](#4-diagnostic-claims--epistemic-status)
+5. [The Confirmation Gate Policy](#5-the-confirmation-gate-policy)
+6. [Diagnostic Acceptance Predicate](#6-diagnostic-acceptance-predicate)
+7. [Dual Feedback Gating Predicates](#7-dual-feedback-gating-predicates)
+8. [Evidence-Ordered Regression Triage Algorithm](#8-evidence-ordered-regression-triage-algorithm)
+9. [Context Complexity & Payload Boundedness](#9-context-complexity--payload-boundedness)
+10. [Mapping to Implementation Code](#10-mapping-to-implementation-code)
+
+---
+
+## 1. Inference Run Definition & Comparability
+
+Diagnosing LLM serving regressions requires ensuring that comparisons between baseline and candidate releases are experimentally well-posed.
+
+### Run Definition
+An LLM inference benchmark or production evaluation run is formalized as a 7-tuple:
+
+$$r = \langle m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}, v \rangle$$
+
+where:
+* $m$: Model architecture, precision, and weight configuration (e.g., `Nemotron-3-Super-120B-A12B-FP8`).
+* $h$: Hardware accelerator topology (e.g., NVIDIA H200 SXM, PCIe configuration, SM count).
+* $\pi = \langle \pi_{\mathrm{TP}}, \pi_{\mathrm{DP}}, \pi_{\mathrm{EP}} \rangle$: Parallelism configuration (Tensor, Data, Expert Parallelism).
+* $b$: Request concurrency or batch size factor.
+* $s^{\mathrm{in}}$: Input prompt sequence length (tokens).
+* $s^{\mathrm{out}}$: Output generation sequence length (tokens).
+* $v$: Serving runtime engine release version and commit hash (e.g., vLLM `v0.21.0`).
+
+### Strict Comparability Predicate
+A diagnostic comparison between a baseline run $r_b$ and a regressed run $r_r$ is valid if and only if both runs satisfy configuration parity:
+
+$$r_b \equiv r_r \iff \left(m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}\right)_b = \left(m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}\right)_r$$
+
+If $r_b \not\equiv r_r$, the diagnostic procedure halts immediately at Stage 1 ($S_1$: Comparison Fairness) with an explicit configuration mismatch notice. This halts execution before speculative causal hypotheses can be propagated across asymmetric benchmark points.
+
+---
+
+## 2. Performance Metrics and Deltas
+
+For any target performance metric $M$ (e.g., aggregate throughput, time-to-first-token [TTFT], inter-token latency [ITL]), the observed fractional delta between baseline $r_b$ and candidate $r_r$ is defined as:
+
+$$\Delta M(r_b, r_r) = \frac{M(r_r) - M(r_b)}{M(r_b)}$$
+
+### Directional Conventions
+* **Throughput Metrics** (Tokens/s, Requests/s):
+  * $\Delta M < 0$: Performance regression.
+  * $\Delta M > 0$: Performance optimization.
+* **Latency & Duration Metrics** (TTFT, ITL, Kernel execution time $t_k$, Block duration $t_{\mathrm{block}}$):
+  * $\Delta M > 0$: Latency slowdown (regression).
+  * $\Delta M < 0$: Latency speedup (optimization).
+
+*Duration slowdown* ($L_r / L_b - 1$) must not be conflated with *throughput drop* ($1 - T_r / T_b$), as non-linear continuous batching and KV-cache scheduling invalidate serial execution assumptions.
+
+### Aggregate Throughput Ratios
+Across $n$ standardized concurrency evaluation points, aggregate throughput ratios are evaluated via geometric mean:
+
+$$\rho_G = \exp\left(\frac{1}{n} \sum_{i=1}^n \ln \frac{T_{r,i}}{T_{b,i}}\right)$$
+
+---
+
+## 3. Evidence Algebra & Provenance
+
+Diagnostic tools exposed over the Model Context Protocol (MCP) produce structured evidence items belonging to an evidence set $\mathcal{E}$.
+
+### Evidence Item
+An individual evidence item is defined as:
+
+$$e = \langle \tau, \kappa, p, \pi_e \rangle$$
+
+where:
+* $\tau \in \{1, 2, 3, 4\}$ denotes the operational evidence tier:
+  * **Tier 1 ($\tau=1$)**: Benchmark Discovery and Fair Comparison (S3/CSV stores, aggregate deltas).
+  * **Tier 2 ($\tau=2$)**: Deep Profiler and Trace Analysis (PyTorch traces, CUDA kernel timings, decode block intervals).
+  * **Tier 3 ($\tau=3$)**: Cluster Telemetry, Logs, and Efficiency (DCGM utilization, SM clocks, engine startup logs).
+  * **Tier 4 ($\tau=4$)**: Cross-Repository Source Intelligence (PR diffs, commit lineage, kernel source mapping).
+* $\kappa$: Unique tool identifier (e.g., `compare_pytorch_profiles`, `inspect_engine_startup_logs`).
+* $p$: Structured JSON/dictionary output payload.
+* $\pi_e$: Provenance metadata tuple.
+
+### Provenance Tuple
+To guarantee end-to-end traceability, every evidence item carries immutable provenance:
+
+$$\pi_e = \langle \kappa, \alpha, t, \iota \rangle$$
+
+where $\alpha$ is the dictionary of invocation arguments, $t$ is the UTC timestamp of execution, and $\iota$ is the immutable upstream artifact identifier (e.g., Perfetto trace UUID, S3 object ETag, or Git commit SHA).
+
+---
+
+## 4. Diagnostic Claims & Epistemic Status
+
+A diagnostic assertion synthesized by the agent is formalized as a claim triple:
+
+$$q = \langle \phi, \sigma, E_q \rangle$$
+
+where:
+* $\phi$: The causal proposition (e.g., *"Un-tuned CUTLASS grouped-GEMM kernel template caused 63.5% throughput drop"*).
+* $\sigma$: The discrete epistemic status of the claim.
+* $E_q \subseteq \mathcal{E}$: The subset of supporting evidence items cited for proposition $\phi$.
+
+### Epistemic Status Space
+The epistemic status $\sigma$ is defined over a 3-state lattice:
+
+$$\sigma \in \{\mathrm{obs}, \mathrm{hyp}, \mathrm{conf}\}$$
+
+1. **$\mathrm{obs}$ (Observed Fact)**: A directly measured, descriptive metric delta without causal attribution (e.g., "P95 ITL increased by 19.1%").
+2. **$\mathrm{hyp}$ (Hypothesis)**: A plausible causal conjecture that has not satisfied trace verification (e.g., "Scheduler queueing contention caused degradation").
+3. **$\mathrm{conf}$ (Trace-Confirmed Mechanism)**: A causal mechanism rigorously localized to kernel execution traces or runtime configuration flags satisfying the confirmation gate.
+
+---
+
+## 5. The Confirmation Gate Policy
+
+To suppress **diff bias** (the tendency of LLMs to hallucinate root causes from prominent source diffs without checking runtime relevance), TRIAGE requires a strict confirmation gate before any diagnostic claim can transition from hypothesis ($\mathrm{hyp}$) to confirmed status ($\mathrm{conf}$):
+
+$$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land \mathrm{localises}(e, \phi) \land \neg \exists e' \in E_q : \mathrm{contradicts}(e', \phi)$$
+
+### Formal Conditions
+1. **Runtime Grounding ($\tau(e) \in \{2, 3\}$)**: At least one cited evidence item must originate from Tier 2 (execution traces) or Tier 3 (runtime telemetry and configuration). A claim supported exclusively by Tier 4 source code ($\tau=4$) cannot be confirmed, because source diffs demonstrate what changed in repository history, not what actually executed on the GPU.
+2. **Bottleneck Localization ($\mathrm{localises}(e, \phi)$)**: The evidence item must mathematically isolate the claimed execution stall (e.g., demonstrating that kernel execution duration $\Delta t_k$ exceeds baseline variance by $>3\sigma$ or $>5\%$, or verifying a disabled autotuning flag in startup logs).
+3. **Absence of Contradiction ($\neg\exists e' : \mathrm{contradicts}(e', \phi)$)**: No cited evidence item may contradict the proposition (e.g., an execution trace showing the suspect kernel or dispatch routine was never invoked).
+
+---
+
+## 6. Diagnostic Acceptance Predicate
+
+A delivered diagnostic report $D = \{q_1, \dots, q_k\}$ is formally accepted ($A(D) = 1$) under external engineering evaluation if and only if its primary causal claim $q^*$ satisfies:
+
+$$A(D) = \mathbb{I}\left[\sigma(q^*) = \mathrm{conf} \land \mathrm{fix}(q^*) = \mathrm{merged} \land \mathrm{panel}(q^*) = 1\right]$$
+
+where:
+* $\sigma(q^*) = \mathrm{conf}$: The agent's claim satisfied the trace-level confirmation gate.
+* $\mathrm{panel}(q^*) = 1$: Independent human performance engineers and maintainers external to the authors review and adjudicate the trace evidence as factually correct.
+* $\mathrm{fix}(q^*) = \mathrm{merged}$: Upstream or downstream maintainers author and merge a patch based on the diagnosis that empirically recovers benchmark throughput.
+
+---
+
+## 7. Dual Feedback Gating Predicates
+
+TRIAGE decouples interactive report delivery from persistent memory updates through dual feedback gates:
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │          DELIVERED DIAGNOSIS            │
+                  └────────────────────┬────────────────────┘
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                     ▼
+        ┌───────────────────────┐             ┌───────────────────────┐
+        │  ASYNCHRONOUS EVAL    │             │   TOOL EFFICIENCY     │
+        │  (Correctness, Ground,│             │   (Tool call counts,  │
+        │   Consistency, Compl) │             │    Zero redundancy)   │
+        └───────────┬───────────┘             └───────────┬───────────┘
+                    │ min(s_f,s_g,s_c,s_i)=1.0            │ s_e=1.0 & n_calls>=5
+                    ▼                                     ▼
+        ┌───────────────────────┐             ┌───────────────────────┐
+        │   G_mem = 1 (PASS)    │             │  G_recipe = 1 (PASS)  │
+        │  Commit to Mem0/Qdrant│             │ Save to PostgreSQL    │
+        └───────────────────────┘             └───────────────────────┘
+```
+
+Following delivery, an out-of-band asynchronous evaluator scores the interaction across five normalized dimensions $s = (s_f, s_g, s_c, s_i, s_e) \in [0, 1]^5$:
+* $s_f$: Factual correctness
+* $s_g$: Groundedness (anti-hallucination)
+* $s_c$: Completeness
+* $s_i$: Internal quantitative consistency
+* $s_e$: Tool efficiency
+
+### Episodic Memory Gate
+Admitting an investigation's findings into persistent vector memory (Mem0 / Qdrant) requires a flawless score across all four correctness-related dimensions:
+
+$$G_{\mathrm{mem}} = \mathbb{I}\left[\min\left(s_f, s_g, s_c, s_i\right) = 1.0\right]$$
+
+If any score falls below 1.0, the session is rejected from long-term memory ($G_{\mathrm{mem}} = 0$) to prevent contaminating future investigations with flawed priors.
+
+### Advisory Recipe Gate
+Registering a repeatable sequence of tool calls as an advisory recipe in PostgreSQL requires:
+
+$$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land n_{\mathrm{calls}} \ge 5\right]$$
+
+---
+
+## 8. Evidence-Ordered Regression Triage Algorithm
+
+The following algorithm formalizes the end-to-end execution of TRIAGE across the five investigative stages ($S_1 \to S_5$):
+
+```python
+"""
+Algorithm: Evidence-Ordered Regression Triage
+Implements strict five-stage progression gating source diffs behind runtime trace evidence.
+"""
+
+def triage_regression(r_b: Run, r_r: Run, S_max: int = 50, T_max: float = 600.0) -> DiagnosticReport:
+    # -------------------------------------------------------------
+    # STAGE 1: Comparison Fairness (DR1)
+    # -------------------------------------------------------------
+    is_comparable, mismatches = check_comparability(r_b, r_r)
+    if not is_comparable:
+        return DiagnosticReport(
+            status="CLARIFICATION_REQUIRED",
+            summary=f"Runs are not comparable due to parameter mismatches: {mismatches}",
+            epistemic_status="obs"
+        )
+
+    evidence_set = set()
+    step_count = 0
+    start_time = current_timestamp()
+
+    # Retrieve baseline macro throughput and latency deltas (Tier 1)
+    macro_evidence = invoke_mcp_tool("compute_benchmark_deltas", r_b=r_b, r_r=r_r)
+    evidence_set.add(macro_evidence)
+    step_count += 1
+
+    # -------------------------------------------------------------
+    # STAGE 2: Micro Kernel Profiling (Tier 2)
+    # -------------------------------------------------------------
+    kernel_evidence = invoke_mcp_tool("compare_pytorch_profiles", r_b=r_b, r_r=r_r, top_k=10)
+    evidence_set.add(kernel_evidence)
+    step_count += 1
+
+    kernel_localized = False
+    for kernel in kernel_evidence.payload.get("regressed_kernels", []):
+        if kernel.delta_duration_pct > 5.0 and kernel.p_value < 0.01:
+            kernel_localized = True
+            break
+
+    # -------------------------------------------------------------
+    # STAGE 3: Decode Block & Bubble Analysis (Tier 2)
+    # -------------------------------------------------------------
+    if not kernel_localized:
+        block_evidence = invoke_mcp_tool("analyze_decode_block_bubbles", r_b=r_b, r_r=r_r)
+        evidence_set.add(block_evidence)
+        step_count += 1
+        if block_evidence.payload.get("bubble_detected"):
+            kernel_localized = True
+
+    # -------------------------------------------------------------
+    # STAGE 4: Engine Logs & Telemetry (Tier 3)
+    # -------------------------------------------------------------
+    if not kernel_localized:
+        telemetry_evidence = invoke_mcp_tool("inspect_engine_startup_logs", r_b=r_b, r_r=r_r)
+        evidence_set.add(telemetry_evidence)
+        step_count += 1
+        if telemetry_evidence.payload.get("config_override_detected"):
+            kernel_localized = True
+
+    # -------------------------------------------------------------
+    # STAGE 5: Cross-Repository Source Inspection (Tier 4)
+    # (Admissible ONLY after Stage 2, 3, or 4 localizes a runtime bottleneck)
+    # -------------------------------------------------------------
+    has_runtime_evidence = any(e.tier in {2, 3} for e in evidence_set)
+    if has_runtime_evidence and kernel_localized:
+        source_evidence = invoke_mcp_tool("cross_repo_git_diff", r_b=r_b, r_r=r_r, focus=evidence_set)
+        evidence_set.add(source_evidence)
+        step_count += 1
+
+    # Synthesize draft diagnostic claims
+    draft_report = synthesize_diagnostic_claims(evidence_set)
+
+    # -------------------------------------------------------------
+    # SYNCHRONOUS PRE-DELIVERY CRITIQUE (Gated Delivery)
+    # -------------------------------------------------------------
+    critic_passes = 0
+    while critic_passes < 2:
+        critic_result = evaluate_critic(draft_report, evidence_set)
+        if critic_result.passed:
+            break
+        draft_report = revise_report(draft_report, critic_result.critique)
+        critic_passes += 1
+
+    return draft_report
+```
+
+---
+
+## 9. Context Complexity & Payload Boundedness
+
+A naive agent ingesting multi-gigabyte PyTorch trace JSONs or multi-thousand commit histories exhausts context windows ($\mathcal{O}(|E|)$ token consumption).
+
+TRIAGE bounds context consumption per triage pass to:
+
+$$\mathcal{O}(S_{\max} \cdot \bar{p})$$
+
+and across at most $P_{\max} \le 2$ pre-delivery critique revision cycles to:
+
+$$\mathcal{O}(P_{\max} \cdot S_{\max} \cdot \bar{p})$$
+
+where:
+* $S_{\max} = 50$: Maximum allowed tool execution steps per pass.
+* $\bar{p} \approx 1{,}200 \text{ tokens}$: Maximum payload budget enforced per tool invocation via hierarchical summarization and top-$k$ aggregations.
+* Any payload exceeding $\bar{p}$ is truncated with explicit `[PARTIAL_EVIDENCE]` markers, ensuring the agent never confuses summary views with total system silence.
+
+---
+
+## 10. Mapping to Implementation Code
+
+| Formal Concept | Mathematical Symbol | Implementation Location in Repository |
+| :--- | :--- | :--- |
+| **Comparability Check** | $r_b \equiv r_r$ (Eq. 2) | [`psap_mcp_server/src/tools/benchmark_data.py`](../psap-mcp-server/psap_mcp_server/src/tools/) |
+| **Evidence Tiers ($T_1$--$T_4$)** | $\tau \in \{1,2,3,4\}$ | [`psap_mcp_server/src/main.py`](../psap-mcp-server/psap_mcp_server/src/main.py) |
+| **Workflow Skills ($S_1$--$S_5$)**| Algorithm 1 | [`psap_agent/src/core/curated_skills.py`](../psap-agent/psap_agent/src/core/curated_skills.py) |
+| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Eq. 9) | [`psap_agent/src/core/reflection.py`](../psap-agent/psap_agent/src/core/reflection.py) |
+| **Pre-Delivery Critic** | $\mathrm{Critic}(D, E)$ | [`psap_agent/src/core/reflection.py`](../psap-agent/psap_agent/src/core/reflection.py) |
+| **Asynchronous Evaluator** | $s \in [0, 1]^5$ | [`psap_agent/src/core/evaluator.py`](../psap-agent/psap_agent/src/core/evaluator.py) |
+| **Memory Gate** | $G_{\mathrm{mem}} = \mathbb{I}[\min=1.0]$ | [`psap_agent/src/core/evaluator.py#should_store_memory`](../psap-agent/psap_agent/src/core/evaluator.py#L390) |
+| **Recipe Gate** | $G_{\mathrm{recipe}} = \mathbb{I}[s_e=1.0 \land n \ge 5]$ | [`psap_agent/src/core/storage.py`](../psap-agent/psap_agent/src/core/storage.py) |
+| **Execution Budgets** | $S_{\max}, T_{\max}$ | [`psap_agent/src/core/context_budget.py`](../psap-agent/psap_agent/src/core/context_budget.py) |
