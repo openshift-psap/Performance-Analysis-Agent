@@ -45,7 +45,7 @@ $$r_b \equiv r_r \iff \left(m, h, \pi, b, s^{\mathrm{in}}, s^{\mathrm{out}}\righ
 
 If $r_b \not\equiv r_r$, the policy halts at Stage 1 ($S_1$: Comparison Fairness) with an explicit configuration mismatch notice, before speculative causal hypotheses can be propagated across asymmetric benchmark points.
 
-**Implementation note.** The shipped comparison tools enforce the run-defining dimensions directly: a profile or tensor-parallel mismatch returns `profile_mismatch` or `tp_mismatch`, and the workflow asks for a common value instead of proceeding. Concurrency coverage is handled differently. `compare_configurations` compares only up to the highest concurrency both runs share and returns a `concurrency_cap_note` when one run was benchmarked further. That is a fairness mitigation, not a hard halt, so the strict predicate above is the normative rule rather than a description of every path through the tool.
+**Implementation note.** The shipped comparison tools enforce some run dimensions. `compare_configurations` returns `profile_mismatch` or `tp_mismatch` when known selected profiles or TP values differ, and `compare_versions_comprehensive` checks or filters TP. Neither tool enforces hardware-topology, data-parallelism, or expert-parallelism parity. Concurrency coverage is handled differently. `compare_configurations` compares only up to the highest concurrency both runs share and returns a `concurrency_cap_note` when one run was benchmarked further. That is a fairness mitigation, not a hard halt, so the strict predicate above is the normative rule rather than a description of every path through the tool.
 
 ---
 
@@ -133,7 +133,7 @@ $$\sigma(q) = \mathrm{conf} \iff \exists e \in E_q : \tau(e) \in \{2, 3\} \land 
 2. **Bottleneck Localization ($\mathrm{localises}(e, \phi)$)**: The evidence item must mathematically isolate the claimed execution stall (e.g., demonstrating that kernel execution duration $\Delta t_k$ exceeds baseline variance by $>3\sigma$ or $>5\%$, or verifying a disabled autotuning flag in startup logs).
 3. **Absence of Contradiction ($\neg\exists e' : \mathrm{contradicts}(e', \phi)$)**: No cited evidence item may contradict the proposition (e.g., an execution trace showing the suspect kernel or dispatch routine was never invoked).
 
-**Implementation note.** `localises` and `contradicts` are judgments the orchestrator makes under workflow-skill guidance, and the pre-delivery critic reviews them; they are not executable predicates. The gate is therefore policy enforced through prompts and review, not a runtime invariant. Section 10 maps the closest code paths.
+**Implementation note.** `localises` and `contradicts` are judgments the orchestrator makes under workflow-skill guidance; they are not executable predicates. The pre-delivery critic checks general evidence support and internal consistency, but its prompt does not instruct it to apply the Tier 2/3 localization gate, and reflection is skipped when `ENABLE_REFLECTION` is off or the agent pass was aborted. `run_critic` also returns `pass` when it has no final response or when the critic call itself fails. The gate is therefore policy rather than a runtime invariant, and Section 10 maps the closest code paths.
 
 ---
 
@@ -339,7 +339,7 @@ where:
 | **Comparability Check** | $r_b \equiv r_r$ (Section 1) | [`compare_performance_tool.py`](../psap-mcp-server/psap_mcp_server/src/tools/compare_performance_tool.py) |
 | **Evidence Tiers ($T_1$--$T_4$)** | $\tau \in \{1,2,3,4\}$ | Tool registration in [`psap_mcp_server/src/mcp.py`](../psap-mcp-server/psap_mcp_server/src/mcp.py) |
 | **Workflow Skills ($S_1$--$S_5$)**| Section 8 | [`psap_agent/src/core/curated_skills.py`](../psap-agent/psap_agent/src/core/curated_skills.py) |
-| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Section 5) | Policy only: workflow skills plus the `reflection.py` critic. No executable predicate. |
+| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Section 5) | Policy only: workflow skills. The `reflection.py` critic checks evidence support but not the Tier 2/3 localization gate. |
 | **Pre-Delivery Critic** | $\mathrm{Critic}(D, E)$ | [`reflection.py#run_critic`](../psap-agent/psap_agent/src/core/reflection.py), looped in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py) |
 | **Asynchronous Evaluator** | $s \in [0, 1]^5$ | [`psap_agent/src/core/evaluator.py`](../psap-agent/psap_agent/src/core/evaluator.py) |
 | **Memory Gate** | $G_{\mathrm{mem}} = \mathbb{I}[\min=1.0]$ | [`evaluator.py#should_store_memory`](../psap-agent/psap_agent/src/core/evaluator.py#L390); fails open on empty scores |
