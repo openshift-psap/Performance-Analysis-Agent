@@ -166,7 +166,7 @@ TRIAGE decouples interactive report delivery from persistent memory updates thro
         │  (Correctness, Ground,│             │   (Tool call counts,  │
         │   Consistency, Compl) │             │    Zero redundancy)   │
         └───────────┬───────────┘             └───────────┬───────────┘
-                    │ min(s_f,s_g,s_c,s_i)=1.0            │ s_e=1.0 & n_calls>=5
+                    │ min(s_f,s_g,s_c,s_i)=1.0            │ s_e=1.0 & n_calls>=N_skill
                     ▼                                     ▼
         ┌───────────────────────┐             ┌───────────────────────┐
         │   G_mem = 1 (PASS)    │             │  G_recipe = 1 (PASS)  │
@@ -190,24 +190,47 @@ $$G_{\mathrm{mem}} = \mathbb{I}\left[\min\left(s_f, s_g, s_c, s_i\right) = 1.0\r
 
 If any score falls below 1.0, the session is rejected from long-term memory ($G_{\mathrm{mem}} = 0$) to prevent contaminating future investigations with flawed priors.
 
+**Implementation note.** `should_store_memory` in `evaluator.py` applies this predicate over the four gated criteria (`hallucination`, `correctness`, `completeness`, `internal_consistency`) at a threshold of 1.0, but it checks only scores that are present and stores when the score dictionary is empty. The gate therefore fails open: an evaluator outage, or a criterion the evaluator failed to return, admits the interaction to memory instead of rejecting it. That is the opposite direction from the conservative policy above. It is what the shipped code does, not what this document recommends.
+
 ### Advisory Recipe Gate
 Registering a repeatable sequence of tool calls as an advisory recipe in PostgreSQL requires:
 
-$$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land n_{\mathrm{calls}} \ge 5\right]$$
+$$G_{\mathrm{recipe}} = \mathbb{I}\left[s_e = 1.0 \land \left(n_{\mathrm{calls}} \ge N_{\mathrm{skill}} \lor \left(\mathrm{recovery} \land n_{\mathrm{calls}} \ge 4\right)\right)\right]$$
+
+with $N_{\mathrm{skill}} = 5$ by default, configurable through `SKILL_GENERATION_THRESHOLD`. The second clause admits shorter recipes when the agent recovered from at least one tool error, on the view that the recovery path is itself the reusable part.
+
+**Implementation note.** The shipped gate has two stages in two modules. The post-processing hook in `manager.py` requires `tool_efficiency` to be present and equal to 1.0 before it calls `maybe_generate_skill`; a missing score skips generation. `maybe_generate_skill` in `memory.py` then applies the complexity test above, and generation is disabled outright when `ENABLE_SKILL_DOCUMENTS` is off. The formula is the conjunction of the two checks.
 
 ---
 
 ## 8. Evidence-Ordered Regression Triage Algorithm
 
-The following algorithm formalizes the end-to-end execution of TRIAGE across the five investigative stages ($S_1 \to S_5$):
+The following algorithm formalizes the end-to-end execution of TRIAGE across the five investigative stages ($S_1 \to S_5$). Tool names in the pseudocode are schematic; Section 10 maps each stage to the code that implements it.
 
 ```python
 """
 Algorithm: Evidence-Ordered Regression Triage
-Implements strict five-stage progression gating source diffs behind runtime trace evidence.
+Five-stage progression that gates source-diff analysis behind runtime evidence.
 """
 
 def triage_regression(r_b: Run, r_r: Run, S_max: int = 50, T_max: float = 600.0) -> DiagnosticReport:
+    start = monotonic()
+    evidence = []
+    steps = 0
+
+    def budget_remaining() -> float:
+        return T_max - (monotonic() - start)
+
+    def call_tool(name: str, **kwargs) -> Evidence:
+        nonlocal steps
+        remaining = budget_remaining()
+        if steps >= S_max or remaining <= 0:
+            raise BudgetExhausted(steps=steps, elapsed=T_max - remaining)
+        ev = invoke_mcp_tool(name, timeout=remaining, **kwargs)
+        evidence.append(ev)
+        steps += 1
+        return ev
+
     # -------------------------------------------------------------
     # STAGE 1: Comparison Fairness (DR1)
     # -------------------------------------------------------------
@@ -215,78 +238,76 @@ def triage_regression(r_b: Run, r_r: Run, S_max: int = 50, T_max: float = 600.0)
     if not is_comparable:
         return DiagnosticReport(
             status="CLARIFICATION_REQUIRED",
-            summary=f"Runs are not comparable due to parameter mismatches: {mismatches}",
-            epistemic_status="obs"
+            summary=f"Runs are not comparable: {mismatches}",
+            epistemic_status="obs",
+            evidence=evidence,
         )
 
-    evidence_set = set()
-    step_count = 0
-    start_time = current_timestamp()
+    try:
+        # Tier 1: macro throughput and latency deltas
+        call_tool("compute_benchmark_deltas", r_b=r_b, r_r=r_r)
 
-    # Retrieve baseline macro throughput and latency deltas (Tier 1)
-    macro_evidence = invoke_mcp_tool("compute_benchmark_deltas", r_b=r_b, r_r=r_r)
-    evidence_set.add(macro_evidence)
-    step_count += 1
+        # ---------------------------------------------------------
+        # STAGE 2: Micro kernel profiling (Tier 2)
+        # ---------------------------------------------------------
+        runtime_localized = False
+        kernel_ev = call_tool("compare_pytorch_profiles", r_b=r_b, r_r=r_r, top_k=10)
+        for k in kernel_ev.payload.get("regressed_kernels", []):
+            if k.delta_duration_pct > 5.0 and k.p_value < 0.01:
+                runtime_localized = True
+                break
 
-    # -------------------------------------------------------------
-    # STAGE 2: Micro Kernel Profiling (Tier 2)
-    # -------------------------------------------------------------
-    kernel_evidence = invoke_mcp_tool("compare_pytorch_profiles", r_b=r_b, r_r=r_r, top_k=10)
-    evidence_set.add(kernel_evidence)
-    step_count += 1
+        # ---------------------------------------------------------
+        # STAGE 3: Decode block and bubble analysis (Tier 2)
+        # ---------------------------------------------------------
+        if not runtime_localized:
+            block_ev = call_tool("analyze_decode_block_bubbles", r_b=r_b, r_r=r_r)
+            runtime_localized = bool(block_ev.payload.get("bubble_detected"))
 
-    kernel_localized = False
-    for kernel in kernel_evidence.payload.get("regressed_kernels", []):
-        if kernel.delta_duration_pct > 5.0 and kernel.p_value < 0.01:
-            kernel_localized = True
-            break
+        # ---------------------------------------------------------
+        # STAGE 4: Engine logs and telemetry (Tier 3)
+        # Localization signals: a configuration override in startup
+        # logs, a pinned or updated runtime dependency, or throttling.
+        # ---------------------------------------------------------
+        if not runtime_localized:
+            logs_ev = call_tool("inspect_engine_startup_logs", r_b=r_b, r_r=r_r)
+            runtime_localized = bool(
+                logs_ev.payload.get("config_override_detected")
+                or logs_ev.payload.get("pin_mismatch")
+                or logs_ev.payload.get("clock_throttling_detected")
+            )
 
-    # -------------------------------------------------------------
-    # STAGE 3: Decode Block & Bubble Analysis (Tier 2)
-    # -------------------------------------------------------------
-    if not kernel_localized:
-        block_evidence = invoke_mcp_tool("analyze_decode_block_bubbles", r_b=r_b, r_r=r_r)
-        evidence_set.add(block_evidence)
-        step_count += 1
-        if block_evidence.payload.get("bubble_detected"):
-            kernel_localized = True
+        # ---------------------------------------------------------
+        # STAGE 5: Cross-repository source inspection (Tier 4)
+        # Admissible only after a runtime observation localizes the
+        # bottleneck; otherwise the diff is not diagnostic.
+        # ---------------------------------------------------------
+        if runtime_localized:
+            call_tool("cross_repo_git_diff", r_b=r_b, r_r=r_r, focus=evidence)
 
-    # -------------------------------------------------------------
-    # STAGE 4: Engine Logs & Telemetry (Tier 3)
-    # -------------------------------------------------------------
-    if not kernel_localized:
-        telemetry_evidence = invoke_mcp_tool("inspect_engine_startup_logs", r_b=r_b, r_r=r_r)
-        evidence_set.add(telemetry_evidence)
-        step_count += 1
-        if telemetry_evidence.payload.get("config_override_detected"):
-            kernel_localized = True
+    except BudgetExhausted as exc:
+        return DiagnosticReport(
+            status="BUDGET_EXHAUSTED",
+            summary=f"Stopped after {exc.steps} steps; report covers partial evidence.",
+            epistemic_status="hyp",
+            evidence=evidence,
+        )
 
-    # -------------------------------------------------------------
-    # STAGE 5: Cross-Repository Source Inspection (Tier 4)
-    # (Admissible ONLY after Stage 2, 3, or 4 localizes a runtime bottleneck)
-    # -------------------------------------------------------------
-    has_runtime_evidence = any(e.tier in {2, 3} for e in evidence_set)
-    if has_runtime_evidence and kernel_localized:
-        source_evidence = invoke_mcp_tool("cross_repo_git_diff", r_b=r_b, r_r=r_r, focus=evidence_set)
-        evidence_set.add(source_evidence)
-        step_count += 1
-
-    # Synthesize draft diagnostic claims
-    draft_report = synthesize_diagnostic_claims(evidence_set)
+    draft = synthesize_diagnostic_claims(evidence)
 
     # -------------------------------------------------------------
     # SYNCHRONOUS PRE-DELIVERY CRITIQUE (Gated Delivery)
     # -------------------------------------------------------------
-    critic_passes = 0
-    while critic_passes < 2:
-        critic_result = evaluate_critic(draft_report, evidence_set)
-        if critic_result.passed:
+    for _ in range(MAX_REFLECTION_ITERATIONS):   # default 2
+        critique = evaluate_critic(draft, evidence)
+        if critique.passed:
             break
-        draft_report = revise_report(draft_report, critic_result.critique)
-        critic_passes += 1
+        draft = revise_report(draft, critique.critique)
 
-    return draft_report
+    return draft
 ```
+
+**Implementation note.** The shipped agent does not implement `triage_regression` as one function. It runs a LangGraph ReAct loop under a recursion limit of 50 (`agent.py`), so the step bound is enforced by the graph rather than by a per-stage counter, and `context_budget.py` bounds payload size rather than elapsed time; there is no 600-second triage deadline in the code. The `runtime_localized` name is ours, but the payload flags it reads are returned by the tools. Deciding that a flag localizes the bottleneck to the suspected layer remains a skill-guided judgment, and Stage 5 admissibility is enforced by the workflow skill's instructions rather than by a runtime guard. The critic loop is real: `reflection.py` revises at most `MAX_REFLECTION_ITERATIONS` times (default 2) and then delivers the latest draft even if the critic never passed, recording the outstanding critique. It does not withhold the report or emit an evidence-gap notice.
 
 ---
 
@@ -304,8 +325,10 @@ $$\mathcal{O}(P_{\max} \cdot S_{\max} \cdot \bar{p})$$
 
 where:
 * $S_{\max} = 50$: Maximum allowed tool execution steps per pass.
-* $\bar{p} \approx 1{,}200 \text{ tokens}$: Maximum payload budget enforced per tool invocation via hierarchical summarization and top-$k$ aggregations.
-* Any payload exceeding $\bar{p}$ is truncated with explicit `[PARTIAL_EVIDENCE]` markers, ensuring the agent never confuses summary views with total system silence.
+* $\bar{p}$: Bound on the payload any single tool invocation can contribute after truncation.
+* $P_{\max} \le 2$: Maximum pre-delivery critique revision cycles.
+
+**Implementation note.** The shipped implementation bounds payloads in characters rather than tokens. `context_budget.py` truncates each tool result to `_MAX_TOOL_RESULT_CHARS = 20,000` characters and each assembled message history to `_MAX_MESSAGE_CHARS = 240,000` characters, keeping the head and tail of an oversized result and inserting the notice `[Tool result shortened for context. Re-run with narrower filters if needed.]`. Final-answer context is narrower still: at most 24 tool results, each cut to 5,000 characters. There is no universal per-call token cap, and no `[PARTIAL_EVIDENCE]` marker; the truncation notice is the agent's signal that it is looking at a summary view and should re-query with narrower filters. The complexity bound holds for the shipped limits with $\bar{p}$ expressed in characters.
 
 ---
 
@@ -313,12 +336,12 @@ where:
 
 | Formal Concept | Mathematical Symbol | Implementation Location in Repository |
 | :--- | :--- | :--- |
-| **Comparability Check** | $r_b \equiv r_r$ (Eq. 2) | [`psap_mcp_server/src/tools/benchmark_data.py`](../psap-mcp-server/psap_mcp_server/src/tools/) |
-| **Evidence Tiers ($T_1$--$T_4$)** | $\tau \in \{1,2,3,4\}$ | [`psap_mcp_server/src/main.py`](../psap-mcp-server/psap_mcp_server/src/main.py) |
-| **Workflow Skills ($S_1$--$S_5$)**| Algorithm 1 | [`psap_agent/src/core/curated_skills.py`](../psap-agent/psap_agent/src/core/curated_skills.py) |
-| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Eq. 9) | [`psap_agent/src/core/reflection.py`](../psap-agent/psap_agent/src/core/reflection.py) |
-| **Pre-Delivery Critic** | $\mathrm{Critic}(D, E)$ | [`psap_agent/src/core/reflection.py`](../psap-agent/psap_agent/src/core/reflection.py) |
+| **Comparability Check** | $r_b \equiv r_r$ (Section 1) | [`compare_performance_tool.py`](../psap-mcp-server/psap_mcp_server/src/tools/compare_performance_tool.py) |
+| **Evidence Tiers ($T_1$--$T_4$)** | $\tau \in \{1,2,3,4\}$ | Tool registration in [`psap_mcp_server/src/mcp.py`](../psap-mcp-server/psap_mcp_server/src/mcp.py) |
+| **Workflow Skills ($S_1$--$S_5$)**| Section 8 | [`psap_agent/src/core/curated_skills.py`](../psap-agent/psap_agent/src/core/curated_skills.py) |
+| **Confirmation Gate** | $\sigma(q) = \mathrm{conf}$ (Section 5) | Policy only: workflow skills plus the `reflection.py` critic. No executable predicate. |
+| **Pre-Delivery Critic** | $\mathrm{Critic}(D, E)$ | [`reflection.py#run_critic`](../psap-agent/psap_agent/src/core/reflection.py), looped in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py) |
 | **Asynchronous Evaluator** | $s \in [0, 1]^5$ | [`psap_agent/src/core/evaluator.py`](../psap-agent/psap_agent/src/core/evaluator.py) |
-| **Memory Gate** | $G_{\mathrm{mem}} = \mathbb{I}[\min=1.0]$ | [`psap_agent/src/core/evaluator.py#should_store_memory`](../psap-agent/psap_agent/src/core/evaluator.py#L390) |
-| **Recipe Gate** | $G_{\mathrm{recipe}} = \mathbb{I}[s_e=1.0 \land n \ge 5]$ | [`psap_agent/src/core/storage.py`](../psap-agent/psap_agent/src/core/storage.py) |
-| **Execution Budgets** | $S_{\max}, T_{\max}$ | [`psap_agent/src/core/context_budget.py`](../psap-agent/psap_agent/src/core/context_budget.py) |
+| **Memory Gate** | $G_{\mathrm{mem}} = \mathbb{I}[\min=1.0]$ | [`evaluator.py#should_store_memory`](../psap-agent/psap_agent/src/core/evaluator.py#L390); fails open on empty scores |
+| **Recipe Gate** | $G_{\mathrm{recipe}} = 1$ | Two-stage: `tool_efficiency` check in [`manager.py`](../psap-agent/psap_agent/src/core/manager.py), complexity test in [`memory.py#maybe_generate_skill`](../psap-agent/psap_agent/src/core/memory.py) |
+| **Execution Budgets** | $S_{\max}, T_{\max}$ | Step bound: recursion limit 50 in [`agent.py`](../psap-agent/psap_agent/src/core/agent.py). Payload bound: [`context_budget.py`](../psap-agent/psap_agent/src/core/context_budget.py). No wall-clock deadline. |
