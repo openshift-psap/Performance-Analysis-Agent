@@ -38,6 +38,11 @@ from psap_mcp_server.src.tools.generate_grafana_url_tool import (
 from psap_mcp_server.src.tools.grafana_metrics_tool import (
     query_grafana_metrics,
 )
+from psap_mcp_server.src.tools.nysy_profile_tool import (
+    analyze_nysy_profile,
+    compare_nysy_profiles,
+    analyze_nysy_performance_insights,
+)
 from psap_mcp_server.src.tools.kernel_code_mapper_tool import (
     correlate_kernel_with_changes,
     fetch_vllm_source,
@@ -178,6 +183,11 @@ class PSAPMCPServer:
         # Register trace structure analysis tools (block segmentation, median block, streams, overhead)
         self.mcp.tool()(analyze_trace_structure)
         self.mcp.tool()(compare_trace_structures)
+        # Register NYSY profile analysis tools (with feature flag)
+        if getattr(settings, "ENABLE_NYSY_PROFILER", True):
+            self.mcp.tool()(analyze_nysy_profile)
+            self.mcp.tool()(compare_nysy_profiles)
+            self.mcp.tool()(analyze_nysy_performance_insights)
         # Register kernel-to-code mapping tools
         self.mcp.tool()(map_kernel_to_vllm_code)
         self.mcp.tool()(get_downstream_vllm_tags)
