@@ -195,7 +195,8 @@ def test_s3_discovery_only_descends_into_matching_model(monkeypatch):
         "profiles/H200/example-unrelated-model/tp2/"
         "vLLM-0.20.0/isl1000_osl1000/trace_rank0.json"
     )
-    objects = [profile_key, unrelated_key]
+    second_capture = profile_key.replace("trace_rank0.json", "trace_rank0_pid200.json")
+    objects = [profile_key, second_capture, unrelated_key]
     directory_prefixes = set()
     for key in objects:
         parts = key.split("/")
@@ -231,5 +232,8 @@ def test_s3_discovery_only_descends_into_matching_model(monkeypatch):
 
     assert index is not None
     assert list(index) == ["H200/google--gemma-4-31B-it-FP8-block"]
+    ranks = index["H200/google--gemma-4-31B-it-FP8-block"]["tp2"]["vLLM-0.20.0"]["isl1000_osl1000"]
+    assert set(ranks) == {0}
+    assert {entry["key"] for entry in ranks[0]} == {profile_key, second_capture}
     assert any("gemma-4-31B-it-FP8-block/tp2/" in p for p in requested_prefixes)
     assert not any("example-unrelated-model/tp2/" in p for p in requested_prefixes)

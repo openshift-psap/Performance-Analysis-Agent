@@ -52,6 +52,7 @@ class TestCuratedSkills:
                 "skill_names": [
                     "deep_profiling",
                     "pytorch_profiles",
+                    "benchmark_analysis",
                     "vllm_logs",
                 ]
             }
@@ -59,6 +60,7 @@ class TestCuratedSkills:
 
         assert "Loaded curated skill: deep_profiling" in content
         assert "Loaded curated skill: pytorch_profiles" in content
+        assert "Loaded curated skill: benchmark_analysis" in content
         assert "Loaded curated skill: vllm_logs" in content
 
     def test_tool_deduplicates_skills_and_bounds_batch_size(self):

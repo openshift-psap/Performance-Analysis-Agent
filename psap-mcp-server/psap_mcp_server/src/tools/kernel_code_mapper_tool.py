@@ -767,6 +767,7 @@ async def map_kernel_to_vllm_code(
                     _extract_bare_version,
                     _load_or_extract_stats,
                     _resolve_profile,
+                    _select_profile_traces,
                 )
                 profile_version = version.split("+", 1)[0]
                 bare_version = f"vLLM-{_extract_bare_version(profile_version)}"
@@ -774,10 +775,10 @@ async def map_kernel_to_vllm_code(
                     profile_model, profile_tp, bare_version, profile_workload
                 )
                 if not error and model_key and matched_tp and matched_version and matched_workload:
-                    stats = _load_or_extract_stats(
-                        model_key, matched_tp, matched_version, matched_workload, 0,
-                        index=index,
+                    selected = _select_profile_traces(
+                        index, model_key, matched_tp, matched_version, matched_workload, [0]
                     )
+                    stats = await asyncio.to_thread(_load_or_extract_stats, selected.get(0))
                     if stats and kernel_name in stats:
                         stacks = stats[kernel_name].get("call_stacks", {})
                         if stacks:

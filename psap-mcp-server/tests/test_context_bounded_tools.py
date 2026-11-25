@@ -49,7 +49,7 @@ async def test_performance_query_pages_and_trims_runtime_args(monkeypatch):
 @pytest.mark.asyncio
 async def test_profile_listing_pages_workloads(monkeypatch):
     workloads = {
-        f"isl{i}_osl{i}": {0: {"source": "s3", "filename": f"{i}.json", "size_bytes": 100}}
+        f"isl{i}_osl{i}": {0: [{"source": "s3", "filename": f"{i}.json", "size_bytes": 100}]}
         for i in range(65)
     }
     index = {"H200/example-model": {"tp1": {"vLLM-0.26.0": workloads}}}

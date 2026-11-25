@@ -16,12 +16,10 @@ descriptions, or general knowledge. Load the relevant workflow documents in one
    accelerator, profile, TP, workload, and comparable versions. Use the
    comparison tool that directly answers the requested headline; do not repeat
    it with a second comparison tool.
-2. When exact profile coordinates are known, call `compare_pytorch_profiles`
-   directly. It resolves the profile index itself, so do not first call
-   `list_available_profiles`. If model/TP/workload is ambiguous, use the exact
-   candidates returned by the comparison error; list profiles only if those
-   candidates do not resolve the ambiguity or availability itself is in
-   question.
+2. Use `compare_pytorch_profiles` with the exact selectors. Follow the
+   `pytorch_profiles` pairing workflow to link both traces to each benchmark
+   row they are used to explain. With missing linkage, report trace
+   observations separately from benchmark findings.
 3. Once the benchmark selectors are known, `compare_vllm_logs` can run
    independently of profile comparison; it resolves matching run UUIDs itself.
    Request both comparisons together when parallel tool calls are supported.
@@ -47,9 +45,9 @@ as observations, clearly state the limitation, and recommend collecting traces
 or running a controlled experiment. Do not use release notes as a substitute.
 
 If benchmark throughput changes materially but total GPU kernel time changes
-little, report the single-request profile paradox rather than inflating a small
-kernel delta. Inspect `compare_trace_structures` for inter-block gaps,
-intra-block idle time, stream overlap, batching, or scheduling effects. State
+little in a verified single-request comparison, describe the single-request
+profile paradox within that workload and capture scope. Use
+`compare_trace_structures` to check idle time, stream overlap, and scheduling. State
 what profiling measures, what overhead evidence shows, what source evidence
 suggests, and what remains unresolved.
 

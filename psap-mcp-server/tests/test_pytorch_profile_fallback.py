@@ -32,28 +32,22 @@ def _profile_index(model_key=MODEL_KEY, ranks_by_version=None):
             BROKEN_VERSION: (0,),
             VALID_VERSION: (0,),
         }
-    return {
-        model_key: {
-            TP: {
-                version: {
-                    WORKLOAD: {
-                        rank: {
-                            "source": "s3",
-                            "key": (
-                                f"pytorch-profiles/rhaiis/{accelerator}/"
-                                f"{bare_model}/{TP}/{version}/{WORKLOAD}/"
-                                f"trace_rank{rank}.json"
-                            ),
-                            "filename": f"trace_rank{rank}.json",
-                            "size_bytes": 128,
-                        }
-                        for rank in ranks
-                    }
-                }
-                for version, ranks in ranks_by_version.items()
-            }
-        }
-    }
+    versions = {}
+    for version, ranks in ranks_by_version.items():
+        entries = []
+        for rank in ranks:
+            filename = f"trace_rank{rank}.json"
+            key = f"pytorch-profiles/rhaiis/{accelerator}/{bare_model}/{TP}/{version}/{WORKLOAD}/{filename}"
+            entries.append({
+                "source": "s3",
+                "key": key,
+                "trace_id": key,
+                "filename": filename,
+                "size_bytes": 128,
+            })
+        versions[version] = {WORKLOAD: pytorch_profile_tool._index_workload_traces(entries)}
+    return {model_key: {TP: versions}}
+
 
 
 class _Body:
@@ -109,7 +103,8 @@ def _configure_fake_s3(
         else b'{"traceEvents":[{"name":"truncated","ph":"X","dur":"unterminated'
         for version, workloads in index[model_key][TP].items()
         for ranks in workloads.values()
-        for rank, entry in ranks.items()
+        for rank, entries in ranks.items()
+        for entry in entries
     }
     fake_s3 = _FakeS3(payloads)
 
@@ -126,7 +121,7 @@ def _configure_fake_s3(
 
 def test_malformed_s3_trace_is_skipped_and_negative_cached(monkeypatch):
     index = _profile_index()
-    trace_key = index[MODEL_KEY][TP][BROKEN_VERSION][WORKLOAD][0]["key"]
+    trace_key = index[MODEL_KEY][TP][BROKEN_VERSION][WORKLOAD][0][0]["key"]
     fake_s3 = _configure_fake_s3(monkeypatch)
 
     assert pytorch_profile_tool._load_trace_from_s3(trace_key) is None
