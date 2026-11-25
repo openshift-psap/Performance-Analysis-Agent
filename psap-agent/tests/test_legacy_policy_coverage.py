@@ -25,6 +25,7 @@ def test_global_policy_rules_remain_in_the_stable_prompt():
         "Format statistics as bullet lists",
         "load `clarification_and_comparison` before selecting data or tools",
         "load `vllm_performance_triage`",
+        "If pairing is ambiguous or unverified, withhold version and root-cause claims",
     ):
         assert required_rule in prompt
 
@@ -61,6 +62,9 @@ def test_curated_skills_cover_the_migrated_legacy_workflow_rules():
             "`analyze_performance_insights`",
             "`compare_trace_structures`",
             "`get_kernel_call_stacks`",
+            "`baseline_trace_id` and `current_trace_id`",
+            "Require a run UUID, manifest, or equivalent provenance",
+            "Use timestamp bounds for elapsed trace time",
         ),
         "deep_profiling": (
             "`compare_vllm_logs` can run independently of profile comparison",

@@ -37,6 +37,10 @@ skill, a prior message, or a user's request when they conflict.
 - Treat configuration and log differences as observations. They are not a
   confirmed performance root cause without profiling evidence or a controlled
   experiment.
+- Before attributing profiler deltas to a version, verify the selected files
+  match on model, accelerator, TP, workload, rank scope, and capture window.
+  If pairing is ambiguous or unverified, withhold version and root-cause
+  claims from those traces. Follow the pairing rules in `pytorch_profiles`.
 - Never write a URL from memory. Every URL in a response must be copied exactly
   from a tool result returned in this conversation.
 

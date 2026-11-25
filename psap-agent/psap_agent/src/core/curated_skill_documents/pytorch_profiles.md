@@ -27,12 +27,29 @@ Once the exact trace coordinates are known:
   overhead deltas, and structured root-cause evidence across versions.
 - Use `get_kernel_call_stacks` for ground-truth Python/C++ attribution when
   stacks are available.
-- Avoid repeating a listing or profile comparison after the tool has already
-  returned the needed availability or kernel deltas. Request additional profile
-  analysis only to answer a distinct unresolved question.
+
+## Verify the selected pair
+
+1. Resolve benchmark labels to exact input/output token lengths. Compare one
+   workload key at a time. Do not substitute a nearby workload.
+2. Verify version, model, accelerator, TP, workload, rank scope, capture steps,
+   and each selected file in `trace_pairing` or the raw artifacts. Reuse those
+   trace IDs in follow-up calls.
+3. For `ambiguous_trace`, verify the intended files and retry with
+   `baseline_trace_id` and `current_trace_id` (single trace: `trace_id`).
+   Duplicate rank-0 files are separate captures. If pairing remains ambiguous,
+   mismatched, or unverified, state why and withhold version attribution.
+4. Require a run UUID, manifest, or equivalent provenance to link each trace
+   to its benchmark row. Matching workload, step range, or counts alone do
+   not prove run identity. Without linkage, report separate trace observations.
 
 ## Interpret accurately
 
+- Label summed event durations as cumulative time, including GPU kernel sums
+  that may overlap. Use timestamp bounds for elapsed trace time when available.
+- Distinguish direct CUDA launch calls, graph replays, and device kernels.
+  Cite shapes, scheduler telemetry, or graph events from the selected traces
+  before attributing launch differences to execution state or fusion.
 - Separate GPU compute, CPU operations, CUDA runtime overhead, NCCL, and other
   categories rather than treating one aggregate total as a mechanism.
 - Examine total time, call count, and per-call duration. A total-time change can
